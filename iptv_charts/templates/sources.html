@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+{% block title %}Playlists · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Playlists</h1>
+    <p class="subtitle">
+      {% if sources %}
+        {{ sources|length }} configured
+      {% else %}
+        Nothing configured yet
+      {% endif %}
+    </p>
+  </div>
+
+  <div class="page-actions">
+    {% if sources %}
+      <button class="btn btn-ghost" id="sync-all-btn">Update all</button>
+    {% endif %}
+    <button class="btn btn-primary" id="add-open-btn">Add playlist</button>
+  </div>
+</div>
+
+{# Overall progress for an "Update all" run. Hidden unless one is active. #}
+<div class="batch-progress" id="batch-progress" hidden>
+  <div class="batch-head">
+    <span id="batch-label">Updating…</span>
+    <button class="btn btn-sm btn-ghost" id="cancel-all-btn">Cancel</button>
+  </div>
+  <div class="progress"><div class="progress-bar" id="batch-bar"></div></div>
+</div>
+
+{% if not sources %}
+  <div class="empty">
+    <div class="empty-art" aria-hidden="true"></div>
+    <h2>No playlists yet</h2>
+    <p>
+      Add a playlist to get started — either a direct <strong>M3U URL</strong>
+      or your <strong>Xtream Codes</strong> username and password.
+    </p>
+    <p class="empty-note">
+      Everything is stored locally in a SQLite database. Your credentials
+      never leave this machine and are only ever sent to the provider you
+      configure.
+    </p>
+    <button class="btn btn-primary" id="add-open-btn-empty">Add playlist</button>
+  </div>
+{% else %}
+  <div class="card-grid" id="source-grid">
+    {% for source in sources %}
+      {% set expiry = format_expiry(source.exp_date, source.exp_unknown) %}
+      {% set stale = source.last_synced_at
+                     and (now - source.last_synced_at) > staleness_hours * 3600 %}
+      {% set job = sync_state.jobs.get(source.id) %}
+      <article class="card" data-source-id="{{ source.id }}"
+               data-source-name="{{ source.name }}">
+        <header class="card-head">
+          <div>
+            <h3 class="card-title">{{ source.name }}</h3>
+            <span class="tag">{{ source.kind }}</span>
+          </div>
+          {% if source.account_status %}
+            <span class="pill {{ 'pill-ok' if source.account_status|lower == 'active' else 'pill-warn' }}">
+              {{ source.account_status }}
+            </span>
+          {% endif %}
+        </header>
+
+        {% if source.is_trial %}
+          <p class="note note-warn">Trial account</p>
+        {% endif %}
+
+        <dl class="stat-row">
+          <div><dt>Live</dt><dd data-count="live">{{ '{:,}'.format(source.live_count) }}</dd></div>
+          <div><dt>VOD</dt><dd data-count="vod">{{ '{:,}'.format(source.vod_count) }}</dd></div>
+          <div><dt>Series</dt><dd data-count="series">{{ '{:,}'.format(source.series_count) }}</dd></div>
+          <div><dt>Categories</dt><dd data-count="categories">{{ '{:,}'.format(source.category_count) }}</dd></div>
+        </dl>
+
+        <dl class="meta-list">
+          <div>
+            <dt>Expires</dt>
+            <dd>
+              {% if expiry.known %}
+                {{ expiry.label }}
+                {% if expiry.expired %}
+                  <span class="pill pill-bad">expired</span>
+                {% elif expiry.days is not none and expiry.days <= 7 %}
+                  <span class="pill pill-warn">{{ expiry.days }}d left</span>
+                {% endif %}
+              {% else %}
+                <span class="muted">{{ expiry.label }}</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt>Connections</dt>
+            <dd>
+              {% if source.max_connections %}
+                {{ source.active_connections or 0 }} / {{ source.max_connections }}
+              {% else %}
+                <span class="muted">unknown</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt>Last updated</dt>
+            <dd class="js-last-updated">{{ format_age(source.last_synced_at) }}</dd>
+          </div>
+        </dl>
+
+        {# Live progress target. JS fills this during a sync. #}
+        <div class="sync-slot" data-source-id="{{ source.id }}"
+             {% if not job or not job.active %}hidden{% endif %}>
+          <div class="sync-line">
+            <span class="sync-phase js-sync-phase">{{ job.detail or job.message if job else '' }}</span>
+            <span class="sync-count js-sync-count"></span>
+          </div>
+          <div class="progress {% if job and job.fraction is none %}progress-indeterminate{% endif %}">
+            <div class="progress-bar js-sync-bar"
+                 style="width: {{ ((job.fraction or 0) * 100) | round(1) if job else 0 }}%"></div>
+          </div>
+        </div>
+
+        <p class="note note-warn js-stale" {% if not stale %}hidden{% endif %}>
+          Updated {{ format_age(source.last_synced_at) }} — refresh to pick up changes?
+        </p>
+
+        <p class="note note-bad js-error" hidden></p>
+
+        <footer class="card-actions">
+          <button class="btn btn-ghost js-sync" data-source-id="{{ source.id }}"
+                  {% if job and job.active %}disabled{% endif %}>Update</button>
+          <button class="btn btn-ghost js-cancel" data-source-id="{{ source.id }}"
+                  {% if not job or not job.active %}hidden{% endif %}>Cancel</button>
+          <a class="btn btn-ghost js-browse" href="{{ url_for('browse', source_id=source.id) }}"
+             {% if not (source.live_count + source.vod_count + source.series_count) %}
+               aria-disabled="true" title="Nothing imported yet — run an update first"
+             {% else %}
+               title="Search and browse this playlist"
+             {% endif %}>Browse</a>
+          <button class="btn btn-ghost btn-danger js-delete" data-source-id="{{ source.id }}"
+                  data-source-name="{{ source.name }}" title="Remove this playlist">Remove</button>
+        </footer>
+      </article>
+    {% endfor %}
+  </div>
+{% endif %}
+
+{# ------------------------------------------------------------------ dialog #}
+<dialog id="add-dialog" class="dialog">
+  <form id="add-form" class="dialog-form" autocomplete="off">
+    <header class="dialog-head">
+      <h2>Add playlist</h2>
+      <button type="button" class="icon-btn" id="add-close-btn" aria-label="Close">×</button>
+    </header>
+
+    <div class="tabs" role="tablist">
+      <button type="button" class="tab is-active" role="tab" data-kind="m3u">M3U URL</button>
+      <button type="button" class="tab" role="tab" data-kind="xtream">Xtream Codes</button>
+    </div>
+
+    <div class="dialog-body">
+      <div class="field">
+        <label for="field-name">Name <span class="muted">(optional)</span></label>
+        <input id="field-name" name="name" type="text" placeholder="My provider">
+      </div>
+
+      <div data-panel="m3u">
+        <div class="field">
+          <label for="field-m3u">Playlist URL</label>
+          <input id="field-m3u" name="m3u_url" type="text" spellcheck="false"
+                 placeholder="http://example.com:8080/get.php?username=…&amp;type=m3u_plus">
+        </div>
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <div class="field">
+            <label for="field-ua">User-Agent</label>
+            <input id="field-ua" name="user_agent" type="text" spellcheck="false"
+                   placeholder="only if your provider requires one">
+          </div>
+          <div class="field">
+            <label for="field-ref">Referrer</label>
+            <input id="field-ref" name="referrer" type="text" spellcheck="false"
+                   placeholder="only if your provider requires one">
+          </div>
+        </details>
+      </div>
+
+      <div data-panel="xtream" hidden>
+        <div class="field">
+          <label for="field-base">Server URL</label>
+          <input id="field-base" name="base_url" type="text" spellcheck="false"
+                 placeholder="http://example.com:8080">
+          <p class="hint">Just the address and port — not the <code>player_api.php</code> part.</p>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="field-user">Username</label>
+            <input id="field-user" name="username" type="text" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="field-pass">Password</label>
+            <input id="field-pass" name="password" type="password">
+          </div>
+        </div>
+      </div>
+
+      <div id="probe-result" class="probe-result" hidden></div>
+    </div>
+
+    <footer class="dialog-foot">
+      <button type="button" class="btn btn-ghost" id="probe-btn">Test connection</button>
+      <div class="spacer"></div>
+      <button type="button" class="btn btn-ghost" id="add-cancel-btn">Cancel</button>
+      <button type="submit" class="btn btn-primary" id="add-submit-btn">
+        Add &amp; sync
+      </button>
+    </footer>
+  </form>
+</dialog>
+{% endblock %}
+
+{% block footer_extra %}
+  <span class="dot" aria-hidden="true">·</span>
+  <span id="global-sync-status" class="muted"></span>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+{% endblock %}

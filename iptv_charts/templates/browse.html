@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}{{ source.name }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <a class="crumb" href="{{ url_for('sources_list') }}">← Playlists</a>
+    <h1>{{ source.name }}</h1>
+    <p class="subtitle" id="result-summary">Loading…</p>
+  </div>
+  <div class="page-actions">
+    <button class="btn btn-ghost" id="refresh-btn" title="Update this playlist">Update</button>
+  </div>
+</div>
+
+<div class="browse-bar">
+  <div class="search-wrap">
+    <input type="search" id="search" placeholder="Search channels, movies, series…"
+           autocomplete="off" spellcheck="false" aria-label="Search">
+    <button type="button" class="search-clear" id="search-clear" hidden
+            aria-label="Clear search">×</button>
+  </div>
+
+  <div class="browse-filters">
+    <div class="tabs tabs-inline" id="kind-tabs" role="tablist">
+      <button type="button" class="tab is-active" data-kind="" role="tab">
+        All <span class="tab-count">{{ '{:,}'.format(counts.all) }}</span>
+      </button>
+      {% for kind, label in [('live','Live'), ('vod','VOD'), ('series','Series')] %}
+        {% if counts.get(kind) %}
+          <button type="button" class="tab" data-kind="{{ kind }}" role="tab">
+            {{ label }} <span class="tab-count">{{ '{:,}'.format(counts[kind]) }}</span>
+          </button>
+        {% endif %}
+      {% endfor %}
+    </div>
+
+    <label class="select-wrap">
+      <span class="sr-only">Category</span>
+      <select id="category">
+        <option value="">All categories</option>
+      </select>
+    </label>
+
+    <label class="select-wrap">
+      <span class="sr-only">Sort by</span>
+      <select id="sort">
+        <option value="name">Name</option>
+        <option value="newest">Recently added</option>
+        <option value="rating">Rating</option>
+      </select>
+    </label>
+  </div>
+</div>
+
+<div id="results" class="poster-grid" aria-live="polite"></div>
+
+<div class="browse-foot">
+  <p class="muted" id="progress-note"></p>
+  <button class="btn btn-ghost" id="more-btn" hidden>Load more</button>
+</div>
+
+{# The player. One dialog serves every item, filled in by playback.js, so
+   nothing here is per-item: the episodes section, the poster and the detail
+   panel all start hidden and are revealed per what was opened. #}
+<dialog id="player-dialog" class="dialog dialog-player"
+        aria-labelledby="player-title" tabindex="-1">
+  <div class="dialog-column">
+    <header class="dialog-head">
+      <h2 id="player-title"></h2>
+      <button type="button" class="icon-btn" id="player-close-btn"
+              aria-label="Close">×</button>
+    </header>
+
+    <div class="dialog-body">
+      {# A plain video element: the browser plays what it can play and reports
+         what it cannot, in its own controls. hls.js is attached by playback.js
+         for HLS, which no browser outside Safari decodes natively. #}
+      <div class="player-frame">
+        <video id="video" controls playsinline preload="metadata"></video>
+      </div>
+
+      <div class="watch-layout">
+        <div class="watch-main">
+          <section class="episodes" id="episodes" hidden>
+            <h2>Episodes</h2>
+            <div id="episode-list" class="episode-list"></div>
+          </section>
+
+          <section class="detail-panel" id="player-about" hidden>
+            <h2>About</h2>
+            <p class="plot" id="player-plot" hidden></p>
+            <p class="detail-line" data-line="cast" hidden>
+              <strong>Cast:</strong> <span></span>
+            </p>
+            <p class="detail-line" data-line="director" hidden>
+              <strong>Director:</strong> <span></span>
+            </p>
+            <p class="detail-line" data-line="released" hidden>
+              <strong>Released:</strong> <span></span>
+            </p>
+          </section>
+        </div>
+
+        <aside class="watch-side">
+          <img class="watch-poster" id="player-poster" alt="" hidden>
+          <dl class="meta-list" id="player-meta"></dl>
+          <p class="note" id="stream-note"></p>
+        </aside>
+      </div>
+    </div>
+
+    <footer class="dialog-foot">
+      <button class="btn btn-sm" id="copy-btn">⧉ Copy link</button>
+      {% if external_player %}
+        {# Named after what it does, not after whichever program happens to be
+           configured; the tooltip carries the specific name. #}
+        <button class="btn btn-sm" id="external-btn"
+                title="Play in {{ external_player.label }}">⤴ External player</button>
+      {% endif %}
+      <div class="spacer"></div>
+      <button class="btn" id="player-done-btn">Close</button>
+    </footer>
+  </div>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Handed to the page rather than re-fetched, so the first render is correct
+  // without an extra round trip. These must come before playback.js: it reads
+  // EXTERNAL_PLAYER_AVAILABLE while wiring the player up.
+  window.SOURCE_ID = {{ source.id }};
+  window.SOURCE_NAME = {{ source.name | tojson }};
+  window.EXTERNAL_PLAYER_AVAILABLE = {{ 'true' if external_player else 'false' }};
+  window.EXTERNAL_PLAYER_LABEL = {{ (external_player.label if external_player else '') | tojson }};
+</script>
+<script src="{{ url_for('static', filename='vendor/hls.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/playback.js') }}"></script>
+<script src="{{ url_for('static', filename='js/browse.js') }}"></script>
+{% endblock %}

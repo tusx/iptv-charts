@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="{{ url_for('sources_list') }}">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">{{ app_name }}</span>
+    </a>
+
+    <nav class="topbar-nav">
+      {% block nav %}
+        <a href="{{ url_for('settings') }}"
+           {% if request.endpoint == 'settings' %}class="active"{% endif %}>Settings</a>
+      {% endblock %}
+    </nav>
+
+    <div class="topbar-meta">
+      {# What the "External player" button will use. Change it in Settings. #}
+      {% if external_player %}
+        <span class="pill pill-ok" title="Streams are handed to {{ external_player.label }}">
+          {{ external_player.label }}
+        </span>
+      {% else %}
+        <span class="pill pill-muted" title="No external player configured — see Settings">
+          browser only
+        </span>
+      {% endif %}
+    </div>
+  </header>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flashes">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <span>{{ app_name }} {{ app_version }}</span>
+    <span class="dot" aria-hidden="true">·</span>
+    <span>local only — nothing leaves this machine</span>
+    {% block footer_extra %}{% endblock %}
+  </footer>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

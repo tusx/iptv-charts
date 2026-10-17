@@ -1,0 +1,12 @@
+# Runtime dependencies for IPTV Charts.
+#
+# Deliberately small. Anything added here also has to be vendored into the
+# Flatpak build (see flatpak/), so keep the list tight.
+#
+# Pinned as ranges for the venv; the Flatpak build pins exact versions with
+# SHA256s via flatpak-pip-generator.
+
+Flask>=3.1,<4
+requests>=2.32,<3
+ijson>=3.3,<4
+waitress>=3.0,<4

@@ -1,0 +1,17 @@
+# Keep the build context small and free of machine-specific state.
+.venv/
+.git/
+.gitignore
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Tests and tooling are not shipped in the image.
+tests/
+scripts/
+
+# Docs and local data
+*.md
+*.db
+*.db-wal
+*.db-shm

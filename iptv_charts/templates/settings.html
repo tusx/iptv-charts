@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Settings · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <a class="crumb" href="{{ url_for('sources_list') }}">← Playlists</a>
+    <h1>Settings</h1>
+    <p class="subtitle">How streams are handed to a player on this machine.</p>
+  </div>
+</div>
+
+<form class="settings-form" id="settings-form" autocomplete="off">
+  <section class="settings-card">
+    <h2>External player</h2>
+    <p class="hint">
+      {% if bridged %}
+        {% if bridge_alive %}
+          The player bridge is running, so these are the players installed on
+          <strong>the host</strong> — the container cannot see them itself.
+        {% else %}
+          The player bridge is <strong>not running</strong>, so nothing can be
+          started on the host right now. Start it with
+          <code>./scripts/player-bridge.sh --daemon</code>; the list below is
+          whatever it last reported.
+        {% endif %}
+      {% else %}
+        These are the players found on this machine.
+      {% endif %}
+    </p>
+
+    <div class="choices" id="player-choices">
+      {% for found in players %}
+        <label class="choice">
+          <input type="radio" name="preferred_player" value="{{ found.id }}"
+                 {% if preferred == found.id %}checked{% endif %}>
+          <span class="choice-label">{{ found.label }}</span>
+        </label>
+      {% endfor %}
+
+      <label class="choice">
+        <input type="radio" name="preferred_player" value="custom"
+               {% if preferred == 'custom' %}checked{% endif %}>
+        <span class="choice-label">Custom command</span>
+        <span class="muted">
+          {% if custom_ready %}the command below{% else %}none given yet{% endif %}
+        </span>
+      </label>
+
+      <label class="choice">
+        <input type="radio" name="preferred_player" value="auto"
+               {% if preferred == 'auto' %}checked{% endif %}>
+        <span class="choice-label">Automatic</span>
+        <span class="muted">
+          {% if players %}whichever is listed first{% else %}nothing detected{% endif %}
+        </span>
+      </label>
+    </div>
+
+    {% if not players and not custom_ready %}
+      <p class="note note-warn">
+        Nothing can play a stream externally yet. Install mpv or VLC, start the
+        player bridge if you are running in a container, or give a command
+        below.
+      </p>
+    {% endif %}
+  </section>
+
+  <section class="settings-card">
+    <h2>Custom command</h2>
+    <p class="hint">
+      Optional. When "Custom command" is selected this is run
+      <strong>instead of</strong> a detected player — on the host, with your
+      privileges, exactly as written.
+      {% if bridged %}
+        The bridge cannot check it from inside the container, so a typo shows
+        up when you press play.
+      {% endif %}
+    </p>
+
+    <div class="field">
+      <label for="player-command">Command</label>
+      <input id="player-command" name="player_command" type="text" spellcheck="false"
+             placeholder="mpv --title={title} --user-agent={user_agent} {url}"
+             value="{{ command }}">
+    </div>
+
+    <p class="hint">
+      Placeholders:
+      <code>{url}</code> the stream address,
+      <code>{title}</code>,
+      <code>{user_agent}</code>,
+      <code>{referrer}</code>.
+      The URL is appended at the end if the command never mentions it, and a
+      flag whose placeholder has no value is left out altogether. Nothing is
+      passed through a shell, so quotes only group arguments.
+    </p>
+  </section>
+
+  <div class="settings-actions">
+    <button type="submit" class="btn btn-primary" id="settings-save">Save</button>
+    <span class="hint" id="settings-status" role="status"></span>
+  </div>
+</form>
+
+<section class="settings-card" id="settings-preview-card" hidden>
+  <h2>What will run</h2>
+  <pre class="command-preview" id="settings-preview"></pre>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/settings.js') }}"></script>
+{% endblock %}
