@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from flask import Blueprint, g, jsonify, request
 
 from . import db, items, player, sources, sync
 
 bp = Blueprint("api", __name__, url_prefix="/api")
+
+logger = logging.getLogger("iptv_charts.api")
 
 
 def _conn():
@@ -306,15 +310,18 @@ def play_episode(item_id: int, episode_id: str):
         return _fail("That episode is not part of this series.", 404)
 
     headers = sources.request_headers(source)
+    title = f"{item['name']} — {match['title']}"
+    logger.info('play episode #%d "%s" via %s', item_id, title, chosen.label)
     try:
         launched = player.launch(
             match["url"],
             user_agent=headers.get("user_agent"),
             referrer=headers.get("referrer"),
-            title=f"{item['name']} — {match['title']}",
+            title=title,
             player=chosen,
         )
     except RuntimeError as exc:
+        logger.warning("play episode #%d failed: %s", item_id, exc)
         return _fail(str(exc), 502)
 
     return jsonify({"ok": True, "player": launched.label})
@@ -345,6 +352,7 @@ def play_item(item_id: int):
         return _fail(f"Could not resolve this stream: {exc}", 502)
 
     headers = sources.request_headers(source)
+    logger.info('play #%d "%s" via %s', item_id, item["name"], chosen.label)
     try:
         launched = player.launch(
             url,
@@ -354,6 +362,7 @@ def play_item(item_id: int):
             player=chosen,
         )
     except RuntimeError as exc:
+        logger.warning("play #%d failed: %s", item_id, exc)
         return _fail(str(exc), 502)
 
     return jsonify({"ok": True, "player": launched.label})
@@ -384,25 +393,31 @@ def save_settings():
             try:
                 player.parse_command(text)
             except ValueError as exc:
+                logger.warning("settings rejected: %s", exc)
                 return _fail(str(exc))
         db.set_setting(conn, player.COMMAND_KEY, text)
+        logger.info("settings: player_command %s", "set" if text else "cleared")
 
     if "preferred_player" in payload:
         preferred = str(payload["preferred_player"] or "").strip()
         known = player.KNOWN_PLAYER_IDS | {found.id for found in
                                            player.available(conn, refresh=True)}
         if preferred not in known:
+            logger.warning("settings rejected: unknown player %r", preferred)
             return _fail("That player is not available.")
         if preferred == "custom" and player.custom_player(conn) is None:
+            logger.warning("settings rejected: custom chosen without a command")
             return _fail("Give a command first — there is nothing to run yet.")
         db.set_setting(conn, player.PREFERENCE_KEY, preferred)
+        logger.info("settings: preferred_player=%s", preferred)
 
     chosen = player.resolve(conn, refresh=True)
 
     # Show the user what their choice actually runs, rather than leaving them to
-    # find out by clicking Play.
+    # find out by clicking Play. A bridge-chosen player has no command to show;
+    # that is not a failure.
     example = None
-    if chosen is not None:
+    if chosen is not None and chosen.flavour != "bridge":
         try:
             example = chosen.command_for(
                 "http://example.com/stream.ts", title="Example stream",

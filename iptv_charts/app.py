@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -16,6 +18,32 @@ from .api import bp as api_bp
 #: Hostnames that mean "this machine". Used for both the Host header and the
 #: Origin of writes.
 LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def configure_logging() -> logging.Logger:
+    """Send the app's own log to stdout, where the container runtime collects it.
+
+    Its own logger, with propagation off: the root logger is shared with
+    waitress, and its per-request lines would bury the handful of actions that
+    are worth reading. ``IPTV_CHARTS_LOG_LEVEL`` turns the volume up without a
+    code change (DEBUG adds the exact argv handed to a player).
+    """
+    logger = logging.getLogger("iptv_charts")
+    logger.setLevel(getattr(
+        logging, os.environ.get("IPTV_CHARTS_LOG_LEVEL", "INFO").upper(), logging.INFO
+    ))
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-7s %(module)s: %(message)s",
+            "%Y-%m-%d %H:%M:%S",
+        ))
+        logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+
+logger = logging.getLogger("iptv_charts.app")
 
 # Columns the sources list needs. Kept explicit rather than SELECT * so that
 # adding a column to the schema never silently changes what a template sees.
@@ -38,6 +66,7 @@ ORDER BY s.created_at DESC
 
 
 def create_app() -> Flask:
+    configure_logging()
     app = Flask(__name__)
 
     # Only used for flash messages. Persisted so a restart mid-flow doesn't
@@ -64,6 +93,8 @@ def create_app() -> Flask:
         under its own hostname. Genuine local use always says 127.0.0.1 or
         localhost, so this costs nothing in normal operation.
         """
+        g.request_started = time.perf_counter()
+
         host = (request.host or "").rsplit(":", 1)[0].strip("[]")
         if host not in LOOPBACK_NAMES:
             abort(403, description="Requests must target loopback.")
@@ -167,22 +198,56 @@ def create_app() -> Flask:
         """
         conn = get_conn()
         command = db.get_setting(conn, player.COMMAND_KEY, "") or ""
+        available = player.available(conn, refresh=True)
         return render_template(
             "settings.html",
             # The custom command is offered as its own radio below, so it is
             # kept out of the detected list rather than listed twice.
-            players=[found for found in player.available(conn, refresh=True)
-                     if found.id != "custom"],
+            players=[found for found in available if found.id != "custom"],
             preferred=db.get_setting(conn, player.PREFERENCE_KEY, "auto") or "auto",
             command=command,
             custom_ready=bool(command.strip()),
             bridged=config.play_queue_path() is not None,
             bridge_alive=player.bridge_is_alive(),
+            # The placeholder player means the bridge is running but is too old
+            # to say which players it has -- worth saying, because restarting it
+            # is what makes the choice real.
+            bridge_outdated=any(found.id == player.BRIDGE_PLAYER_ID
+                                for found in available),
         )
 
     # Playback has no page of its own: the browse page opens the player in a
     # dialog, so that playing something does not cost the user their place in
     # the list. See static/js/playback.js.
+
+    @app.after_request
+    def _log_action(response):
+        """One line per action, not per request.
+
+        Reads are left out (the sync poll runs every second, and page loads are
+        not actions), so what lands in the container log is what someone
+        actually did: the writes, and anything that failed.
+        """
+        if request.method == "GET" and response.status_code < 400:
+            return response
+        elapsed = (time.perf_counter() - getattr(g, "request_started", 0)) * 1000
+        logger.info("%s %s -> %d (%.0f ms)", request.method, request.path,
+                    response.status_code, elapsed)
+        return response
+
+    logger.info("starting %s", __import__("iptv_charts").__version__)
+    logger.info("data: %s", config.data_dir())
+    queue = config.play_queue_path()
+    if queue is None:
+        logger.info("playback: direct (players are started by this process)")
+    else:
+        logger.info("playback: bridged (queue %s, bridge %s)", queue,
+                    "running" if player.bridge_is_alive() else "NOT running")
+    # Outside any request, so the connection needs an explicit context: the
+    # teardown handler closes it again as soon as the block ends.
+    with app.app_context():
+        found = player.resolve(get_conn())
+    logger.info("player: %s", found.label if found else "none available")
 
     return app
 

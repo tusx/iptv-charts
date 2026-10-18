@@ -331,6 +331,31 @@ def main() -> int:
         body = client.get("/settings").data
         check_true("the command was cleared", b'id="player-command"' in body)
 
+        # ------------------------------------------------- bridge compatibility
+        # A bridge older than the players.json protocol can still play, so
+        # upgrading the app must not take the button away from it. This is the
+        # case that bit once: a rebuilt container and a bridge that had not been
+        # restarted, leaving the browse page with no external-player button.
+        section("an older host bridge")
+        saved_queue = os.environ.get("IPTV_CHARTS_PLAY_QUEUE")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["IPTV_CHARTS_PLAY_QUEUE"] = f"{tmp}/queue"
+            (Path(tmp) / "play-bridge.alive").write_text("0")
+            player_module._CANDIDATES = None
+            try:
+                response = client.get(f"/sources/{source_id}/browse")
+                check_true("the external-player button survives the upgrade",
+                           b'id="external-btn"' in response.data)
+                response = client.get("/settings")
+                check_true("and the settings page says why the choice is limited",
+                           b"predates this version" in response.data)
+            finally:
+                if saved_queue is None:
+                    os.environ.pop("IPTV_CHARTS_PLAY_QUEUE", None)
+                else:
+                    os.environ["IPTV_CHARTS_PLAY_QUEUE"] = saved_queue
+                player_module._CANDIDATES = None
+
         # ---------------------------------------------------------- re-sync all
         section("update all")
         response = client.post("/api/sources/sync-all")

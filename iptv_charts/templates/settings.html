@@ -29,6 +29,16 @@
       {% endif %}
     </p>
 
+    {% if bridge_outdated %}
+      <p class="note note-warn">
+        The bridge is running, but it predates this version and does not report
+        which players the host has — it will keep using the one it found when it
+        started. Restart it to choose:
+        <code>./scripts/player-bridge.sh --stop</code> then
+        <code>./scripts/player-bridge.sh --daemon</code>.
+      </p>
+    {% endif %}
+
     <div class="choices" id="player-choices">
       {% for found in players %}
         <label class="choice">

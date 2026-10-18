@@ -193,14 +193,17 @@ podman run -d \
 # --------------------------------------------------------------- player bridge
 # Started BEFORE the readiness probe on purpose. The app caches player
 # detection for 10 seconds, so if the bridge comes up after the first probe
-# the "Play in mpv" button stays hidden until that cache expires.
-if [[ ! -f "$QUEUE_DIR/play-bridge.pid" ]] \
-   || ! kill -0 "$(cat "$QUEUE_DIR/play-bridge.pid")" 2>/dev/null; then
-    if [[ -x "$root/scripts/player-bridge.sh" ]]; then
-        info "starting player bridge on the host"
-        "$root/scripts/player-bridge.sh" --daemon || \
-            warn "player bridge failed to start; the in-browser player still works"
-    fi
+# the external-player button stays hidden until that cache expires.
+#
+# Every deploy restarts it, whether or not one was already running: the bridge
+# decides what a player click actually runs, so a bridge left over from an
+# older build would keep answering with the old behaviour. It is supervised, so
+# it also comes back by itself if the worker dies.
+if [[ -x "$root/scripts/player-bridge.sh" ]]; then
+    info "restarting player bridge on the host"
+    "$root/scripts/player-bridge.sh" --stop >/dev/null 2>&1 || true
+    "$root/scripts/player-bridge.sh" --daemon || \
+        warn "player bridge failed to start; the in-browser player still works"
 fi
 
 # ------------------------------------------------------------------ readiness

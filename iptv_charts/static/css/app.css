@@ -942,6 +942,10 @@ button.poster-art {
   background: #000;
 }
 
+/* The dialog's status line: the stream format, or why the external player
+   could not start. */
+#stream-note.is-bad { color: var(--bad); }
+
 .watch-side {
   display: flex;
   flex-direction: column;

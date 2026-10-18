@@ -121,15 +121,46 @@ the settings page. How the hand-off happens depends on how the app is running:
   ./scripts/player-bridge.sh --stop     # stop it
   ```
 
-  `setup.deploy.sh` starts the bridge for you. It publishes a heartbeat and a
+  `setup.deploy.sh` restarts the bridge on every deploy, so it always runs the
+  script that shipped with the build. It is supervised: if the worker exits, it
+  is started again (after a crash, for instance), and `--status` finds it even
+  if its pid file was lost. It publishes a heartbeat and a
   list of the players installed on the host, which is how the settings page can
   offer them — the container cannot see the host's software itself. If the
   bridge is not running there is no heartbeat, and the buttons hide rather than
   doing nothing. Browser playback is unaffected either way.
 
   The bridge must be restarted after upgrading the app, so it learns the
-  request format's `command` field; until then it falls back to playing with the
-  first player it found, which is how it behaved before.
+  request format's `command` field and reports back what happened; until then it
+  falls back to playing with the first player it found, which is how it behaved
+  before. The app meets it halfway: a bridge that cannot report its players
+  still gets the single "External player" button — it can play, it just cannot
+  say with what, so the settings page offers only that and a custom command
+  until it is restarted.
+
+  When the bridge launches a player it watches it for a moment and reports the
+  outcome. That is why a stream the provider refuses now says so — "mpv exited
+  immediately: HTTP error 500" in the dialog and in the log — instead of the
+  click appearing to do nothing.
+
+  mpv is started with `--force-window=yes --idle=yes`, so a window appears even
+  when the stream turns out to be dead (it shows the error and stays open), and
+  the window remains after playback ends — close it when you are done. Without
+  that, mpv exits before drawing anything when a channel fails, which is
+  indistinguishable from the button doing nothing.
+
+### Logs
+
+`podman logs -f iptv-charts` (or `./setup.deploy.sh --logs`) shows what the app
+did: startup and the mode it is in, every write, every failure, playback
+requests with the player they were sent to, and the bridge's verdict on each
+one. Reads are left out on purpose — the sync poll runs every second and would
+bury everything else. `IPTV_CHARTS_LOG_LEVEL=DEBUG` adds the exact argv handed
+to a player (with the provider credentials in the URL redacted).
+
+The host bridge keeps its own log next to the queue:
+`$XDG_RUNTIME_DIR/iptv-charts/play-bridge.log`. It holds the same events from
+the host's side, including a player's error output when it dies at startup.
 
 ## Settings
 

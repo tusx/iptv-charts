@@ -65,6 +65,9 @@ class Bridge:
             "#!/bin/sh\n"
             "{ for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done; "
             "printf -- '--end--\\n'; } >> \"$FAKE_PLAYER_LOG\"\n"
+            # Stay alive past the bridge's startup grace, the way a real player
+            # that opened a window would.
+            "sleep 5\n"
         )
         self.player.chmod(0o755)
         (self.bin / "flatpak").write_text("#!/bin/sh\nexit 1\n")
@@ -140,6 +143,21 @@ class Bridge:
     def capabilities(self) -> dict:
         return json.loads(self.players_file.read_text())
 
+    def result(self) -> dict | None:
+        try:
+            return json.loads((self.queue_dir / "play-result.json").read_text())
+        except (OSError, ValueError):
+            return None
+
+    def wait_for_result(self, requested_at: float, timeout: float = 15.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            result = self.result()
+            if result and abs(float(result.get("requested_at", -1)) - requested_at) < 0.001:
+                return True
+            time.sleep(0.05)
+        return False
+
     def bridge_log(self) -> str:
         return self.log.read_text() if self.log.exists() else ""
 
@@ -165,7 +183,7 @@ def main() -> int:
                   caps["players"][0]["command"][0], str(bridge.player))
             check("dialect travels with it", caps["players"][0]["flavour"], "mpv")
             check("extra args travel with it",
-                  caps["players"][0]["extra_args"], ["--force-window=yes", "--idle=no"])
+                  caps["players"][0]["extra_args"], ["--force-window=yes", "--idle=yes"])
 
             # ------------------------------------------------------- argv path
             section("a request carrying its own command")
@@ -175,6 +193,7 @@ def main() -> int:
                 user_agent="UA/1.0",
                 referrer="http://portal/",
                 player="native-mpv",
+                requested_at=1001.5,
                 command=[str(bridge.player), "--title=Some Channel", "--",
                          "http://example.com/live.ts"],
             )
@@ -182,6 +201,26 @@ def main() -> int:
             check("arguments arrive intact and in order", bridge.records()[0], [
                 "--title=Some Channel", "--", "http://example.com/live.ts",
             ])
+            check_true("the outcome is reported back", bridge.wait_for_result(1001.5))
+            check("reported as started", bridge.result()["ok"], True)
+            check("against the right request", bridge.result()["requested_at"], 1001.5)
+
+            # A player that rejects the stream says so; that message is the
+            # difference between "nothing happened" and "the provider said 500".
+            section("a player that dies immediately")
+            bridge.send(
+                url="http://example.com/broken.ts",
+                player="custom",
+                requested_at=1002.5,
+                command=["/bin/sh", "-c",
+                         "echo 'HTTP error 500 for http://user:secret@host/x' >&2; exit 3"],
+            )
+            check_true("the failure is reported", bridge.wait_for_result(1002.5))
+            failed = bridge.result()
+            check("reported as failed", failed["ok"], False)
+            check_true("with the player's own words", "HTTP error 500" in failed["message"])
+            check_true("and the address redacted",
+                       "<url>" in failed["message"] and "secret" not in failed["message"])
 
             # An argument containing spaces, quotes and a shell metacharacter
             # must arrive as one argument: nothing is passed through a shell.
@@ -203,14 +242,19 @@ def main() -> int:
             )
             check_true("it ran", bridge.wait_for_records(3))
             check("the default player's own flags were used", bridge.records()[2], [
-                "--force-window=yes", "--idle=no",
+                "--force-window=yes", "--idle=yes",
                 "--title=Legacy", "--user-agent=UA/2.0", "--referrer=http://portal/",
                 "--", "http://example.com/legacy.ts",
             ])
 
             # ------------------------------------------------------ refusals
             section("refusals")
-            bridge.send(url="--script=/tmp/evil.lua", title="not a url")
+            bridge.send(url="--script=/tmp/evil.lua", title="not a url",
+                        requested_at=1003.5)
+            check_true("a bad address is answered", bridge.wait_for_result(1003.5))
+            check("with a failure", bridge.result()["ok"], False)
+            check_true("and a reason worth showing", "not a URL" in bridge.result()["message"])
+
             bridge.send(command=["-f", "http://example.com/x.ts"])
             bridge.send(command=[])
             bridge.send(command=[str(bridge.player)] + ["x" * 9000])

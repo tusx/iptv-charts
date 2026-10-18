@@ -28,16 +28,34 @@ the external-player buttons hide themselves when there is nothing to launch.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config, db
+
+_log = logging.getLogger("iptv_charts.player")
+
+#: How long a player gets to die before we call it started. Long enough to
+#: cover a provider that answers late: mpv's HTTP failure here arrived at
+#: 1.3s, just after a shorter grace had already reported success.
+START_GRACE = 2.0
+
+#: How long the app waits for the host bridge to report on a request. The
+#: bridge writes the result after START_GRACE, so this is grace plus slack.
+RESULT_TIMEOUT = 4.0
+
+#: Matches a URL inside a player's error output, so it can be redacted before
+#: it reaches the app log or the UI: Xtream URLs carry the provider username
+#: and password in their path.
+_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s\"']+")
 
 # Flatpak application IDs, most preferred first.
 MPV_FLATPAK = "io.mpv.Mpv"
@@ -51,6 +69,15 @@ BRIDGE_STALE_AFTER = 30.0
 #: What the bridge publishes about the host it runs on.
 PLAYERS_FILE = "players.json"
 PLAYERS_FILE_VERSION = 1
+
+#: What the bridge reports about the last request it handled. Without it the
+#: app can only say "sent", which is what a click that never opened a player
+#: used to look like.
+RESULT_FILE = "play-result.json"
+
+#: The player a bridge older than ``players.json`` stands for: it can play, it
+#: just cannot say with what. Kept so upgrading the app never loses the button.
+BRIDGE_PLAYER_ID = "host-bridge"
 
 #: Ceiling on a stored custom command. Long enough for a real command line with
 #: a wrapper, short enough that nothing pathological reaches the queue.
@@ -73,7 +100,8 @@ COMMAND_KEY = "player_command"
 #: choice made while the bridge happens to be down is still a valid choice, and
 #: rejecting it would be a puzzle with no explanation.
 KNOWN_PLAYER_IDS = frozenset({
-    "auto", "custom", "flatpak-mpv", "native-mpv", "flatpak-vlc", "native-vlc",
+    "auto", "custom", "host-bridge",
+    "flatpak-mpv", "native-mpv", "flatpak-vlc", "native-vlc",
 })
 
 _SCHEME = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*)://")
@@ -97,7 +125,8 @@ class Player:
 
     id: str
     label: str
-    #: Flag dialect: 'mpv', 'vlc', or 'custom' for a user-supplied template.
+    #: Flag dialect: 'mpv', 'vlc', 'custom' for a user-supplied template, or
+    #: 'bridge' for a host bridge that decides for itself.
     flavour: str = "mpv"
     #: For 'custom' this is the template, placeholders intact.
     argv_prefix: tuple[str, ...] = field(default_factory=tuple)
@@ -117,6 +146,13 @@ class Player:
         all three differently, and getting that wrong makes it exit on startup.
         """
         url = _checked_url(url)
+
+        if self.flavour == "bridge":
+            # There is no command: the bridge chooses the player itself. Only
+            # an older bridge ends up here, and it gets a bare request.
+            raise PlayerError(
+                "The host bridge chooses the player; there is no command to show."
+            )
 
         if self.flavour == "custom":
             return expand_command(
@@ -158,6 +194,33 @@ def is_container() -> bool:
     depends on it.
     """
     return Path("/run/.containerenv").exists() or Path("/.dockerenv").exists()
+
+
+# ------------------------------------------------------------------- logging
+def redact_url(url: str) -> str:
+    """A URL safe to put in a log line: scheme, host and last path segment.
+
+    Provider URLs carry the account name and password as path segments, and
+    logs get pasted into bug reports, so the middle of the path is dropped.
+    """
+    scheme_end = url.find("://")
+    if scheme_end < 0:
+        return url
+    scheme, rest = url[:scheme_end], url[scheme_end + 3:]
+    host, _, path = rest.partition("/")
+    tail = path.rsplit("/", 1)[-1] if path else ""
+    return f"{scheme}://{host}/…/{tail}" if tail else f"{scheme}://{host}"
+
+
+def _redact_text(text: str) -> str:
+    """Strip anything URL-shaped out of a player's error output."""
+    return _URL_IN_TEXT.sub("<url>", text)
+
+
+def _tail(text: str, lines: int = 3) -> str:
+    """The last few non-empty lines, joined -- enough to say why a player died."""
+    kept = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return " ".join(kept[-lines:])
 
 
 # ----------------------------------------------------------------- validation
@@ -261,13 +324,16 @@ def bridge_is_alive() -> bool:
         return False
 
 
-def _enqueue(argv: list[str], *, url: str, title: str | None,
-             user_agent: str | None, referrer: str | None, player_id: str) -> None:
+def _enqueue(argv: list[str] | None, *, url: str, title: str | None,
+             user_agent: str | None, referrer: str | None,
+             player_id: str) -> float:
     """Append a playback request for the host-side bridge to pick up.
 
-    The four legacy fields are always written alongside ``command``: they cost
-    nothing and they are what an older bridge, which knows nothing about
-    ``command``, plays instead of dropping the request on the floor.
+    The four legacy fields are always written: they cost nothing and they are
+    what an older bridge, which knows nothing about ``command``, plays instead
+    of dropping the request on the floor. ``argv`` is None when the bridge is
+    the one choosing the player, which is what every bridge did before the
+    field existed.
     """
     queue = config.play_queue_path()
     if queue is None:
@@ -275,14 +341,15 @@ def _enqueue(argv: list[str], *, url: str, title: str | None,
 
     queue.parent.mkdir(parents=True, exist_ok=True)
 
+    requested_at = time.time()
     request = {
         "url": url,
         "title": title,
         "user_agent": user_agent,
         "referrer": referrer,
-        "requested_at": time.time(),
+        "requested_at": requested_at,
         "player": player_id,
-        "command": list(argv),
+        "command": list(argv) if argv is not None else None,
     }
     line = json.dumps(request, ensure_ascii=False) + "\n"
 
@@ -292,6 +359,35 @@ def _enqueue(argv: list[str], *, url: str, title: str | None,
     with _queue_lock:
         with open(queue, "a", encoding="utf-8") as handle:
             handle.write(line)
+    return requested_at
+
+
+def _await_play_result(requested_at: float, *, timeout: float = RESULT_TIMEOUT) -> dict | None:
+    """Wait for the bridge to say how the request it was given went.
+
+    The bridge is a separate process on the host; this is the only channel back.
+    A bridge older than the result file simply never answers, which the caller
+    treats as "sent, outcome unknown" rather than as a failure.
+    """
+    path = _queue_file(RESULT_FILE)
+    if path is None:
+        return None
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            result = None
+        if isinstance(result, dict):
+            try:
+                matches = abs(float(result.get("requested_at", -1)) - requested_at) < 0.001
+            except (TypeError, ValueError):
+                matches = False
+            if matches:
+                return result
+        time.sleep(0.1)
+    return None
 
 
 # ------------------------------------------------------------------ detection
@@ -324,13 +420,13 @@ def _local_candidates() -> list[Player]:
         found.append(Player(
             id="flatpak-mpv", label="mpv (Flatpak)", flavour="mpv",
             argv_prefix=("flatpak", "run", MPV_FLATPAK),
-            extra_args=("--force-window=yes", "--idle=no"),
+            extra_args=("--force-window=yes", "--idle=yes"),
         ))
     if native_mpv := shutil.which("mpv"):
         found.append(Player(
             id="native-mpv", label="mpv", flavour="mpv",
             argv_prefix=(native_mpv,),
-            extra_args=("--force-window=yes", "--idle=no"),
+            extra_args=("--force-window=yes", "--idle=yes"),
         ))
     if _flatpak_app_installed(VLC_FLATPAK):
         found.append(Player(
@@ -347,24 +443,29 @@ def _local_candidates() -> list[Player]:
     return found
 
 
-def _host_candidates() -> list[Player]:
-    """What the host bridge said it can run.
+def _host_candidates() -> list[Player] | None:
+    """What the host bridge said it can run, or None when it cannot say.
 
     Only meaningful in bridged mode. Every field is treated as untrusted: this
     file is written by another process, so a malformed or truncated one has to
-    degrade to "nothing available" rather than reach a page render as an
-    exception.
+    degrade rather than reach a page render as an exception.
+
+    None and [] mean different things and must not be conflated. None is "no
+    usable report" -- a bridge older than this file, or one that has not
+    written it yet -- and the caller keeps the plain bridge player for it. []
+    is a current bridge saying it found nothing installed, which must hide the
+    button rather than offer one that cannot work.
     """
     path = _queue_file(PLAYERS_FILE)
     if path is None:
-        return []
+        return None
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
+        return None
     if not isinstance(raw, dict) or raw.get("version") != PLAYERS_FILE_VERSION:
-        return []
+        return None
 
     found: list[Player] = []
     for entry in raw.get("players") or []:
@@ -406,7 +507,19 @@ def _candidates(*, refresh: bool = False) -> list[Player]:
 
     now = time.monotonic()
     if _CANDIDATES is None or refresh or (now - _CANDIDATES_AT) > _CANDIDATES_TTL:
-        _CANDIDATES = _host_candidates() if bridged else _local_candidates()
+        candidates = _host_candidates() if bridged else _local_candidates()
+        if candidates is None:
+            # An older bridge: it will play the request with the player it
+            # found at startup, it just cannot name it. Keeping one button is
+            # the difference between "still works" and "the button vanished
+            # when the app was upgraded".
+            candidates = [Player(
+                id=BRIDGE_PLAYER_ID,
+                label="External player (host)",
+                flavour="bridge",
+                via_bridge=True,
+            )]
+        _CANDIDATES = candidates
         _CANDIDATES_AT = now
     return _CANDIDATES
 
@@ -479,6 +592,17 @@ def resolve(conn, *, refresh: bool = False) -> Player | None:
     return players[0]
 
 
+def _wait_for_exit(process: subprocess.Popen, seconds: float) -> int | None:
+    """The exit status if the process died within ``seconds``, else None."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        status = process.poll()
+        if status is not None:
+            return status
+        time.sleep(0.05)
+    return None
+
+
 # -------------------------------------------------------------------- launch
 def launch(url: str, *, user_agent: str | None = None, referrer: str | None = None,
            title: str | None = None, player: Player) -> Player:
@@ -502,41 +626,75 @@ def launch(url: str, *, user_agent: str | None = None, referrer: str | None = No
             "start the player bridge if you are running in a container."
         )
 
-    argv = player.command_for(url, user_agent=user_agent, referrer=referrer, title=title)
+    url = _checked_url(url)
 
     if player.via_bridge:
-        _enqueue(argv, url=url, title=title, user_agent=user_agent,
-                 referrer=referrer, player_id=player.id)
+        # A bridge that cannot report its players runs the request itself, with
+        # the player it chose at startup -- that is the only kind of bridge
+        # that produces a 'bridge' flavour, and it must not be sent an argv it
+        # would refuse to run.
+        old_bridge = player.flavour == "bridge"
+        argv = (None if old_bridge
+                else player.command_for(url, user_agent=user_agent,
+                                        referrer=referrer, title=title))
+        requested_at = _enqueue(argv, url=url, title=title,
+                                user_agent=user_agent, referrer=referrer,
+                                player_id=player.id)
+        if old_bridge:
+            # Nothing to wait for: a bridge that predates the result file is
+            # silent about outcomes, and pretending otherwise just adds delay.
+            return player
+
+        result = _await_play_result(requested_at)
+        if result is None:
+            _log.warning("bridge reported nothing for %s; assuming it started",
+                         redact_url(url))
+            return player
+        if not result.get("ok"):
+            message = str(result.get("message") or "").strip()
+            raise PlayerError(
+                f"{player.label} could not play that stream"
+                + (f": {message}" if message else "")
+            )
         return player
 
-    try:
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise PlayerError(f"Could not start {player.label}: {exc}") from exc
+    argv = player.command_for(url, user_agent=user_agent, referrer=referrer, title=title)
+    _log.debug("starting %s: %s", player.label, " ".join(
+        redact_url(part) if part == url else part for part in argv
+    ))
 
-    # A player that rejects its own arguments exits immediately, and exec
-    # succeeding says nothing about that. Without this check a wrong flag (or a
-    # Flatpak that is registered but broken) is reported to the user as "Sent".
-    time.sleep(0.25)
-    status = process.poll()
-    if status is not None:
-        raise PlayerError(
-            f"{player.label} exited immediately (status {status}). Check the "
-            "command on the settings page."
-        )
+    # The player's own output is what explains a failure -- "HTTP error 500",
+    # "cannot open display", a flag it did not understand. Discarding it (as
+    # /dev/null did) turns every one of those into "nothing happened". mpv in
+    # particular writes its diagnostics to stdout, so both streams are kept.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as error_output:
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=error_output,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise PlayerError(f"Could not start {player.label}: {exc}") from exc
 
-    return player
+        status = _wait_for_exit(process, START_GRACE)
+        if status is None:
+            return player
+
+        error_output.seek(0)
+        message = _redact_text(_tail(error_output.read()))
+    raise PlayerError(
+        f"{player.label} exited immediately (status {status})"
+        + (f": {message}" if message else ". Check the command on the settings page.")
+    )
 
 
 __all__ = [
     "BRIDGE_HEARTBEAT",
+    "BRIDGE_PLAYER_ID",
     "BRIDGE_STALE_AFTER",
     "COMMAND_KEY",
     "COMMAND_MAX_LENGTH",
@@ -544,6 +702,8 @@ __all__ = [
     "PLAYERS_FILE",
     "PLAYERS_FILE_VERSION",
     "PREFERENCE_KEY",
+    "RESULT_FILE",
+    "START_GRACE",
     "Player",
     "PlayerError",
     "available",
@@ -553,5 +713,6 @@ __all__ = [
     "is_container",
     "launch",
     "parse_command",
+    "redact_url",
     "resolve",
 ]

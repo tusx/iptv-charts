@@ -381,6 +381,75 @@ def test_player() -> None:
           raises(player.launch, "http://e/s.ts", player=None), "raised")
 
 
+def test_player_bridge() -> None:
+    """The upgrade path that must not lose the button.
+
+    A new app against an older host bridge has no players.json to read. That
+    bridge can still play -- it just cannot say with what -- so the app has to
+    keep offering it. Falling back to "no players" here is exactly how the
+    external-player button vanished from a container whose bridge had not been
+    restarted after the upgrade.
+    """
+    import os
+
+    section("player and an older host bridge")
+    saved = os.environ.get("IPTV_CHARTS_PLAY_QUEUE")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        queue = root / "queue"
+        (root / player.BRIDGE_HEARTBEAT).write_text("0")
+        os.environ["IPTV_CHARTS_PLAY_QUEUE"] = str(queue)
+        try:
+            player._CANDIDATES = None
+            found = player.available(None)
+            check("an old bridge still offers a player",
+                  [p.id for p in found], [player.BRIDGE_PLAYER_ID])
+
+            player.launch("http://e/s.ts", player=found[0])
+            request = json.loads(queue.read_text().splitlines()[-1])
+            check("no command is sent to a bridge that cannot run one",
+                  request["command"], None)
+            check("the stream address is still sent", request["url"], "http://e/s.ts")
+
+            # A current bridge that reports nothing is authoritative: it has
+            # looked and found no player, so there is nothing to offer.
+            (root / player.PLAYERS_FILE).write_text(json.dumps({
+                "version": player.PLAYERS_FILE_VERSION, "players": [],
+            }))
+            player._CANDIDATES = None
+            check("a report of no players hides the button", player.available(None), [])
+
+            # A current bridge with a player is used, and the argv is ours.
+            (root / player.PLAYERS_FILE).write_text(json.dumps({
+                "version": player.PLAYERS_FILE_VERSION,
+                "players": [{
+                    "id": "native-mpv", "label": "mpv", "flavour": "mpv",
+                    "command": ["/usr/bin/mpv"], "extra_args": ["--fs"],
+                }],
+            }))
+            player._CANDIDATES = None
+            found = player.available(None)
+            check("the reported player is used", [p.id for p in found], ["native-mpv"])
+
+            player.launch("http://e/s.ts", player=found[0])
+            request = json.loads(queue.read_text().splitlines()[-1])
+            check("its command travels with the request", request["command"],
+                  ["/usr/bin/mpv", "--fs", "--", "http://e/s.ts"])
+
+            # No heartbeat: the bridge is gone, so nothing is offered.
+            (root / player.BRIDGE_HEARTBEAT).unlink()
+            player._CANDIDATES = None
+            check("a dead bridge hides the button", player.available(None), [])
+        finally:
+            if saved is None:
+                os.environ.pop("IPTV_CHARTS_PLAY_QUEUE", None)
+            else:
+                os.environ["IPTV_CHARTS_PLAY_QUEUE"] = saved
+            player._CANDIDATES = None
+
+    check("the queue setting was restored", config.play_queue_path(), None)
+
+
 # ---------------------------------------------------------------- streaming
 def test_streaming() -> None:
     """The shared spool/line helpers, compressed and not.
@@ -613,6 +682,7 @@ def main() -> int:
     test_streaming()
     test_items()
     test_player()
+    test_player_bridge()
     test_web()
 
     passed = sum(1 for ok, _, _ in _results if ok)

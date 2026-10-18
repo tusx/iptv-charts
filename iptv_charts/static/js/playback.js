@@ -55,6 +55,15 @@
     if (attempt && typeof attempt.catch === 'function') attempt.catch(() => {});
   }
 
+  // The note under the meta column is the dialog's status line: the stream
+  // format while playing, and the reason when the player could not start. A
+  // tooltip alone is too quiet for "the click did nothing".
+  function setNote(text, bad = false) {
+    if (!streamNote) return;
+    streamNote.textContent = text;
+    streamNote.classList.toggle('is-bad', bad);
+  }
+
   function start(mine) {
     if (!stream || stale(mine)) return;
     teardown();
@@ -100,7 +109,7 @@
     }
     if (stale(mine)) return;   // closed, or another item opened, meanwhile
     if (!payload.ok) {
-      if (streamNote) streamNote.textContent = payload.error || '';
+      setNote(payload.error || '', true);
       return;
     }
 
@@ -109,9 +118,7 @@
     // only this endpoint knows.
     detail = { ...detail, ...payload };
     renderAbout();
-    if (streamNote) {
-      streamNote.textContent = `Playing as ${String(stream.media_type).toUpperCase()}.`;
-    }
+    setNote(`Playing as ${String(stream.media_type).toUpperCase()}.`);
     start(mine);
   }
 
@@ -247,9 +254,14 @@
       if (!payload.ok) throw new Error(payload.error);
       button.textContent = '✓ Sent';
       button.title = `Playing in ${payload.player}`;
+      setNote(`Opened in ${payload.player}.`);
     } catch (error) {
+      // The endpoint waits for the host bridge to report, so this is usually
+      // the player's own reason -- "HTTP error 500", a missing program --
+      // rather than a generic failure.
       button.textContent = '✕';
       button.title = error.message;
+      setNote(error.message, true);
     }
     setTimeout(() => {
       button.textContent = original;
@@ -372,7 +384,7 @@
     renderPoster(item.logo);
     renderMeta();
     renderAbout();
-    if (streamNote) streamNote.textContent = '';
+    setNote('');
     title.textContent = item.name || '';
     video.poster = item.logo || '';
 
