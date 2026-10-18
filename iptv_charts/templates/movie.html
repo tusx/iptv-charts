@@ -17,6 +17,7 @@
         {% if movie.runtime %} · {{ movie.runtime }} min{% endif %}
         {% if movie.rating %} · ★ {{ '%.1f'|format(movie.rating) }}{% endif %}
         {% if movie.resolution %} · {{ movie.resolution }}{% endif %}
+        {% if movie.source %} · {{ movie.source }}{% endif %}
       </p>
       {% if movie.genres %}
         <p class="detail-genres">{{ movie.genres|join(' · ') }}</p>
@@ -25,6 +26,9 @@
       <div class="library-badges">
         {{ status_badge(status) }}
         {% if movie.monitored %}<span class="badge badge-monitored">Monitored</span>{% endif %}
+        {% if not movie.available and not movie.file_path %}
+          <span class="badge badge-muted">Awaiting release</span>
+        {% endif %}
       </div>
       <div class="detail-actions">
         <button class="btn btn-primary" id="movie-search-now" type="button">Search now</button>
@@ -33,6 +37,9 @@
         <button class="btn btn-danger" id="movie-delete" type="button">Delete</button>
       </div>
       <p class="hint" id="movie-action-status" role="status"></p>
+      {% if movie.search_message %}
+        <p class="hint">Last search: {{ movie.search_message }}</p>
+      {% endif %}
     </div>
   </div>
 
@@ -43,7 +50,21 @@
         <dl class="meta-list">
           <dt>Path</dt><dd class="mono wrap-anywhere">{{ movie.file_path }}</dd>
           <dt>Size</dt><dd>{{ (movie.file_size / 1048576)|round(1) if movie.file_size else 'Unknown' }} MiB</dd>
-          <dt>Resolution</dt><dd>{{ movie.resolution or 'Unknown' }}</dd>
+          <dt>Quality</dt>
+          <dd>
+            {{ movie.quality_label or movie.resolution or 'Unknown' }}
+            {% if movie.source %}<span class="muted"> · {{ movie.source }}</span>{% endif %}
+          </dd>
+          <dt>Audio</dt>
+          <dd>{{ movie.audio_languages|join(', ') or 'Unknown' }}
+            {% if movie.media.audio_track_count %}<span class="muted"> · {{ movie.media.audio_track_count }} track(s)</span>{% endif %}
+          </dd>
+          <dt>Subtitles</dt>
+          <dd>{{ movie.subtitle_languages|join(', ') or 'None detected' }}</dd>
+          {% if movie.media.video_codec %}
+            <dt>Video</dt>
+            <dd>{{ movie.media.video_codec }}{% if movie.media.hdr and movie.media.hdr != 'SDR' %} · {{ movie.media.hdr }}{% endif %}</dd>
+          {% endif %}
           <dt>Imported</dt><dd>{{ format_age(movie.imported_at) }}</dd>
         </dl>
       {% else %}
@@ -76,6 +97,18 @@
               </option>
             {% endfor %}
           </select>
+        </label>
+        <label class="field">
+          <span>Download when</span>
+          <select id="movie-availability-edit">
+            <option value="released" {% if movie.minimum_availability == 'released' %}selected{% endif %}>Released</option>
+            <option value="in_cinemas" {% if movie.minimum_availability == 'in_cinemas' %}selected{% endif %}>In cinemas / release date reached</option>
+            <option value="announced" {% if movie.minimum_availability == 'announced' %}selected{% endif %}>Announced (search immediately)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Queue priority</span>
+          <input type="number" id="movie-priority-edit" min="-100" max="100" step="1" value="{{ movie.priority or 0 }}">
         </label>
         <button class="btn" type="submit">Save</button>
         <span class="hint" id="movie-edit-status" role="status"></span>

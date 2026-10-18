@@ -21,8 +21,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from iptv_charts import (config, db, items, matching, naming, player,  # noqa: E402
-                         quality)
+from iptv_charts import (config, connections, db, items, languages,  # noqa: E402
+                         matching, naming, player, probe, quality, streams)
 from iptv_charts.clients import m3u, xtream  # noqa: E402
 from iptv_charts.errors import SyncCancelled  # noqa: E402
 
@@ -685,12 +685,41 @@ def test_manager_foundations() -> None:
     check("no tag is unknown", quality.parse_resolution("Movie (2024)"), "unknown")
     check("height maps to tier", quality.resolution_from_height(1080), "1080p")
     check("2160 height maps to tier", quality.resolution_from_height(2160), "2160p")
+    check("scope 4K uses width",
+          quality.resolution_from_dimensions(3840, 1600), "2160p")
+    check("WEB-DL source recognised",
+          quality.parse_source("Movie (2024) [2160p] WEB-DL"), "web-dl")
+    check("CAM source recognised",
+          quality.parse_source("Movie (2024) HDCAM"), "hdcam")
+    check("a title containing cam is not a CAM",
+          quality.parse_source("Camelot (2024) [1080p]"), "unknown")
 
-    profile = quality.Profile(("1080p", "720p", "480p", "unknown"), "1080p", True)
+    def probed(resolution="1080p", audio=("eng",), subtitles=()):
+        return {
+            "ok": True, "resolution": resolution,
+            "audio": [{"language": code} for code in audio],
+            "subtitles": [{"language": code} for code in subtitles],
+            "audio_languages": list(audio),
+            "subtitle_languages": list(subtitles),
+            "audio_track_count": len(audio),
+            "subtitle_track_count": len(subtitles),
+            "size": 1000,
+        }
+
+    profile = quality.Profile(
+        tiers=(
+            quality.Tier("1080p", "1080p"),
+            quality.Tier("720p", "720p"),
+            quality.Tier("480p", "480p"),
+            quality.Tier("unknown", "unknown"),
+        ),
+        cutoff_index=0,
+        upgrades=True,
+    )
     releases = [
-        {"resolution": "720p", "score": 0.9},
-        {"resolution": "1080p", "score": 0.8},
-        {"resolution": "2160p", "score": 0.7},
+        {"resolution": "720p", "score": 0.9, "probe": probed("720p")},
+        {"resolution": "1080p", "score": 0.8, "probe": probed("1080p")},
+        {"resolution": "2160p", "score": 0.7, "probe": probed("2160p")},
     ]
     check("missing file takes best allowed",
           quality.choose_release(releases, profile)["resolution"], "1080p")
@@ -698,11 +727,132 @@ def test_manager_foundations() -> None:
           quality.choose_release(releases, profile, current="720p")["resolution"], "1080p")
     check("cutoff stops upgrades",
           quality.choose_release(releases, profile, current="1080p"), None)
-    no_upgrades = quality.Profile(("1080p", "720p"), "1080p", False)
+    no_upgrades = quality.Profile(
+        tiers=(quality.Tier("1080p", "1080p"), quality.Tier("720p", "720p")),
+        cutoff_index=0, upgrades=False,
+    )
     check("upgrades disabled means no replacement",
           quality.choose_release(releases, no_upgrades, current="720p"), None)
     check("profile rejects an unknown resolution",
           raises(quality.validate_profile, ["nonsense"], exc=ValueError), "raised")
+
+    validated = quality.validate_profile(
+        [
+            {"resolution": "2160p", "sources": ["web-dl"]},
+            {"resolution": "1080p", "sources": []},
+        ],
+        cutoff="2160p WEB-DL",
+        upgrades=True,
+        audio_mode="original",
+        subtitle_mode="required",
+        subtitle_languages=["original"],
+        probe_required=True,
+    )
+    check("custom quality tier stored", validated["qualities"][0]["name"], "2160p WEB-DL")
+    check("custom cutoff stored", validated["cutoff"], "2160p WEB-DL")
+    custom = quality.Profile(
+        tiers=(quality.Tier("2160p WEB-DL", "2160p", ("web-dl",)),
+               quality.Tier("1080p", "1080p")),
+        cutoff_index=0, upgrades=True, audio_mode="original",
+        subtitle_mode="required", subtitle_languages=("original",),
+        probe_required=True,
+    )
+    webdl = {
+        "resolution": "2160p", "source": "web-dl", "score": 1.0,
+        "probe": probed("2160p", ("spa",), ("spa",)),
+    }
+    cam = {
+        "resolution": "2160p", "source": "cam", "score": 1.0,
+        "probe": probed("2160p", ("spa",), ("spa",)),
+    }
+    check("WEB-DL satisfies source restriction", custom.allows(webdl, "es"), True)
+    check("CAM is rejected by a WEB-DL tier", custom.allows(cam, "es"), False)
+    check("original-language audio is enforced",
+          custom.check(webdl, "es")[0], True)
+    check("missing original audio is rejected",
+          custom.check({**webdl, "probe": probed("2160p", ("eng",), ("spa",))}, "es")[0],
+          False)
+    check("required original subtitle is enforced",
+          custom.check({**webdl, "probe": probed("2160p", ("spa",), ())}, "es")[0],
+          False)
+    check("probe is required for a probed profile",
+          custom.check({"resolution": "2160p", "source": "web-dl"}, "es")[0], False)
+    from_row = quality.Profile.from_row({
+        "qualities": '[{"name":"2160p","resolution":"2160p","sources":[]}]',
+        "resolutions": '["2160p"]', "cutoff": "2160p", "upgrades": 1,
+        "audio_mode": "any", "audio_languages": "[]",
+        "subtitle_mode": "required", "subtitle_languages": '["original"]',
+        "probe_required": 1,
+    })
+    check("original subtitle survives the database round-trip",
+          from_row.subtitle_languages, (languages.ORIGINAL,))
+
+    section("languages, probes and connection limits")
+    check("TMDB language folds to ffprobe code", languages.normalise("en"), "eng")
+    check("terminologic French folds to B code", languages.normalise("fra"), "fre")
+    check("regional Portuguese folds", languages.normalise("pt-BR"), "por")
+    check("language names are understood", languages.normalise("English"), "eng")
+    check("unknown language tag is ignored", languages.normalise("und"), None)
+    check("original resolves through metadata",
+          languages.resolve("original", "es"), "spa")
+    check("header injection is refused",
+          streams.clean_header("X-Test", "ok\r\nX-Evil: 1"), None)
+
+    probe_payload = {
+        "streams": [
+            {"index": 0, "codec_type": "video", "codec_name": "hevc",
+             "width": 3840, "height": 1600, "color_transfer": "smpte2084"},
+            {"index": 1, "codec_type": "audio", "codec_name": "eac3",
+             "channels": 6, "tags": {"language": "eng"}},
+            {"index": 2, "codec_type": "audio", "codec_name": "aac",
+             "channels": 2, "tags": {"language": "spa"}},
+            {"index": 3, "codec_type": "subtitle", "codec_name": "subrip",
+             "tags": {"language": "eng"}},
+        ],
+        "format": {"size": "123456", "duration": "7200.5",
+                   "format_name": "matroska,webm"},
+    }
+    normalised = probe.normalise(probe_payload)
+    check("probe uses width for scope 4K", normalised["resolution"], "2160p")
+    check("probe detects HDR10", normalised["hdr"], "HDR10")
+    check("probe lists audio languages", normalised["audio_languages"], ["eng", "spa"])
+    check("probe lists subtitle languages", normalised["subtitle_languages"], ["eng"])
+    check("probe counts audio tracks", normalised["audio_track_count"], 2)
+    check("probe reads size", normalised["size"], 123456)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "connections.db"
+        db.init_db(path)
+        conn = db.connect(path)
+        conn.execute(
+            "INSERT INTO sources (id, name, kind, created_at, connection_limit, "
+            "max_connections) VALUES (1, 'limited', 'xtream', 0, 1, 4)"
+        )
+        conn.execute(
+            "INSERT INTO sources (id, name, kind, created_at, max_connections) "
+            "VALUES (2, 'provider', 'xtream', 0, 2)"
+        )
+        conn.execute(
+            "INSERT INTO sources (id, name, kind, created_at) "
+            "VALUES (3, 'unknown', 'm3u', 0)"
+        )
+        conn.commit()
+        check("user limit wins over provider", connections.effective_limit(conn, 1), 1)
+        check("provider limit used when no override",
+              connections.effective_limit(conn, 2), 2)
+        check("unknown provider limit defaults to one",
+              connections.effective_limit(conn, 3), 1)
+        check("first connection acquired", connections.try_acquire(1, conn), True)
+        check("second connection refused at limit one",
+              connections.try_acquire(1, conn), False)
+        check("active count visible", connections.active(1), 1)
+        connections.release(1)
+        check("release frees the slot", connections.try_acquire(1, conn), True)
+        connections.release(1)
+        with connections.acquire(conn, 1, purpose="test", timeout=0.5):
+            check("context manager holds the slot", connections.active(1), 1)
+        check("context manager releases", connections.active(1), 0)
+        conn.close()
 
     section("naming and path safety")
     check("illegal characters removed", naming.sanitize_component('a/b:c*?"'), "abc")
@@ -792,6 +942,12 @@ def test_manager_foundations() -> None:
         db.init_db(path)
         conn = db.connect(path)
         conn.execute("ALTER TABLE items DROP COLUMN request_headers")
+        # Simulate a version 1 database: the version 2 columns and the queue
+        # index did not exist yet, and schema.sql runs before migration.
+        conn.execute("DROP INDEX IF EXISTS idx_downloads_queue")
+        conn.execute("ALTER TABLE downloads DROP COLUMN priority")
+        conn.execute("ALTER TABLE sources DROP COLUMN connection_limit")
+        conn.execute("ALTER TABLE quality_profiles DROP COLUMN qualities")
         conn.execute("PRAGMA user_version = 0")
         conn.execute("DELETE FROM quality_profiles")
         conn.execute("DELETE FROM task_state")
@@ -800,13 +956,37 @@ def test_manager_foundations() -> None:
         db.init_db(path)
         conn = db.connect(path)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
+        source_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sources)")}
+        download_columns = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(downloads)"
+        )}
+        profile_columns = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(quality_profiles)"
+        )}
+        tables = {row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+        indexes = {row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        )}
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         profiles = conn.execute("SELECT COUNT(*) AS n FROM quality_profiles").fetchone()["n"]
         tasks = conn.execute("SELECT COUNT(*) AS n FROM task_state").fetchone()["n"]
+        tiers = conn.execute(
+            "SELECT COUNT(*) AS n FROM quality_profiles WHERE qualities IS NOT NULL"
+        ).fetchone()["n"]
         conn.close()
         check("migration adds the request_headers column", "request_headers" in columns, True)
+        check("migration adds the connection limit", "connection_limit" in source_columns, True)
+        check("migration adds download priority", "priority" in download_columns, True)
+        check("migration adds the queue index", "idx_downloads_queue" in indexes, True)
+        check("migration adds quality tier fields",
+              {"qualities", "audio_mode", "subtitle_mode", "probe_required"}
+              <= profile_columns, True)
+        check("migration creates the probe cache", "stream_probes" in tables, True)
         check("schema version recorded", version, db.SCHEMA_VERSION)
         check("migration seeds quality profiles", profiles, 2)
+        check("migration backfills quality tiers", tiers, 2)
         check("migration seeds task state", tasks, 4)
 
 

@@ -209,10 +209,11 @@
     </label>
     <p class="hint">
       Placeholders: <code>{title}</code>, <code>{year}</code>,
-      <code>{resolution}</code>, <code>{season:00}</code>,
-      <code>{episode:00}</code>, <code>{series}</code>,
+      <code>{resolution}</code>, <code>{source}</code>, <code>{quality}</code>,
+      <code>{season:00}</code>, <code>{episode:00}</code>, <code>{series}</code>,
       <code>{episode_title}</code>. Each template is one path component; the
-      extension is chosen from the downloaded file.
+      extension is chosen from the downloaded file. <code>{source}</code> and
+      <code>{quality}</code> are file tokens, not folder tokens.
     </p>
     <div class="settings-actions">
       <button class="btn btn-primary" type="submit" id="media-save">Save naming</button>
@@ -223,17 +224,19 @@
 </section>
 
 <section class="settings-card" id="download-settings">
-  <h2>Downloads</h2>
+  <h2>Downloads and probing</h2>
   <p class="hint">
-    Downloads pause while a playlist sync is running, because both use the
-    provider's connection limit.
+    Every candidate is inspected with ffprobe before it is downloaded. The
+    playlist's own connection limit is enforced across probes, syncs and
+    downloads; a season therefore downloads one episode at a time when the
+    limit is 1. Downloads for different playlists may run in parallel.
   </p>
   <form class="stack-form" id="downloads-form">
     <div class="field-row">
       <label class="field">
-        <span>Concurrent downloads</span>
+        <span>Download workers</span>
         <select id="download-concurrency">
-          <option value="1" {% if download_concurrency == '1' %}selected{% endif %}>1 (safest)</option>
+          <option value="1" {% if download_concurrency == '1' %}selected{% endif %}>1</option>
           <option value="2" {% if download_concurrency == '2' %}selected{% endif %}>2</option>
           <option value="3" {% if download_concurrency == '3' %}selected{% endif %}>3</option>
         </select>
@@ -243,11 +246,31 @@
         <input type="number" id="download-attempts" min="1" max="10" value="{{ download_max_attempts }}">
       </label>
     </div>
+    <div class="field-row">
+      <label class="field">
+        <span>Probe cache (hours)</span>
+        <input type="number" id="probe-cache-hours" min="0" max="720" value="{{ probe_cache_hours }}">
+      </label>
+      <label class="field">
+        <span>Probe timeout (seconds)</span>
+        <input type="number" id="probe-timeout" min="5" max="120" value="{{ probe_timeout_seconds }}">
+      </label>
+      <label class="field">
+        <span>Probe candidates per search</span>
+        <input type="number" id="probe-max-candidates" min="1" max="20" value="{{ probe_max_candidates }}">
+      </label>
+      <label class="field">
+        <span>Probes per search run</span>
+        <input type="number" id="probe-search-budget" min="1" max="200" value="{{ probe_search_budget }}">
+      </label>
+    </div>
     <p class="hint">
-      ffmpeg: {% if ffmpeg_available %}<span class="pill pill-ok">available</span>{% else %}<span class="pill pill-warn">not installed</span> — direct files still download, HLS needs it.{% endif %}
+      ffprobe: {% if ffprobe_available %}<span class="pill pill-ok">available</span>{% else %}<span class="pill pill-warn">not installed</span> — automatic downloads under profiles that require a probe will be refused.{% endif %}
+      &nbsp; ffmpeg: {% if ffmpeg_available %}<span class="pill pill-ok">available</span>{% else %}<span class="pill pill-warn">not installed</span> — direct files still download, HLS needs it.{% endif %}
     </p>
     <div class="settings-actions">
       <button class="btn btn-primary" type="submit" id="downloads-save">Save download settings</button>
+      <button class="btn btn-ghost" type="button" id="probes-clear">Clear probe cache</button>
       <span class="hint" id="downloads-status" role="status"></span>
     </div>
   </form>

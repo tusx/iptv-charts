@@ -18,7 +18,7 @@ import requests
 DEFAULT_BASE = "https://api4.thetvdb.com/v4"
 CONNECT_TIMEOUT = 12
 READ_TIMEOUT = 30
-DEFAULT_USER_AGENT = "IPTVCharts/0.2"
+DEFAULT_USER_AGENT = "IPTVCharts/0.3"
 
 _YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 

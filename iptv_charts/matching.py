@@ -62,6 +62,7 @@ class ParsedName:
     title_variants: tuple[str, ...]
     year: int | None
     resolution: str
+    source: str
     is_episode: bool
     season: int | None = None
     episode: int | None = None
@@ -197,6 +198,7 @@ def parse_name(name: str) -> ParsedName:
         title_variants=tuple(variants),
         year=year,
         resolution=quality.parse_resolution(original),
+        source=quality.parse_source(original),
         is_episode=is_episode,
         season=season,
         episode=episode,
@@ -303,6 +305,7 @@ def movie_candidates(
             "parsed_title": parsed.title_variants[0] if parsed.title_variants else "",
             "candidate_year": parsed.year,
             "resolution": parsed.resolution,
+            "source": parsed.source,
             "score": score,
         })
     out.sort(key=lambda candidate: (
@@ -335,6 +338,7 @@ def series_candidates(
             "parsed_title": parsed.title_variants[0] if parsed.title_variants else "",
             "candidate_year": parsed.year,
             "resolution": parsed.resolution,
+            "source": parsed.source,
             "score": score,
         })
     out.sort(key=lambda candidate: (

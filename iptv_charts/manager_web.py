@@ -8,7 +8,7 @@ from datetime import date, timedelta
 
 from flask import Blueprint, abort, g, render_template, request
 
-from . import config, db, library, metadata, quality, scan, scheduler
+from . import config, db, languages, library, metadata, quality, scan, scheduler
 
 bp = Blueprint("manager", __name__)
 
@@ -20,12 +20,11 @@ def _conn():
 
 
 def _profiles(conn) -> list[dict]:
-    rows = [dict(row) for row in conn.execute(
-        "SELECT * FROM quality_profiles ORDER BY id"
-    )]
-    for row in rows:
-        row["resolutions"] = quality.decode_resolutions(row["resolutions"])
-    return rows
+    return [
+        quality.profile_summary(row) for row in conn.execute(
+            "SELECT * FROM quality_profiles ORDER BY id"
+        )
+    ]
 
 
 def _media_context() -> dict:
@@ -91,11 +90,25 @@ def _genres(value):
         return []
 
 
+def _json_value(value):
+    if isinstance(value, (list, dict)):
+        return value
+    try:
+        parsed = json.loads(value or "null")
+    except (TypeError, ValueError):
+        return None
+    return parsed
+
+
 def _decorate_movies(movies: list[dict], active: dict) -> list[dict]:
     for movie in movies:
         movie["poster"] = metadata.image_url("w342", movie.get("poster_path"))
         movie["backdrop"] = metadata.image_url("w780", movie.get("backdrop_path"))
         movie["genres"] = _genres(movie.get("genres"))
+        movie["audio_languages"] = _json_value(movie.get("audio_languages")) or []
+        movie["subtitle_languages"] = _json_value(movie.get("subtitle_languages")) or []
+        movie["media"] = _json_value(movie.get("media_info")) or {}
+        movie["available"] = library.movie_available(movie)
         movie["download"] = active.get(int(movie["id"]))
         if movie.get("file_path"):
             movie["status"] = "downloaded"
@@ -203,6 +216,9 @@ def series_detail(series_id: int):
     seasons: dict[int, list[dict]] = {}
     for episode in episodes:
         episode["download"] = active.get(int(episode["id"]))
+        episode["audio_languages"] = _json_value(episode.get("audio_languages")) or []
+        episode["subtitle_languages"] = _json_value(episode.get("subtitle_languages")) or []
+        episode["media"] = _json_value(episode.get("media_info")) or {}
         if episode.get("file_path"):
             episode["status"] = "downloaded"
         elif episode["download"]:
@@ -384,6 +400,10 @@ def profiles_page():
         profiles=profiles,
         usage=usage,
         resolutions=quality.RESOLUTIONS,
+        sources=quality.SOURCE_CHOICES,
+        audio_modes=quality.AUDIO_MODES,
+        subtitle_modes=quality.SUBTITLE_MODES,
+        languages=languages.COMMON_LANGUAGES,
     )
 
 

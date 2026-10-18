@@ -49,7 +49,12 @@ CREATE TABLE IF NOT EXISTS sources (
     -- nonsense dates, so we record that we don't know instead.
     exp_unknown         INTEGER NOT NULL DEFAULT 0,
     active_connections  INTEGER,
+    -- What the provider reports for the account. Display/account information.
     max_connections     INTEGER,
+    -- What IPTV Charts is allowed to use. NULL means "use max_connections
+    -- when the provider reports one, otherwise 1". Enforced across playlist
+    -- syncs, metadata calls and downloads.
+    connection_limit    INTEGER,
     allowed_formats     TEXT,           -- JSON array, e.g. ["m3u8","ts"]
     server_timezone     TEXT,
     server_protocol     TEXT,
@@ -182,7 +187,14 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('download_max_attempts', '3'),
     ('search_interval_hours', '6'),
     ('refresh_interval_hours','168'),
-    ('catalog_refresh_hours', '24');
+    ('catalog_refresh_hours', '24'),
+    -- Media probing. Every candidate is inspected with ffprobe before it is
+    -- downloaded, so the quality decision uses the real video/audio/subtitle
+    -- streams rather than the provider's filename.
+    ('probe_cache_hours',     '24'),
+    ('probe_timeout_seconds', '30'),
+    ('probe_max_candidates',  '6'),
+    ('probe_search_budget',   '60');
 
 -- --------------------------------------------------------------------------
 -- Media library and automation
@@ -195,10 +207,29 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
 CREATE TABLE IF NOT EXISTS quality_profiles (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT    NOT NULL UNIQUE,
-    -- JSON array, best resolution first, e.g. ["1080p","720p","480p"].
+    -- Legacy resolution list, retained so old databases and clients can read
+    -- a profile. New decisions use `qualities` below.
     resolutions TEXT    NOT NULL,
     cutoff      TEXT,
     upgrades    INTEGER NOT NULL DEFAULT 1,
+    -- Ordered quality tiers, best first. Each tier is
+    -- {"name":"4K WEB-DL","resolution":"2160p","sources":["web-dl"]}.
+    -- An empty source list means any source. Source restrictions are taken
+    -- from the release name; audio/subtitle restrictions come from ffprobe.
+    qualities   TEXT,
+    audio_mode  TEXT    NOT NULL DEFAULT 'any'
+        CHECK (audio_mode IN ('any', 'original', 'multi', 'single')),
+    -- JSON array of ISO 639-2/B language codes. When set, at least one audio
+    -- track must match one of them.
+    audio_languages TEXT,
+    subtitle_mode TEXT NOT NULL DEFAULT 'any'
+        CHECK (subtitle_mode IN ('any', 'required', 'none')),
+    -- JSON array of ISO 639-2/B codes; the token "original" resolves to the
+    -- movie/series original language from metadata.
+    subtitle_languages TEXT,
+    -- When 1 (the default), automatic grabs require a successful ffprobe of
+    -- the stream. A failed probe is reported instead of guessed around.
+    probe_required INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL
 );
 
@@ -208,6 +239,7 @@ CREATE TABLE IF NOT EXISTS movies (
     imdb_id            TEXT,
     title              TEXT    NOT NULL,
     original_title     TEXT,
+    original_language  TEXT,            -- ISO 639-2/B, from TMDB
     -- JSON array of alternative titles, used to match localised provider names.
     alt_titles         TEXT,
     year               INTEGER,
@@ -218,13 +250,22 @@ CREATE TABLE IF NOT EXISTS movies (
     backdrop_path      TEXT,
     release_date       TEXT,
     rating             REAL,
+    status             TEXT,            -- TMDB release status
     added_at           INTEGER NOT NULL,
     updated_at         INTEGER,
     monitored          INTEGER NOT NULL DEFAULT 1,
+    -- Radarr-style minimum availability: announced | in_cinemas | released.
+    minimum_availability TEXT NOT NULL DEFAULT 'released',
+    priority           INTEGER NOT NULL DEFAULT 0,
     quality_profile_id INTEGER REFERENCES quality_profiles(id) ON DELETE SET NULL,
     file_path          TEXT,
     file_size          INTEGER,
     resolution         TEXT,
+    source             TEXT,            -- parsed release source, e.g. web-dl
+    quality_label      TEXT,            -- matched quality tier at import
+    audio_languages    TEXT,            -- JSON array from the stream probe
+    subtitle_languages TEXT,            -- JSON array from the stream probe
+    media_info         TEXT,            -- normalised ffprobe payload
     imported_at        INTEGER,
     last_search_at     INTEGER,
     search_message     TEXT
@@ -238,6 +279,7 @@ CREATE TABLE IF NOT EXISTS series (
     tvdb_id            INTEGER,
     title              TEXT    NOT NULL,
     original_title     TEXT,
+    original_language  TEXT,            -- ISO 639-2/B, from TMDB
     alt_titles         TEXT,
     year               INTEGER,
     overview           TEXT,
@@ -250,6 +292,11 @@ CREATE TABLE IF NOT EXISTS series (
     added_at           INTEGER NOT NULL,
     updated_at         INTEGER,
     monitored          INTEGER NOT NULL DEFAULT 1,
+    -- Sonarr's "monitor new seasons": all | future | none. Used when a
+    -- metadata refresh discovers episodes that were not in the library yet.
+    monitor_new_seasons TEXT NOT NULL DEFAULT 'all'
+        CHECK (monitor_new_seasons IN ('all', 'future', 'none')),
+    priority           INTEGER NOT NULL DEFAULT 0,
     quality_profile_id INTEGER REFERENCES quality_profiles(id) ON DELETE SET NULL,
     last_refreshed_at  INTEGER,
     last_search_at     INTEGER,
@@ -272,6 +319,11 @@ CREATE TABLE IF NOT EXISTS series_episodes (
     file_path      TEXT,
     file_size      INTEGER,
     resolution     TEXT,
+    source         TEXT,
+    quality_label  TEXT,
+    audio_languages TEXT,
+    subtitle_languages TEXT,
+    media_info     TEXT,
     imported_at    INTEGER,
     last_search_at INTEGER,
     UNIQUE (series_id, season, episode)
@@ -299,6 +351,12 @@ CREATE TABLE IF NOT EXISTS downloads (
     season            INTEGER,
     episode           INTEGER,
     resolution        TEXT,
+    source            TEXT,
+    quality_label     TEXT,
+    audio_languages   TEXT,
+    subtitle_languages TEXT,
+    media_info        TEXT,
+    priority          INTEGER NOT NULL DEFAULT 0,
     release_name      TEXT,
     reason            TEXT,             -- add | auto | manual | upgrade | retry
     status            TEXT    NOT NULL DEFAULT 'queued'
@@ -319,6 +377,9 @@ CREATE TABLE IF NOT EXISTS downloads (
 
 CREATE INDEX IF NOT EXISTS idx_downloads_status
     ON downloads (status, next_attempt_at);
+-- idx_downloads_queue is created in the version 2 migration: it references a
+-- column that existing databases do not have yet, and schema.sql runs before
+-- migrations.
 CREATE INDEX IF NOT EXISTS idx_downloads_movie ON downloads (movie_id);
 CREATE INDEX IF NOT EXISTS idx_downloads_episode ON downloads (episode_id);
 
@@ -374,6 +435,19 @@ CREATE TABLE IF NOT EXISTS provider_series_cache (
     payload    TEXT    NOT NULL,
     fetched_at INTEGER NOT NULL,
     PRIMARY KEY (source_id, remote_id)
+);
+
+-- ffprobe results for provider streams, keyed by the same stable identity as
+-- a download. Derived data: safe to clear, excluded from backups.
+CREATE TABLE IF NOT EXISTS stream_probes (
+    source_id          INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    provider_kind      TEXT    NOT NULL CHECK (provider_kind IN ('vod', 'series')),
+    provider_remote_id TEXT    NOT NULL,
+    episode_stream_id  TEXT    NOT NULL DEFAULT '',
+    ok                 INTEGER NOT NULL,
+    payload            TEXT    NOT NULL,
+    probed_at          INTEGER NOT NULL,
+    PRIMARY KEY (source_id, provider_kind, provider_remote_id, episode_stream_id)
 );
 
 CREATE TABLE IF NOT EXISTS task_state (

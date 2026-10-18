@@ -7,8 +7,9 @@
 #
 # Playback still happens in your browser or on the host via the player bridge,
 # so no display stack belongs here. ffmpeg is installed for the downloader:
-# HLS VODs are remuxed with it, and ffprobe validates completed files and
-# detects their real resolution.
+# HLS VODs are remuxed with it, and ffprobe inspects provider URLs before a
+# download so quality/audio/subtitle requirements use the real stream facts.
+# Nothing is transcoded; Jellyfin or another player handles playback.
 
 FROM python:3.13-slim
 

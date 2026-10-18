@@ -23,6 +23,11 @@
       <p class="detail-overview">{{ series.overview or 'No overview available.' }}</p>
       <div class="library-badges">
         {% if series.monitored %}<span class="badge badge-monitored">Monitored</span>{% endif %}
+        <span class="badge badge-muted">
+          New seasons: {% if series.monitor_new_seasons == 'future' %}future only
+          {% elif series.monitor_new_seasons == 'none' %}ignored
+          {% else %}all{% endif %}
+        </span>
         {% if series.tvdb_id %}<span class="badge badge-muted">TVDB {{ series.tvdb_id }}</span>{% endif %}
       </div>
       <div class="detail-actions">
@@ -31,6 +36,9 @@
         <button class="btn btn-danger" id="series-delete" type="button">Delete</button>
       </div>
       <p class="hint" id="series-action-status" role="status"></p>
+      {% if series.search_message %}
+        <p class="hint">Last search: {{ series.search_message }}</p>
+      {% endif %}
     </div>
   </div>
 
@@ -58,7 +66,10 @@
                   <span class="episode-code">S{{ '%02d'|format(episode.season) }}E{{ '%02d'|format(episode.episode) }}</span>
                   <span class="episode-title" title="{{ episode.title }}">{{ episode.title or 'Episode ' ~ episode.episode }}</span>
                   <span class="episode-date">{{ episode.air_date or '' }}</span>
-                  <span class="episode-resolution">{{ episode.resolution or '' }}</span>
+                  <span class="episode-resolution">
+                    {{ episode.quality_label or episode.resolution or '' }}
+                    {% if episode.audio_languages %}<span class="muted"> · {{ episode.audio_languages|join('/') }}</span>{% endif %}
+                  </span>
                   {{ status_badge('downloading' if episode.download else episode.status) }}
                   <label class="check">
                     <input type="checkbox" data-episode-monitor="{{ episode.id }}" {% if episode.monitored %}checked{% endif %}>
@@ -95,6 +106,18 @@
               </option>
             {% endfor %}
           </select>
+        </label>
+        <label class="field">
+          <span>When a new season appears</span>
+          <select id="series-new-seasons-edit">
+            <option value="all" {% if series.monitor_new_seasons == 'all' %}selected{% endif %}>Monitor all new episodes</option>
+            <option value="future" {% if series.monitor_new_seasons == 'future' %}selected{% endif %}>Monitor future episodes only</option>
+            <option value="none" {% if series.monitor_new_seasons == 'none' %}selected{% endif %}>Do not monitor new seasons</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Queue priority</span>
+          <input type="number" id="series-priority-edit" min="-100" max="100" step="1" value="{{ series.priority or 0 }}">
         </label>
         <button class="btn" type="submit">Save</button>
         <span class="hint" id="series-edit-status" role="status"></span>

@@ -117,21 +117,11 @@ def _execute(name: str, *, conn=None, force: bool = False, locked: bool = False,
             logger.info("tasks: %s deferred while syncing", name)
             return True
 
-        if name == "refresh_catalog":
-            # A sync uses one of the account's connection slots; starting one
-            # while the download queue is busy can break both. Let downloads
-            # finish first.
-            active = db.get_one(
-                conn,
-                "SELECT COUNT(*) AS n FROM downloads WHERE status IN "
-                "('queued', 'downloading', 'importing')",
-            )["n"]
-            if active:
-                _set_state(conn, name, status="idle",
-                           message="Deferred while downloads are active.",
-                           next_run=now + 300)
-                logger.info("tasks: refresh_catalog deferred while downloading")
-                return True
+        # Catalog refresh deliberately does not defer on active downloads: the
+        # connection registry makes the sync wait for its slot, and a waiting
+        # sync stops the download workers from claiming new jobs for that
+        # playlist. That is fairer than postponing the refresh indefinitely
+        # while a queue is busy.
 
         _set_state(conn, name, status="running", message="Running", started=now)
         logger.info("tasks: %s started", name)

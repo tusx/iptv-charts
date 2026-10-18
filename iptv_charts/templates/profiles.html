@@ -6,7 +6,10 @@
   <div>
     <p class="crumb"><a href="{{ url_for('settings') }}">Settings</a> / Quality profiles</p>
     <h1>Quality profiles</h1>
-    <p class="subtitle">Which resolutions are acceptable, and when upgrades should stop.</p>
+    <p class="subtitle">
+      Choose the quality hierarchy, which sources are acceptable, and what the
+      stream probe must find before a download is allowed.
+    </p>
   </div>
   <div class="page-actions">
     <button class="btn btn-primary" id="new-profile" type="button">New profile</button>
@@ -17,15 +20,43 @@
 <div class="table-wrap">
   <table class="data-table">
     <thead>
-      <tr><th>Name</th><th>Allowed resolutions</th><th>Cutoff</th><th>Upgrades</th><th>Used by</th><th></th></tr>
+      <tr>
+        <th>Name</th>
+        <th>Quality hierarchy (best first)</th>
+        <th>Audio</th>
+        <th>Subtitles</th>
+        <th>Cutoff</th>
+        <th>Used by</th>
+        <th></th>
+      </tr>
     </thead>
     <tbody>
       {% for profile in profiles %}
         <tr>
           <td><strong>{{ profile.name }}</strong></td>
-          <td>{{ profile.resolutions|join(' → ') }}</td>
+          <td>
+            {% for tier in profile.qualities %}
+              <span class="quality-chip">{{ tier.name }}</span>{% if not loop.last %} <span class="muted">→</span> {% endif %}
+            {% endfor %}
+          </td>
+          <td>
+            {% if profile.audio_mode == 'original' %}Original language
+            {% elif profile.audio_mode == 'single' %}Single track
+            {% elif profile.audio_mode == 'multi' %}Multiple tracks
+            {% else %}Any{% endif %}
+            {% if profile.audio_languages %}
+              <span class="muted small">({{ profile.audio_languages|join(', ') }})</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if profile.subtitle_mode == 'required' %}Required
+            {% elif profile.subtitle_mode == 'none' %}Not allowed
+            {% else %}Any{% endif %}
+            {% if profile.subtitle_languages %}
+              <span class="muted small">({{ profile.subtitle_languages|join(', ') }})</span>
+            {% endif %}
+          </td>
           <td>{{ profile.cutoff or '—' }}</td>
-          <td>{{ 'Yes' if profile.upgrades else 'No' }}</td>
           <td>{{ usage.get(profile.id, 0) }}</td>
           <td class="row-actions">
             <button class="btn btn-sm" type="button" data-edit-profile="{{ profile.id }}">Edit</button>
@@ -38,25 +69,84 @@
   </table>
 </div>
 
-<dialog class="dialog" id="profile-dialog">
+<dialog class="dialog dialog-wide" id="profile-dialog">
   <div class="dialog-head">
     <h2 id="profile-dialog-title">New profile</h2>
     <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
   </div>
-  <div class="dialog-body">
+  <div class="dialog-body profile-editor">
     <label class="field">
       <span>Name</span>
-      <input type="text" id="profile-name" maxlength="80" placeholder="HD">
+      <input type="text" id="profile-name" maxlength="80" placeholder="4K WEB-DL">
     </label>
+
     <div class="field">
-      <span>Allowed resolutions</span>
-      <div class="choices" id="profile-resolutions"></div>
+      <span>Quality hierarchy <small class="muted">— best first. A source restriction applies to that tier only.</small></span>
+      <div class="tier-list" id="profile-tiers"></div>
+      <button class="btn btn-sm" type="button" id="profile-add-tier">Add quality tier</button>
     </div>
-    <label class="field">
-      <span>Upgrade until (cutoff)</span>
-      <select id="profile-cutoff"></select>
+
+    <div class="field-row">
+      <label class="field">
+        <span>Upgrade until (cutoff)</span>
+        <select id="profile-cutoff"></select>
+      </label>
+      <label class="check check-tall">
+        <input type="checkbox" id="profile-upgrades" checked>
+        Allow upgrades when a better release appears
+      </label>
+    </div>
+
+    <fieldset class="profile-fieldset">
+      <legend>Audio</legend>
+      <div class="field-row">
+        <label class="field">
+          <span>Requirement</span>
+          <select id="profile-audio-mode">
+            <option value="any">Any audio</option>
+            <option value="original">Original language audio</option>
+            <option value="single">Single audio track</option>
+            <option value="multi">Multiple audio tracks</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Also require a language <small class="muted">(any of)</small></span>
+          <select id="profile-audio-languages" multiple size="5"></select>
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset class="profile-fieldset">
+      <legend>Subtitles</legend>
+      <div class="field-row">
+        <label class="field">
+          <span>Requirement</span>
+          <select id="profile-subtitle-mode">
+            <option value="any">Any / do not care</option>
+            <option value="required">Subtitles required</option>
+            <option value="none">No subtitle tracks</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Required language <small class="muted">(any of)</small></span>
+          <select id="profile-subtitle-languages" multiple size="5"></select>
+        </label>
+      </div>
+      <p class="hint">
+        Language checks use embedded stream tags reported by ffprobe. Burned-in
+        subtitles cannot be detected. “Original” follows the movie/series original language.
+      </p>
+    </fieldset>
+
+    <label class="check">
+      <input type="checkbox" id="profile-probe-required" checked>
+      Require a successful stream probe before automatic download
     </label>
-    <label class="check"><input type="checkbox" id="profile-upgrades" checked> Allow upgrades when a better release appears</label>
+    <p class="hint">
+      Probing uses ffprobe on the provider URL. The download starts only when the
+      real resolution, source and stream tracks satisfy this profile. Probing
+      counts against the playlist connection limit.
+    </p>
     <p class="hint" id="profile-dialog-status" role="status"></p>
   </div>
   <div class="dialog-foot">
@@ -68,6 +158,10 @@
 <script>
   window.PROFILES = {{ profiles|tojson }};
   window.RESOLUTIONS = {{ resolutions|tojson }};
+  window.SOURCES = {{ sources|tojson }};
+  window.LANGUAGES = {{ languages|tojson }};
+  window.AUDIO_MODES = {{ audio_modes|tojson }};
+  window.SUBTITLE_MODES = {{ subtitle_modes|tojson }};
 </script>
 {% endblock %}
 

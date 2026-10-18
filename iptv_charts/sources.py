@@ -230,10 +230,19 @@ def _default_name(result: dict) -> str:
 
 def create(conn: sqlite3.Connection, kind: str, name: str, *, m3u_url: str = "",
            base_url: str = "", username: str = "", password: str = "",
-           user_agent: str = "", referrer: str = "") -> int:
+           user_agent: str = "", referrer: str = "",
+           connection_limit: int | None = None) -> int:
     """Insert a source and return its id."""
     if kind not in ("m3u", "xtream"):
         raise ProbeError(f"Unknown playlist type {kind!r}.")
+    if connection_limit is not None:
+        try:
+            connection_limit = int(connection_limit)
+        except (TypeError, ValueError):
+            raise ProbeError("The connection limit must be a whole number.")
+        if connection_limit < 1:
+            raise ProbeError("The connection limit must be at least 1.")
+        connection_limit = min(connection_limit, 32)
 
     headers = {}
     if user_agent:
@@ -258,8 +267,8 @@ def create(conn: sqlite3.Connection, kind: str, name: str, *, m3u_url: str = "",
     cursor = conn.execute(
         """
         INSERT INTO sources (name, kind, created_at, base_url, username, password,
-                             m3u_url, request_headers, sync_status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'never')
+                             m3u_url, request_headers, connection_limit, sync_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'never')
         """,
         (
             name.strip() or "Untitled playlist",
@@ -270,10 +279,47 @@ def create(conn: sqlite3.Connection, kind: str, name: str, *, m3u_url: str = "",
             password.strip() or None,
             play_url,
             json.dumps(headers) if headers else None,
+            connection_limit,
         ),
     )
     conn.commit()
     return int(cursor.lastrowid)
+
+
+def update(conn: sqlite3.Connection, source_id: int, *,
+           name: str | None = None, connection_limit: int | None | object = ...) -> dict:
+    """Update the settings that are safe to edit without re-probing.
+
+    Credentials are deliberately not changed here: editing them silently
+    would leave the stored catalog belonging to the old account until the next
+    sync. Removing and adding is clearer.
+    """
+    row = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+    if row is None:
+        raise ProbeError("That playlist no longer exists.")
+    fields: list[str] = []
+    params: list = []
+    if name is not None:
+        cleaned = name.strip()[:120] or "Untitled playlist"
+        fields.append("name = ?")
+        params.append(cleaned)
+    if connection_limit is not ...:
+        if connection_limit is None:
+            fields.append("connection_limit = NULL")
+        else:
+            try:
+                limit = int(connection_limit)
+            except (TypeError, ValueError):
+                raise ProbeError("The connection limit must be a whole number.")
+            if limit < 1:
+                raise ProbeError("The connection limit must be at least 1.")
+            fields.append("connection_limit = ?")
+            params.append(min(limit, 32))
+    if fields:
+        params.append(int(source_id))
+        conn.execute(f"UPDATE sources SET {', '.join(fields)} WHERE id = ?", params)
+        conn.commit()
+    return dict(conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone())
 
 
 def delete(conn: sqlite3.Connection, source_id: int) -> bool:
@@ -298,4 +344,5 @@ __all__ = [
     "probe_m3u",
     "probe_xtream",
     "request_headers",
+    "update",
 ]

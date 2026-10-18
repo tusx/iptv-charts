@@ -23,11 +23,13 @@ DEFAULT_EPISODE_FILE = (
 )
 
 MOVIE_FOLDER_TOKENS = frozenset({"title", "year"})
-MOVIE_FILE_TOKENS = frozenset({"title", "year", "resolution"})
+MOVIE_FILE_TOKENS = frozenset(
+    {"title", "year", "resolution", "source", "quality"}
+)
 SERIES_FOLDER_TOKENS = frozenset({"title", "year"})
 SEASON_FOLDER_TOKENS = frozenset({"season"})
 EPISODE_FILE_TOKENS = frozenset(
-    {"series", "season", "episode", "episode_title", "resolution"}
+    {"series", "season", "episode", "episode_title", "resolution", "source", "quality"}
 )
 
 _TOKEN_RE = re.compile(r"\{([a-z_]+)(?::(0+))?\}")

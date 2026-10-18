@@ -16,6 +16,9 @@
   const profile = $('#series-profile');
   const monitored = $('#series-monitored');
   const searchNow = $('#series-search-now');
+  const monitorMode = $('#series-monitor-mode');
+  const newSeasons = $('#series-new-seasons');
+  const priority = $('#series-priority');
   let token = 0;
 
   $('#add-series-btn')?.addEventListener('click', () => open(dialog));
@@ -87,6 +90,9 @@
           quality_profile_id: Number(profile.value),
           monitored: monitored ? monitored.checked : true,
           search: searchNow ? searchNow.checked : true,
+          monitor_mode: monitorMode ? monitorMode.value : 'all',
+          monitor_new_seasons: newSeasons ? newSeasons.value : 'all',
+          priority: priority ? Number(priority.value) || 0 : 0,
         });
         setStatus(status, 'Added — loading the series…', 'ok');
         window.setTimeout(() => window.location.reload(), 400);

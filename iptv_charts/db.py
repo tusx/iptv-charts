@@ -22,7 +22,7 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 #: Bumped whenever schema.sql starts relying on a column that existing
 #: databases do not have. New tables appear through CREATE IF NOT EXISTS;
 #: columns need an explicit step below.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _TASKS = ("search_missing", "refresh_metadata", "refresh_catalog", "scan_library")
 
@@ -132,6 +132,84 @@ def migrate(conn: sqlite3.Connection) -> None:
             )
         for name in _TASKS:
             conn.execute("INSERT OR IGNORE INTO task_state (name) VALUES (?)", (name,))
+
+    if version < 2:
+        # Stream probing, source/audio/subtitle quality requirements, per-source
+        # connection limits, queue priority and Sonarr-style new-season rules.
+        # Every column is added conditionally: a fresh database already has
+        # them from schema.sql, an existing one needs the ALTER.
+        additions = (
+            ("sources", "connection_limit", "INTEGER"),
+            ("quality_profiles", "qualities", "TEXT"),
+            ("quality_profiles", "audio_mode", "TEXT NOT NULL DEFAULT 'any'"),
+            ("quality_profiles", "audio_languages", "TEXT"),
+            ("quality_profiles", "subtitle_mode", "TEXT NOT NULL DEFAULT 'any'"),
+            ("quality_profiles", "subtitle_languages", "TEXT"),
+            ("quality_profiles", "probe_required", "INTEGER NOT NULL DEFAULT 1"),
+            ("movies", "original_language", "TEXT"),
+            ("movies", "status", "TEXT"),
+            ("movies", "minimum_availability", "TEXT NOT NULL DEFAULT 'released'"),
+            ("movies", "priority", "INTEGER NOT NULL DEFAULT 0"),
+            ("movies", "source", "TEXT"),
+            ("movies", "quality_label", "TEXT"),
+            ("movies", "audio_languages", "TEXT"),
+            ("movies", "subtitle_languages", "TEXT"),
+            ("movies", "media_info", "TEXT"),
+            ("series", "original_language", "TEXT"),
+            ("series", "monitor_new_seasons", "TEXT NOT NULL DEFAULT 'all'"),
+            ("series", "priority", "INTEGER NOT NULL DEFAULT 0"),
+            ("series_episodes", "source", "TEXT"),
+            ("series_episodes", "quality_label", "TEXT"),
+            ("series_episodes", "audio_languages", "TEXT"),
+            ("series_episodes", "subtitle_languages", "TEXT"),
+            ("series_episodes", "media_info", "TEXT"),
+            ("downloads", "priority", "INTEGER NOT NULL DEFAULT 0"),
+            ("downloads", "source", "TEXT"),
+            ("downloads", "quality_label", "TEXT"),
+            ("downloads", "audio_languages", "TEXT"),
+            ("downloads", "subtitle_languages", "TEXT"),
+            ("downloads", "media_info", "TEXT"),
+        )
+        for table, column, definition in additions:
+            if column not in _columns(conn, table):
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+        # An index on a column that did not exist before the ALTERs above.
+        # This cannot live in schema.sql: that script runs before migration on
+        # an old database, where the column is still missing.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_downloads_queue "
+            "ON downloads (status, priority DESC, next_attempt_at, id)"
+        )
+
+        # Movies added before minimum availability existed should not suddenly
+        # stop being searched just because TMDB has no release date for them.
+        conn.execute(
+            "UPDATE movies SET minimum_availability = 'announced' "
+            "WHERE (release_date IS NULL OR release_date = '') "
+            "AND minimum_availability = 'released'"
+        )
+
+        # Existing profiles only had resolutions. Turn each into an ordered
+        # tier with no source restriction so decisions keep working until the
+        # user edits the profile.
+        rows = conn.execute(
+            "SELECT id, resolutions FROM quality_profiles WHERE qualities IS NULL"
+        ).fetchall()
+        for row in rows:
+            try:
+                resolutions = json.loads(row["resolutions"] or "[]")
+            except (TypeError, ValueError):
+                resolutions = []
+            tiers = [
+                {"name": str(resolution), "resolution": str(resolution), "sources": []}
+                for resolution in resolutions
+                if isinstance(resolution, str)
+            ]
+            conn.execute(
+                "UPDATE quality_profiles SET qualities = ? WHERE id = ?",
+                (json.dumps(tiers), row["id"]),
+            )
 
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()

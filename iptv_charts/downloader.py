@@ -22,14 +22,12 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import urlsplit
 
 import requests
 
-from . import config, db, items, library, naming, player, quality, sync
+from . import config, connections, db, library, naming, player, quality, streams
 
 logger = logging.getLogger("iptv_charts.downloads")
 
@@ -38,7 +36,6 @@ TERMINAL = ("imported", "failed", "cancelled")
 CHUNK = 1024 * 1024
 PROGRESS_INTERVAL = 2.0
 DISK_MARGIN = 256 * 1024 * 1024
-_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _URL_IN_TEXT_RE = re.compile(r"https?://\S+")
 _CONTENT_RANGE_RE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", re.IGNORECASE)
 
@@ -59,14 +56,6 @@ class DownloadInterrupted(RuntimeError):
     """The app is shutting down; keep the temp file and resume next start."""
 
 
-@dataclass
-class Resolved:
-    url: str
-    headers: dict[str, str]
-    container_ext: str
-    hls: bool
-
-
 def _now() -> int:
     return int(time.time())
 
@@ -77,144 +66,12 @@ def _redact(text: str | None, limit: int = 600) -> str:
     return value[:limit]
 
 
-def _json_headers(row: Mapping[str, Any] | None) -> dict:
-    if not row:
-        return {}
-    try:
-        value = json.loads(row["request_headers"] or "{}")
-        return value if isinstance(value, dict) else {}
-    except (KeyError, TypeError, ValueError):
-        return {}
-
-
-def _clean_header(name: Any, value: Any) -> tuple[str, str] | None:
-    name_text = str(name or "").strip()
-    value_text = str(value or "").strip()
-    if not name_text or not _HEADER_NAME_RE.match(name_text):
-        return None
-    if not value_text or any(char in value_text for char in "\r\n\x00"):
-        return None
-    return name_text, value_text[:4096]
-
-
-def _effective_headers(source_row, item_row=None) -> dict[str, str]:
-    source = _json_headers(source_row)
-    item = _json_headers(item_row)
-    # A library-owned user agent is friendlier to panels than requests'
-    # default; a playlist-provided one always wins.
-    user_agent = item.get("user_agent") or source.get("user_agent") or "IPTVCharts/0.2"
-    referrer = item.get("referrer") or source.get("referrer")
-    headers: dict[str, str] = {}
-    if user_agent:
-        cleaned = _clean_header("User-Agent", user_agent)
-        if cleaned:
-            headers[cleaned[0]] = cleaned[1]
-    if referrer:
-        cleaned = _clean_header("Referer", referrer)
-        if cleaned:
-            headers[cleaned[0]] = cleaned[1]
-    for block in (source.get("headers"), item.get("headers")):
-        if not isinstance(block, dict):
-            continue
-        for name, value in block.items():
-            cleaned = _clean_header(name, value)
-            if cleaned and cleaned[0].lower() not in {
-                "user-agent", "referer", "referrer"
-            }:
-                headers[cleaned[0]] = cleaned[1]
-    return headers
-
-
-def _ffmpeg_headers(headers: Mapping[str, str]) -> str | None:
-    if not headers:
-        return None
-    lines = [f"{name}: {value}" for name, value in headers.items()]
-    return "\r\n".join(lines) + "\r\n"
-
-
-def _extension_from_url(url: str) -> str:
-    suffix = Path(urlsplit(url).path).suffix.lower().lstrip(".")
-    return naming.safe_extension(suffix, "mp4") if suffix else "mp4"
-
-
-def _resolve(conn, download: Mapping[str, Any]) -> Resolved:
+def _resolve(conn, download: Mapping[str, Any]) -> streams.StreamRef:
     """Rebuild the provider URL from the identity captured at grab time."""
-    source = db.get_one(conn, "SELECT * FROM sources WHERE id = ?", (download["source_id"],))
-    if source is None:
-        raise PermanentDownloadError(
-            "The playlist this was grabbed from no longer exists."
-        )
-    source = dict(source)
-    item = None
-
-    if download["kind"] == "movie":
-        item = db.get_one(
-            conn,
-            "SELECT * FROM items WHERE source_id = ? AND kind = 'vod' AND remote_id = ?",
-            (download["source_id"], str(download["provider_remote_id"])),
-        )
-        if item is None:
-            raise PermanentDownloadError(
-                "That VOD is no longer in the playlist. Update the playlist and try again."
-            )
-        item = dict(item)
-        try:
-            url = items.build_stream_url(source, item, prefer_hls=False)
-        except items.PlaybackUnavailable as exc:
-            raise PermanentDownloadError(str(exc)) from exc
-        extension = naming.safe_extension(
-            item.get("container_ext") or download.get("container_ext")
-            or _extension_from_url(url)
-        )
-        headers = _effective_headers(source, item)
-    else:
-        if source["kind"] != "xtream":
-            raise PermanentDownloadError(
-                "Episode downloads need an Xtream playlist."
-            )
-        try:
-            episodes = library.provider_series_episodes(
-                conn, source, str(download["provider_remote_id"])
-            )
-            provider_episode = next(
-                (entry for entry in episodes
-                 if str(entry["stream_id"]) == str(download["episode_stream_id"])),
-                None,
-            )
-            if provider_episode is None:
-                episodes = library.provider_series_episodes(
-                    conn, source, str(download["provider_remote_id"]), refresh=True
-                )
-                provider_episode = next(
-                    (entry for entry in episodes
-                     if str(entry["stream_id"]) == str(download["episode_stream_id"])),
-                    None,
-                )
-        except Exception as exc:
-            raise PermanentDownloadError(
-                f"The provider's episode list could not be read: {_redact(str(exc))}"
-            ) from exc
-        if provider_episode is None:
-            raise PermanentDownloadError(
-                "That episode is no longer listed by the provider."
-            )
-        extension = naming.safe_extension(
-            provider_episode.get("container_ext") or download.get("container_ext")
-        )
-        url = items.build_episode_url(
-            source, str(provider_episode["stream_id"]), extension
-        )
-        headers = _effective_headers(source)
-
-    scheme = (urlsplit(url).scheme or "").lower()
-    if scheme not in ("http", "https"):
-        raise PermanentDownloadError(
-            f"Only http/https streams can be downloaded, not {scheme or 'this URL'}."
-        )
-    hls = items.guess_media_type(url) == "hls"
-    if hls:
-        extension = "mkv"
-    return Resolved(url=url, headers=headers, container_ext=extension, hls=hls)
+    try:
+        return streams.download_stream(conn, download)
+    except streams.StreamError as exc:
+        raise PermanentDownloadError(str(exc)) from exc
 
 
 class DownloadManager:
@@ -293,9 +150,6 @@ class DownloadManager:
                 allowed = self.concurrency(conn)
                 if index >= allowed:
                     break
-                if sync.is_busy():
-                    time.sleep(2.0)
-                    continue
                 job = self._claim(conn)
                 if job is None:
                     time.sleep(1.0)
@@ -309,55 +163,118 @@ class DownloadManager:
             self._worker_exit(index)
 
     def _claim(self, conn) -> dict | None:
+        """Claim the highest-priority row whose playlist has a free slot.
+
+        The connection slot is acquired before the row is marked downloading
+        and held until ``_process`` finishes. When the playlist's limit is
+        reached, a lower-priority row from another playlist may run; that is
+        deliberate, because waiting for one full download would leave a
+        second provider idle.
+        """
+        acquired_source: int | None = None
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM downloads WHERE status = 'queued' "
                 "AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
-                "ORDER BY id LIMIT 1",
+                "ORDER BY priority DESC, requested_at, id LIMIT 50",
                 (_now(),),
-            ).fetchone()
+            ).fetchall()
+            row = None
+            limits: dict[int, int] = {}
+            for candidate in rows:
+                source_id = candidate["source_id"]
+                if source_id is None:
+                    # Let it fail with a clear permanent error; no provider
+                    # call is made for it, so no slot is needed.
+                    row = candidate
+                    break
+                source_id = int(source_id)
+                limit = limits.get(source_id)
+                if limit is None:
+                    limit = connections.effective_limit(conn, source_id)
+                    limits[source_id] = limit
+                if connections.try_acquire(source_id, limit=limit):
+                    acquired_source = source_id
+                    row = candidate
+                    break
             if row is None:
                 conn.commit()
                 return None
             attempts = int(row["attempts"]) + 1
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE downloads SET status = 'downloading', "
                 "started_at = COALESCE(started_at, ?), attempts = ?, "
                 "next_attempt_at = NULL, error = NULL "
                 "WHERE id = ? AND status = 'queued'",
                 (_now(), attempts, row["id"]),
             )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                if acquired_source is not None:
+                    connections.release(acquired_source)
+                return None
             conn.commit()
         except Exception:
             try:
                 conn.rollback()
             except Exception:
                 pass
+            if acquired_source is not None:
+                connections.release(acquired_source)
             return None
         job = dict(row)
         job["attempts"] = attempts
         job["status"] = "downloading"
+        job["_connection_source"] = acquired_source
         return job
 
     # ------------------------------------------------------------------ queue
+    @staticmethod
+    def _json(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _priority(value: Any) -> int:
+        try:
+            return max(-100, min(100, int(value or 0)))
+        except (TypeError, ValueError):
+            return 0
+
     def enqueue_movie(self, conn, movie: Mapping[str, Any], release: Mapping[str, Any],
-                      *, reason: str = "auto") -> dict:
+                      *, reason: str = "auto", priority: int | None = None) -> dict:
         if library.active_download(conn, movie_id=int(movie["id"])):
             raise ValueError("A download for this movie is already active.")
         now = _now()
+        probe = release.get("probe") if isinstance(release, Mapping) else None
+        priority_value = (priority if priority is not None
+                          else release.get("priority", movie.get("priority", 0)))
         cursor = conn.execute(
             """
             INSERT INTO downloads (
                 kind, movie_id, source_id, source_name, provider_kind,
-                provider_remote_id, container_ext, title, resolution,
-                release_name, reason, status, attempts, max_attempts, requested_at
-            ) VALUES ('movie', ?, ?, ?, 'vod', ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)
+                provider_remote_id, container_ext, title, resolution, source,
+                quality_label, audio_languages, subtitle_languages, media_info,
+                priority, release_name, reason, status, attempts, max_attempts,
+                requested_at
+            ) VALUES ('movie', ?, ?, ?, 'vod', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      'queued', 0, ?, ?)
             """,
             (
                 int(movie["id"]), int(release["source_id"]), release.get("source_name"),
                 str(release["remote_id"]), release.get("container_ext"),
                 movie["title"], release.get("resolution") or "unknown",
+                release.get("source"), release.get("quality_label"),
+                self._json(release.get("audio_languages")),
+                self._json(release.get("subtitle_languages")),
+                self._json(probe), self._priority(priority_value),
                 release.get("name"), reason, self.max_attempts(conn), now,
             ),
         )
@@ -375,21 +292,26 @@ class DownloadManager:
 
     def enqueue_episode(self, conn, series: Mapping[str, Any], episode: Mapping[str, Any],
                         candidate: Mapping[str, Any], provider_episode: Mapping[str, Any],
-                        *, reason: str = "auto") -> dict:
+                        *, reason: str = "auto", priority: int | None = None) -> dict:
         if library.active_download(conn, episode_id=int(episode["id"])):
             raise ValueError("A download for this episode is already active.")
         label = (f"{series['title']} S{int(episode['season']):02d}"
                  f"E{int(episode['episode']):02d}")
         now = _now()
+        probe = candidate.get("probe") if isinstance(candidate, Mapping) else None
+        priority_value = (priority if priority is not None
+                          else candidate.get("priority", series.get("priority", 0)))
         cursor = conn.execute(
             """
             INSERT INTO downloads (
                 kind, movie_id, series_id, episode_id, source_id, source_name,
                 provider_kind, provider_remote_id, episode_stream_id,
                 container_ext, title, episode_title, season, episode, resolution,
-                release_name, reason, status, attempts, max_attempts, requested_at
+                source, quality_label, audio_languages, subtitle_languages,
+                media_info, priority, release_name, reason, status, attempts,
+                max_attempts, requested_at
             ) VALUES ('episode', NULL, ?, ?, ?, ?, 'series', ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, 'queued', 0, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)
             """,
             (
                 int(series["id"]), int(episode["id"]), int(candidate["source_id"]),
@@ -398,6 +320,10 @@ class DownloadManager:
                 provider_episode.get("container_ext") or "mp4",
                 series["title"], episode.get("title"), int(episode["season"]),
                 int(episode["episode"]), candidate.get("resolution") or "unknown",
+                candidate.get("source"), candidate.get("quality_label"),
+                self._json(candidate.get("audio_languages")),
+                self._json(candidate.get("subtitle_languages")),
+                self._json(probe), self._priority(priority_value),
                 candidate.get("name"), reason, self.max_attempts(conn), now,
             ),
         )
@@ -495,6 +421,7 @@ class DownloadManager:
     # -------------------------------------------------------------- processing
     def _process(self, conn, job: dict) -> None:
         download_id = int(job["id"])
+        connection_source = job.pop("_connection_source", None)
         cancel = threading.Event()
         with self._lock:
             self._cancels[download_id] = cancel
@@ -595,6 +522,8 @@ class DownloadManager:
                 logger.warning("downloads: #%d failed after %d attempts: %s",
                                download_id, attempts, message)
         finally:
+            if connection_source is not None:
+                connections.release(int(connection_source))
             with self._lock:
                 self._cancels.pop(download_id, None)
 
@@ -626,7 +555,7 @@ class DownloadManager:
         conn.commit()
         logger.info("downloads: cancelled #%d", download_id)
 
-    def _temp_path(self, job: Mapping[str, Any], resolved: Resolved) -> Path:
+    def _temp_path(self, job: Mapping[str, Any], resolved: streams.StreamRef) -> Path:
         existing = job.get("temp_path")
         if existing:
             try:
@@ -650,7 +579,7 @@ class DownloadManager:
         )
         conn.commit()
 
-    def _download_http(self, conn, job: Mapping[str, Any], resolved: Resolved,
+    def _download_http(self, conn, job: Mapping[str, Any], resolved: streams.StreamRef,
                        temp_path: Path, cancel: threading.Event) -> int | None:
         download_id = int(job["id"])
         temp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -745,7 +674,7 @@ class DownloadManager:
 
         raise DownloadError("The provider would not resume or restart the download.")
 
-    def _download_hls(self, conn, job: Mapping[str, Any], resolved: Resolved,
+    def _download_hls(self, conn, job: Mapping[str, Any], resolved: streams.StreamRef,
                       temp_path: Path, cancel: threading.Event) -> int | None:
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
@@ -763,9 +692,7 @@ class DownloadManager:
         command = [
             ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
         ]
-        header_text = _ffmpeg_headers(resolved.headers)
-        if header_text:
-            command += ["-headers", header_text]
+        command += streams.ffmpeg_header_args(resolved.headers)
         command += [
             "-protocol_whitelist", "http,https,tcp,tls,crypto",
             "-i", resolved.url,
@@ -873,7 +800,7 @@ def _probe_resolution(path: Path) -> str | None:
     try:
         result = subprocess.run(
             [ffprobe, "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=height", "-of", "json", str(path)],
+             "-show_entries", "stream=width,height", "-of", "json", str(path)],
             capture_output=True, text=True, timeout=20,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -885,10 +812,11 @@ def _probe_resolution(path: Path) -> str | None:
     try:
         payload = json.loads(result.stdout or "{}")
         streams = payload.get("streams") or []
+        width = int(streams[0]["width"]) if streams else None
         height = int(streams[0]["height"]) if streams else None
     except (ValueError, KeyError, TypeError, IndexError):
         return None
-    return quality.resolution_from_height(height)
+    return quality.resolution_from_dimensions(width, height)
 
 
 # ------------------------------------------------------------------ facade

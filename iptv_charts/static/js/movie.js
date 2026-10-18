@@ -52,6 +52,8 @@
       await patch(`/api/movies/${movieId}`, {
         monitored: $('#movie-monitored-edit').checked,
         quality_profile_id: Number($('#movie-profile-edit').value),
+        minimum_availability: $('#movie-availability-edit').value,
+        priority: Number($('#movie-priority-edit').value) || 0,
       });
       setStatus($('#movie-edit-status'), 'Saved.', 'ok');
       window.setTimeout(() => window.location.reload(), 500);
@@ -107,15 +109,37 @@
   function renderRelease(release) {
     const row = element('div', 'release-row');
     const main = element('div', 'release-main');
+    const probe = release.probe || {};
     main.append(element('strong', '', release.name));
-    main.append(element('span', 'muted',
-      `${release.source_name || 'Unknown playlist'} · ${release.candidate_year || 'year ?'} · ${release.resolution || 'unknown'}`));
+    const bits = [
+      release.source_name || 'Unknown playlist',
+      release.candidate_year || 'year ?',
+      release.resolution || 'unknown',
+      release.source && release.source !== 'unknown' ? release.source.toUpperCase() : null,
+      release.quality_label || null,
+    ].filter(Boolean);
+    main.append(element('span', 'muted', bits.join(' · ')));
+    if (probe.ok) {
+      const tracks = `${probe.audio_track_count || 0} audio · ${probe.subtitle_track_count || 0} subtitle`;
+      const langs = [];
+      if ((release.audio_languages || []).length) langs.push(`audio ${release.audio_languages.join('/')}`);
+      if ((release.subtitle_languages || []).length) langs.push(`subs ${release.subtitle_languages.join('/')}`);
+      main.append(element('span', 'muted small',
+        `${probe.video_codec || 'video'}${probe.hdr && probe.hdr !== 'SDR' ? ` ${probe.hdr}` : ''} · ${tracks}${langs.length ? ` · ${langs.join(' · ')}` : ''}`));
+    } else if (probe.error) {
+      main.append(element('span', 'queue-error small', `Probe failed: ${probe.error}`));
+    }
+    if (release.reason) {
+      main.append(element('span', release.allowed ? 'muted small' : 'queue-error small', release.reason));
+    }
     main.append(element('span', 'release-score', `match ${Math.round((release.score || 0) * 100)}%`));
 
     const badge = element('span', `badge ${release.allowed ? 'badge-downloaded' : 'badge-missing'}`,
       release.allowed ? 'Profile allows' : 'Outside profile');
     const grab = element('button', 'btn btn-primary btn-sm', 'Grab');
     grab.type = 'button';
+    grab.disabled = !release.allowed;
+    if (!release.allowed) grab.title = 'This release does not satisfy the quality profile or stream probe.';
     grab.addEventListener('click', async () => {
       grab.disabled = true;
       grab.textContent = 'Queuing…';

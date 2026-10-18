@@ -103,6 +103,7 @@
       base_url: value('#field-base'),
       username: value('#field-user'),
       password: $('#field-pass')?.value || '',
+      connection_limit: value('#field-limit'),
     };
   }
 
@@ -262,6 +263,24 @@
       try {
         await postJSON(`/api/sources/${button.dataset.sourceId}/cancel`);
       } catch { /* already finished, most likely */ }
+    });
+  });
+
+  $$('.source-limit-form').forEach((form) => {
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button[type="submit"]');
+      const input = form.querySelector('input[type="number"]');
+      button.disabled = true;
+      try {
+        await postJSON(`/api/sources/${form.dataset.sourceId}`, {
+          connection_limit: input.value === '' ? null : Number(input.value),
+        }, 'PATCH');
+        window.location.reload();
+      } catch (error) {
+        showCardError(form.dataset.sourceId, error.message);
+        button.disabled = false;
+      }
     });
   });
 

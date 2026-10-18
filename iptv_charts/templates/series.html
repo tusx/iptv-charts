@@ -82,6 +82,28 @@
           {% endfor %}
         </select>
       </label>
+      <label class="field">
+        <span>Monitor episodes</span>
+        <select id="series-monitor-mode">
+          <option value="all" selected>All episodes (released and upcoming)</option>
+          <option value="future">Only upcoming episodes</option>
+          <option value="first">First season</option>
+          <option value="latest">Latest season</option>
+          <option value="none">None (metadata only)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>When a new season appears</span>
+        <select id="series-new-seasons">
+          <option value="all" selected>Monitor all new episodes</option>
+          <option value="future">Monitor future episodes only</option>
+          <option value="none">Do not monitor new seasons</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Queue priority <small class="muted">higher runs first</small></span>
+        <input type="number" id="series-priority" min="-100" max="100" step="1" value="0">
+      </label>
       <label class="check"><input type="checkbox" id="series-monitored" checked> Monitored</label>
       <label class="check"><input type="checkbox" id="series-search-now" checked> Search and download now</label>
     </div>

@@ -97,10 +97,14 @@
           <div>
             <dt>Connections</dt>
             <dd>
-              {% if source.max_connections %}
-                {{ source.active_connections or 0 }} / {{ source.max_connections }}
+              {% set effective_limit = source.connection_limit or source.max_connections or 1 %}
+              {{ connection_counts.get(source.id, 0) }} / {{ effective_limit }} in use
+              {% if source.connection_limit %}
+                <span class="muted">· manual</span>
+              {% elif source.max_connections %}
+                <span class="muted">· provider</span>
               {% else %}
-                <span class="muted">unknown</span>
+                <span class="muted">· default</span>
               {% endif %}
             </dd>
           </div>
@@ -143,6 +147,17 @@
           <button class="btn btn-ghost btn-danger js-delete" data-source-id="{{ source.id }}"
                   data-source-name="{{ source.name }}" title="Remove this playlist">Remove</button>
         </footer>
+        <form class="source-limit-form"
+              data-source-id="{{ source.id }}" data-source-name="{{ source.name }}">
+          <label>
+            <span class="muted">Limit</span>
+            <input type="number" min="1" max="32" step="1"
+                   value="{{ source.connection_limit or '' }}"
+                   placeholder="{{ source.max_connections or 1 }}"
+                   aria-label="Connection limit for {{ source.name }}">
+          </label>
+          <button class="btn btn-sm btn-ghost" type="submit">Save limit</button>
+        </form>
       </article>
     {% endfor %}
   </div>
@@ -165,6 +180,21 @@
       <div class="field">
         <label for="field-name">Name <span class="muted">(optional)</span></label>
         <input id="field-name" name="name" type="text" placeholder="My provider">
+      </div>
+
+      <div class="field">
+        <label for="field-limit">
+          Connection limit <span class="muted">(optional)</span>
+        </label>
+        <input id="field-limit" name="connection_limit" type="number"
+               min="1" max="32" step="1"
+               placeholder="Auto — provider limit, else 1">
+        <p class="hint">
+          IPTV Charts will never use more than this many simultaneous
+          connections for this playlist. Leave it empty to use the provider's
+          reported limit, or 1 when the provider does not report one. A
+          season is downloaded one episode at a time when the limit is 1.
+        </p>
       </div>
 
       <div data-panel="m3u">

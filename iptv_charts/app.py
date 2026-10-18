@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from flask import Flask, abort, g, render_template, request
 
-from . import config, db, items, metadata, naming, player, sync
+from . import config, connections, db, items, metadata, naming, player, sync
 from .api import bp as api_bp
 from .manager_api import bp as manager_api_bp
 from .manager_web import bp as manager_web_bp
@@ -54,7 +54,7 @@ _SOURCE_LIST_SQL = """
 SELECT
     s.id, s.name, s.kind, s.created_at, s.last_synced_at, s.sync_status,
     s.sync_message, s.account_status, s.exp_date, s.exp_unknown, s.is_trial,
-    s.active_connections, s.max_connections, s.server_timezone,
+    s.active_connections, s.max_connections, s.connection_limit, s.server_timezone,
     (SELECT COUNT(*) FROM items i
       WHERE i.source_id = s.id AND i.kind = 'live')   AS live_count,
     (SELECT COUNT(*) FROM items i
@@ -157,7 +157,8 @@ def create_app() -> Flask:
         # Rendered into the page so a reload mid-sync shows progress
         # immediately, rather than waiting for the first poll to come back.
         return render_template(
-            "sources.html", sources=rows, sync_state=sync.snapshot()
+            "sources.html", sources=rows, sync_state=sync.snapshot(),
+            connection_counts=connections.snapshot(),
         )
 
     @app.route("/api/health")
@@ -243,6 +244,11 @@ def create_app() -> Flask:
             refresh_interval_hours=setting("refresh_interval_hours", "168"),
             catalog_refresh_hours=setting("catalog_refresh_hours", "24"),
             ffmpeg_available=bool(shutil.which("ffmpeg")),
+            ffprobe_available=bool(shutil.which("ffprobe")),
+            probe_cache_hours=setting("probe_cache_hours", "24"),
+            probe_timeout_seconds=setting("probe_timeout_seconds", "30"),
+            probe_max_candidates=setting("probe_max_candidates", "6"),
+            probe_search_budget=setting("probe_search_budget", "60"),
             profile_count=db.get_one(
                 conn, "SELECT COUNT(*) AS n FROM quality_profiles"
             )["n"],

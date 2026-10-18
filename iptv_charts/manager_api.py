@@ -16,8 +16,8 @@ import time
 
 from flask import Blueprint, Response, g, jsonify, request, send_file
 
-from . import (backup, db, downloader, library, metadata, naming,
-               quality, scan, scheduler)
+from . import (backup, connections, db, downloader, library, metadata,
+               naming, probe, quality, scan, scheduler)
 from .clients import tmdb as tmdb_client
 from .clients import tvdb as tvdb_client
 
@@ -48,7 +48,8 @@ def _error(exc: Exception):
         return _fail(str(exc), 404)
     if isinstance(exc, ValueError):
         return _fail(str(exc), 400)
-    if isinstance(exc, (tmdb_client.TMDBKeyError, tvdb_client.TVDBKeyError)):
+    if isinstance(exc, (tmdb_client.TMDBKeyError, tvdb_client.TVDBKeyError,
+                        connections.ConnectionBusy)):
         return _fail(str(exc), 409)
     if isinstance(exc, (tmdb_client.TMDBError, tvdb_client.TVDBError,
                         metadata.MetadataError)):
@@ -146,6 +147,10 @@ def add_movie():
             profile_id=_int(payload.get("quality_profile_id")),
             monitored=_bool(payload.get("monitored"), True),
             search_now=_bool(payload.get("search"), True),
+            minimum_availability=str(
+                payload.get("minimum_availability") or "released"
+            ),
+            priority=_int(payload.get("priority")) or 0,
         )
         return jsonify({"ok": True, "movie": movie}), 201
     except Exception as exc:
@@ -183,6 +188,12 @@ def edit_movie(movie_id: int):
             monitored=_bool(payload.get("monitored")) if "monitored" in payload else None,
             profile_id=_int(payload.get("quality_profile_id"))
             if "quality_profile_id" in payload else None,
+            minimum_availability=(
+                str(payload.get("minimum_availability"))
+                if "minimum_availability" in payload else None
+            ),
+            priority=_int(payload.get("priority"))
+            if "priority" in payload else None,
         )
         return jsonify({"ok": True, "movie": movie})
     except Exception as exc:
@@ -265,6 +276,9 @@ def add_series():
             profile_id=_int(payload.get("quality_profile_id")),
             monitored=_bool(payload.get("monitored"), True),
             search_now=_bool(payload.get("search"), True),
+            monitor_mode=str(payload.get("monitor_mode") or "all"),
+            monitor_new_seasons=str(payload.get("monitor_new_seasons") or "all"),
+            priority=_int(payload.get("priority")) or 0,
         )
         return jsonify({"ok": True, "series": series}), 201
     except Exception as exc:
@@ -304,6 +318,12 @@ def edit_series(series_id: int):
             monitored=_bool(payload.get("monitored")) if "monitored" in payload else None,
             profile_id=_int(payload.get("quality_profile_id"))
             if "quality_profile_id" in payload else None,
+            monitor_new_seasons=(
+                str(payload.get("monitor_new_seasons"))
+                if "monitor_new_seasons" in payload else None
+            ),
+            priority=_int(payload.get("priority"))
+            if "priority" in payload else None,
         )
         return jsonify({"ok": True, "series": series})
     except Exception as exc:
@@ -453,12 +473,46 @@ def retry_download(download_id: int):
         return _error(exc)
 
 
+@bp.patch("/downloads/<int:download_id>")
+def edit_download(download_id: int):
+    conn = _conn()
+    try:
+        payload = _payload()
+        row = db.get_one(conn, "SELECT * FROM downloads WHERE id = ?", (download_id,))
+        if row is None:
+            return _fail("That download no longer exists.", 404)
+        if "priority" in payload:
+            priority = max(-100, min(100, int(payload.get("priority") or 0)))
+            conn.execute("UPDATE downloads SET priority = ? WHERE id = ?",
+                         (priority, download_id))
+            conn.commit()
+        return jsonify({
+            "ok": True,
+            "download": dict(db.get_one(
+                conn, "SELECT * FROM downloads WHERE id = ?", (download_id,)
+            )),
+        })
+    except Exception as exc:
+        return _error(exc)
+
+
 @bp.delete("/downloads/<int:download_id>")
 def remove_download(download_id: int):
     conn = _conn()
     try:
         downloader.remove_download(conn, download_id)
         return jsonify({"ok": True})
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.post("/probes/clear")
+def clear_probes():
+    conn = _conn()
+    try:
+        payload = _payload()
+        source_id = _int(payload.get("source_id"))
+        return jsonify({"ok": True, "cleared": probe.clear_cache(conn, source_id)})
     except Exception as exc:
         return _error(exc)
 
@@ -519,22 +573,46 @@ def scan_import_all():
 
 
 # ------------------------------------------------------------------- profiles
-def _profile_values(payload: dict) -> tuple[list[str], str | None, bool]:
+def _profile_values(payload: dict) -> dict:
+    raw_qualities = payload.get("qualities")
+    if raw_qualities is None:
+        raw_qualities = payload.get("resolutions")
     return quality.validate_profile(
-        payload.get("resolutions"),
+        raw_qualities,
         payload.get("cutoff"),
         _bool(payload.get("upgrades"), True),
+        audio_mode=payload.get("audio_mode", "any"),
+        audio_languages=payload.get("audio_languages"),
+        subtitle_mode=payload.get("subtitle_mode", "any"),
+        subtitle_languages=payload.get("subtitle_languages"),
+        probe_required=_bool(payload.get("probe_required"), True),
+    )
+
+
+def _store_profile(conn, profile_id: int, values: dict) -> None:
+    resolutions = list(dict.fromkeys(
+        tier["resolution"] for tier in values["qualities"]
+    ))
+    conn.execute(
+        "UPDATE quality_profiles SET qualities = ?, resolutions = ?, cutoff = ?, "
+        "upgrades = ?, audio_mode = ?, audio_languages = ?, subtitle_mode = ?, "
+        "subtitle_languages = ?, probe_required = ? WHERE id = ?",
+        (
+            json.dumps(values["qualities"]), json.dumps(resolutions),
+            values["cutoff"], 1 if values["upgrades"] else 0,
+            values["audio_mode"], json.dumps(values["audio_languages"]),
+            values["subtitle_mode"], json.dumps(values["subtitle_languages"]),
+            1 if values["probe_required"] else 0, int(profile_id),
+        ),
     )
 
 
 @bp.get("/quality-profiles")
 def quality_profiles():
     conn = _conn()
-    rows = [dict(row) for row in conn.execute(
+    rows = [quality.profile_summary(row) for row in conn.execute(
         "SELECT * FROM quality_profiles ORDER BY id"
     )]
-    for row in rows:
-        row["resolutions"] = quality.decode_resolutions(row["resolutions"])
     return jsonify({"ok": True, "profiles": rows})
 
 
@@ -546,21 +624,31 @@ def create_profile():
         name = str(payload.get("name") or "").strip()[:80]
         if not name:
             return _fail("Give the profile a name.")
-        resolutions, cutoff, upgrades = _profile_values(payload)
+        values = _profile_values(payload)
+        resolutions = list(dict.fromkeys(
+            tier["resolution"] for tier in values["qualities"]
+        ))
         try:
             cursor = conn.execute(
-                "INSERT INTO quality_profiles (name, resolutions, cutoff, upgrades, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (name, json.dumps(resolutions), cutoff,
-                 1 if upgrades else 0, int(time.time())),
+                "INSERT INTO quality_profiles "
+                "(name, resolutions, cutoff, upgrades, qualities, audio_mode, "
+                "audio_languages, subtitle_mode, subtitle_languages, probe_required, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    name, json.dumps(resolutions), values["cutoff"],
+                    1 if values["upgrades"] else 0,
+                    json.dumps(values["qualities"]), values["audio_mode"],
+                    json.dumps(values["audio_languages"]), values["subtitle_mode"],
+                    json.dumps(values["subtitle_languages"]),
+                    1 if values["probe_required"] else 0, int(time.time()),
+                ),
             )
             conn.commit()
         except sqlite3.IntegrityError:
             return _fail("A profile with that name already exists.", 409)
-        row = dict(db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?",
-                              (cursor.lastrowid,)))
-        row["resolutions"] = resolutions
-        return jsonify({"ok": True, "profile": row}), 201
+        row = db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?",
+                         (cursor.lastrowid,))
+        return jsonify({"ok": True, "profile": quality.profile_summary(row)}), 201
     except Exception as exc:
         return _error(exc)
 
@@ -573,26 +661,31 @@ def edit_profile(profile_id: int):
         row = db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?", (profile_id,))
         if row is None:
             return _fail("That profile no longer exists.", 404)
+        current = quality.profile_summary(row)
         name = str(payload.get("name") or row["name"]).strip()[:80]
-        resolutions, cutoff, upgrades = _profile_values({
-            "resolutions": payload.get("resolutions", quality.decode_resolutions(row["resolutions"])),
-            "cutoff": payload.get("cutoff", row["cutoff"]),
-            "upgrades": payload.get("upgrades", row["upgrades"]),
+        values = _profile_values({
+            "qualities": payload.get("qualities", current["qualities"]),
+            "cutoff": payload.get("cutoff", current["cutoff"]),
+            "upgrades": payload.get("upgrades", current["upgrades"]),
+            "audio_mode": payload.get("audio_mode", current["audio_mode"]),
+            "audio_languages": payload.get("audio_languages", current["audio_languages"]),
+            "subtitle_mode": payload.get("subtitle_mode", current["subtitle_mode"]),
+            "subtitle_languages": payload.get(
+                "subtitle_languages", current["subtitle_languages"]
+            ),
+            "probe_required": payload.get("probe_required", current["probe_required"]),
         })
         try:
-            conn.execute(
-                "UPDATE quality_profiles SET name = ?, resolutions = ?, cutoff = ?, "
-                "upgrades = ? WHERE id = ?",
-                (name, json.dumps(resolutions), cutoff,
-                 1 if upgrades else 0, profile_id),
-            )
+            conn.execute("UPDATE quality_profiles SET name = ? WHERE id = ?",
+                         (name, profile_id))
+            _store_profile(conn, profile_id, values)
             conn.commit()
         except sqlite3.IntegrityError:
+            conn.rollback()
             return _fail("A profile with that name already exists.", 409)
-        updated = dict(db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?",
-                                  (profile_id,)))
-        updated["resolutions"] = resolutions
-        return jsonify({"ok": True, "profile": updated})
+        updated = db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?",
+                             (profile_id,))
+        return jsonify({"ok": True, "profile": quality.profile_summary(updated)})
     except Exception as exc:
         return _error(exc)
 
@@ -721,6 +814,19 @@ def save_download_settings():
             if attempts is None or not 1 <= attempts <= 10:
                 return _fail("Retries must be between 1 and 10.")
             _save_setting(conn, "download_max_attempts", str(attempts))
+        numeric = {
+            "probe_cache_hours": (0, 720),
+            "probe_timeout_seconds": (5, 120),
+            "probe_max_candidates": (1, 20),
+            "probe_search_budget": (1, 200),
+        }
+        for key, (minimum, maximum) in numeric.items():
+            if key not in payload:
+                continue
+            value = _int(payload.get(key))
+            if value is None or not minimum <= value <= maximum:
+                return _fail(f"{key} must be between {minimum} and {maximum}.")
+            _save_setting(conn, key, str(value))
         return jsonify({"ok": True})
     except Exception as exc:
         return _error(exc)

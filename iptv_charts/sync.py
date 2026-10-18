@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from . import db
+from . import connections, db
 from .clients import m3u, xtream
 from .errors import SyncCancelled
 
@@ -216,10 +216,18 @@ class SyncManager:
 
             job.name = source["name"]
 
-            if source["kind"] == "xtream":
-                _sync_xtream(conn, source, job)
-            else:
-                _sync_m3u(conn, source, job)
+            # A sync holds one of the account's connection slots for its whole
+            # duration. With a provider limit of 1 this makes downloads and
+            # syncs mutually exclusive; with a larger limit the remaining
+            # slots stay available. The wait is bounded so a permanently busy
+            # account produces an error instead of parking the worker forever.
+            with connections.acquire(
+                conn, source_id, purpose="Playlist sync", timeout=3600.0
+            ):
+                if source["kind"] == "xtream":
+                    _sync_xtream(conn, source, job)
+                else:
+                    _sync_m3u(conn, source, job)
 
             job.state = "done"
             job.phase = ""

@@ -16,7 +16,7 @@ import time
 import zipfile
 from typing import Any
 
-from . import config, db, downloader, library, naming, scheduler, sync
+from . import config, db, downloader, naming, scheduler, sync
 
 logger = logging.getLogger("iptv_charts.backup")
 
@@ -41,7 +41,7 @@ TABLES = (
 )
 EXCLUDED = (
     "items", "categories", "items_fts", "metadata_cache",
-    "provider_series_cache", "image cache",
+    "provider_series_cache", "stream_probes", "image cache",
 )
 
 TEMPLATE_TOKENS = {
@@ -229,6 +229,10 @@ def restore(conn, data: bytes) -> dict:
     counts: dict[str, int] = {}
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # A probe result is only meaningful for the provider identity it came
+        # from. The catalog is re-synced after a restore, so discard probes
+        # rather than letting a stale resolution/audio decision survive.
+        conn.execute("DELETE FROM stream_probes")
         for table in ("scan_results", "history", "downloads", "series_episodes",
                       "movies", "series", "quality_profiles", "task_state",
                       "settings", "sources"):

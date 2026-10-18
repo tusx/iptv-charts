@@ -16,6 +16,8 @@
   const profile = $('#movie-profile');
   const monitored = $('#movie-monitored');
   const searchNow = $('#movie-search-now');
+  const availability = $('#movie-availability');
+  const priority = $('#movie-priority');
   let token = 0;
 
   $('#add-movie-btn')?.addEventListener('click', () => open(dialog));
@@ -87,6 +89,8 @@
           quality_profile_id: Number(profile.value),
           monitored: monitored ? monitored.checked : true,
           search: searchNow ? searchNow.checked : true,
+          minimum_availability: availability ? availability.value : 'released',
+          priority: priority ? Number(priority.value) || 0 : 0,
         });
         setStatus(status, 'Added — loading the library…', 'ok');
         window.setTimeout(() => window.location.reload(), 400);

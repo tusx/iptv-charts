@@ -6,7 +6,7 @@ import logging
 
 from flask import Blueprint, g, jsonify, request
 
-from . import db, items, player, sources, sync
+from . import connections, db, items, player, sources, sync
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -67,6 +67,8 @@ def create_source():
     conn = _conn()
 
     try:
+        raw_limit = payload.get("connection_limit")
+        connection_limit = int(raw_limit) if str(raw_limit or "").strip() else None
         source_id = sources.create(
             conn,
             kind,
@@ -77,12 +79,39 @@ def create_source():
             password=payload.get("password", ""),
             user_agent=payload.get("user_agent", ""),
             referrer=payload.get("referrer", ""),
+            connection_limit=connection_limit,
         )
-    except sources.ProbeError as exc:
+    except (sources.ProbeError, TypeError, ValueError) as exc:
         return _fail(str(exc))
 
     sync.enqueue([source_id])
     return jsonify({"ok": True, "source_id": source_id}), 201
+
+
+@bp.patch("/sources/<int:source_id>")
+def update_source(source_id: int):
+    """Edit the display name and the enforced connection limit."""
+    conn = _conn()
+    payload = request.get_json(silent=True) or {}
+    try:
+        row = sources.update(
+            conn, source_id,
+            name=payload.get("name") if "name" in payload else None,
+            connection_limit=(
+                None if payload.get("connection_limit") in (None, "", 0)
+                else int(payload.get("connection_limit"))
+            ) if "connection_limit" in payload else ...,
+        )
+    except (sources.ProbeError, TypeError, ValueError) as exc:
+        return _fail(str(exc))
+    return jsonify({
+        "ok": True,
+        "source": {
+            "id": row["id"], "name": row["name"],
+            "connection_limit": row["connection_limit"],
+            "max_connections": row["max_connections"],
+        },
+    })
 
 
 @bp.post("/sources/<int:source_id>/sync")
@@ -266,7 +295,12 @@ def item_episodes(item_id: int):
         return _fail("Episode listings are only available for Xtream playlists.", 400)
 
     try:
-        seasons = items.series_episodes(source, item["remote_id"])
+        with connections.acquire(
+            conn, source["id"], purpose="Episode browser", timeout=5.0
+        ):
+            seasons = items.series_episodes(source, item["remote_id"])
+    except connections.ConnectionBusy as exc:
+        return _fail(str(exc), 409)
     except items.PlaybackUnavailable as exc:
         return _fail(str(exc), 409)
     except Exception as exc:  # noqa: BLE001 - provider error, shown verbatim
@@ -295,7 +329,12 @@ def play_episode(item_id: int, episode_id: str):
         return _fail(_NO_PLAYER, 409)
 
     try:
-        seasons = items.series_episodes(source, item["remote_id"])
+        with connections.acquire(
+            conn, source["id"], purpose="Episode browser", timeout=5.0
+        ):
+            seasons = items.series_episodes(source, item["remote_id"])
+    except connections.ConnectionBusy as exc:
+        return _fail(str(exc), 409)
     except items.PlaybackUnavailable as exc:
         return _fail(str(exc), 409)
     except Exception as exc:  # noqa: BLE001 - provider error, shown verbatim

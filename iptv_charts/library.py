@@ -18,7 +18,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import config, db, matching, metadata, naming, quality
+from . import config, connections, db, matching, metadata, naming, probe, quality
 from .clients import xtream
 
 logger = logging.getLogger("iptv_charts.library")
@@ -51,6 +51,94 @@ def _aired(air_date: str | None) -> bool:
     if not air_date:
         return True
     return str(air_date)[:10] <= _today()
+
+
+def _future_or_unknown(air_date: str | None) -> bool:
+    """Whether an episode is unaired (or has no known air date)."""
+    if not air_date:
+        return True
+    return str(air_date)[:10] >= _today()
+
+
+def movie_available(movie: Mapping[str, Any]) -> bool:
+    """Radarr-style minimum availability for a movie.
+
+    ``announced`` allows a search immediately; ``in_cinemas`` waits for the
+    release date; ``released`` additionally waits for TMDB to mark it
+    Released. A missing date is treated as unavailable for the two waiting
+    modes rather than downloading a cinema recording by mistake.
+    """
+    mode = str(movie.get("minimum_availability") or "released").lower()
+    if mode == "announced":
+        return True
+    release_date = str(movie.get("release_date") or "")[:10]
+    if not release_date:
+        return False
+    if release_date > _today():
+        return False
+    if mode == "in_cinemas":
+        return True
+    status = str(movie.get("status") or "").lower()
+    return not status or status == "released"
+
+
+def _add_monitor_mode(value: Any) -> str:
+    mode = str(value or "all").strip().lower()
+    if mode not in {"all", "future", "first", "latest", "none"}:
+        raise ValueError("Unknown monitor option.")
+    return mode
+
+
+def _monitor_new_seasons(value: Any) -> str:
+    mode = str(value or "all").strip().lower()
+    if mode not in {"all", "future", "none"}:
+        raise ValueError("Monitor new seasons must be all, future or none.")
+    return mode
+
+
+def _monitor_episode_on_add(episode: Mapping[str, Any], add_mode: str,
+                            latest_season: int | None) -> bool:
+    season = int(episode["season"])
+    if season == 0:
+        return False
+    if add_mode == "none":
+        return False
+    if add_mode == "first":
+        return season == 1
+    if add_mode == "latest":
+        return latest_season is not None and season == latest_season
+    if add_mode == "future":
+        return _future_or_unknown(episode.get("air_date"))
+    return True  # all
+
+
+def _monitor_new_episode(episode: Mapping[str, Any], rule: str) -> bool:
+    season = int(episode["season"])
+    if season == 0:
+        return False
+    if rule == "none":
+        return False
+    if rule == "future":
+        return _future_or_unknown(episode.get("air_date"))
+    return True
+
+
+def _json_list(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(list(value), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tier_label(profile: quality.Profile, release: Mapping[str, Any]) -> str | None:
+    rank = profile.rank(release, allow_unknown_source=True)
+    if rank is None or rank >= len(profile.tiers):
+        return None
+    return profile.tiers[rank].name
 
 
 def add_history(conn, event: str, title: str, *, kind: str | None = None,
@@ -188,29 +276,35 @@ def list_movies(conn, *, text: str = "", status: str = "") -> list[dict]:
 
 
 def add_movie(conn, tmdb_id: int, *, profile_id: int | None = None,
-              monitored: bool = True, search_now: bool = True) -> dict:
+              monitored: bool = True, search_now: bool = True,
+              minimum_availability: str = "released", priority: int = 0) -> dict:
     if db.get_one(conn, "SELECT id FROM movies WHERE tmdb_id = ?", (int(tmdb_id),)):
         raise ValueError("That movie is already in your library.")
     profile = _profile_row(conn, profile_id)
     details = metadata.movie_details(conn, int(tmdb_id))
+    availability = str(minimum_availability or "released").strip().lower()
+    if availability not in {"announced", "in_cinemas", "released"}:
+        raise ValueError("Unknown minimum availability.")
     now = _now()
     cursor = conn.execute(
         """
         INSERT INTO movies (
-            tmdb_id, imdb_id, title, original_title, alt_titles, year, overview,
-            runtime, genres, poster_path, backdrop_path, release_date, rating,
-            added_at, updated_at, monitored, quality_profile_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tmdb_id, imdb_id, title, original_title, original_language,
+            alt_titles, year, overview, runtime, genres, poster_path,
+            backdrop_path, release_date, rating, status, added_at, updated_at,
+            monitored, minimum_availability, priority, quality_profile_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             details["tmdb_id"], details.get("imdb_id"), details["title"],
-            details.get("original_title"),
+            details.get("original_title"), details.get("original_language"),
             json.dumps(details.get("alt_titles") or [], ensure_ascii=False),
             details.get("year"), details.get("overview"), details.get("runtime"),
             json.dumps(details.get("genres") or [], ensure_ascii=False),
             details.get("poster_path"), details.get("backdrop_path"),
-            details.get("release_date"), details.get("rating"),
-            now, now, 1 if monitored else 0, int(profile["id"]),
+            details.get("release_date"), details.get("rating"), details.get("status"),
+            now, now, 1 if monitored else 0, availability,
+            max(-100, min(100, int(priority or 0))), int(profile["id"]),
         ),
     )
     conn.commit()
@@ -225,7 +319,9 @@ def add_movie(conn, tmdb_id: int, *, profile_id: int | None = None,
 
 
 def update_movie(conn, movie_id: int, *, monitored: bool | None = None,
-                 profile_id: int | None = None) -> dict:
+                 profile_id: int | None = None,
+                 minimum_availability: str | None = None,
+                 priority: int | None = None) -> dict:
     movie = get_movie(conn, movie_id)
     if movie is None:
         raise LookupError("That movie no longer exists.")
@@ -236,6 +332,15 @@ def update_movie(conn, movie_id: int, *, monitored: bool | None = None,
         _profile_row(conn, profile_id)
         conn.execute("UPDATE movies SET quality_profile_id = ? WHERE id = ?",
                      (int(profile_id), movie_id))
+    if minimum_availability is not None:
+        availability = str(minimum_availability).strip().lower()
+        if availability not in {"announced", "in_cinemas", "released"}:
+            raise ValueError("Unknown minimum availability.")
+        conn.execute("UPDATE movies SET minimum_availability = ? WHERE id = ?",
+                     (availability, movie_id))
+    if priority is not None:
+        conn.execute("UPDATE movies SET priority = ? WHERE id = ?",
+                     (max(-100, min(100, int(priority))), movie_id))
     conn.commit()
     return get_movie(conn, movie_id)
 
@@ -248,18 +353,20 @@ def refresh_movie(conn, movie_id: int) -> dict:
     conn.execute(
         """
         UPDATE movies SET imdb_id = ?, title = ?, original_title = ?,
-            alt_titles = ?, year = ?, overview = ?, runtime = ?, genres = ?,
-            poster_path = ?, backdrop_path = ?, release_date = ?, rating = ?,
-            updated_at = ?
+            original_language = ?, alt_titles = ?, year = ?, overview = ?,
+            runtime = ?, genres = ?, poster_path = ?, backdrop_path = ?,
+            release_date = ?, rating = ?, status = ?, updated_at = ?
         WHERE id = ?
         """,
         (
             details.get("imdb_id"), details["title"], details.get("original_title"),
+            details.get("original_language"),
             json.dumps(details.get("alt_titles") or [], ensure_ascii=False),
             details.get("year"), details.get("overview"), details.get("runtime"),
             json.dumps(details.get("genres") or [], ensure_ascii=False),
             details.get("poster_path"), details.get("backdrop_path"),
-            details.get("release_date"), details.get("rating"), _now(), movie_id,
+            details.get("release_date"), details.get("rating"), details.get("status"),
+            _now(), movie_id,
         ),
     )
     conn.commit()
@@ -283,10 +390,35 @@ def remove_movie(conn, movie_id: int, *, delete_files: bool = False) -> None:
 
 
 # --------------------------------------------------------------- movie search
-def _annotate_allowed(candidates: list[dict], profile: quality.Profile) -> list[dict]:
-    for candidate in candidates:
-        candidate["allowed"] = profile.allows(candidate.get("resolution"))
-    return candidates
+def _probe_movie_candidates(conn, candidates: list[dict], profile: quality.Profile,
+                            original_language: str | None, *,
+                            acquire_timeout: float = 5.0,
+                            budget: list[int] | None = None) -> list[dict]:
+    """Probe the best candidates and annotate each with the profile decision.
+
+    Candidates beyond the probe ceiling are still returned so manual search
+    can show them; grabbing one probes it at that point.
+    """
+    limit = probe.max_candidates(conn)
+    budget = budget if budget is not None else [probe.search_budget(conn)]
+    annotated: list[dict] = []
+    for index, candidate in enumerate(candidates):
+        release = dict(candidate)
+        if index >= limit or budget[0] <= 0:
+            release["allowed"] = False
+            release["reason"] = "Not probed in this search."
+            annotated.append(release)
+            continue
+        release = probe.probe_movie_release(
+            conn, release, acquire_timeout=acquire_timeout
+        )
+        budget[0] -= 1
+        allowed, reason = profile.check(release, original_language)
+        release["allowed"] = allowed
+        release["reason"] = reason
+        release["quality_label"] = _tier_label(profile, release) if allowed else None
+        annotated.append(release)
+    return annotated
 
 
 def manual_movie_releases(conn, movie_id: int, *, query: str | None = None) -> list[dict]:
@@ -297,7 +429,10 @@ def manual_movie_releases(conn, movie_id: int, *, query: str | None = None) -> l
     candidates = matching.movie_candidates(
         conn, movie, query_override=query, min_score=0.45 if query else 0.65
     )
-    return _annotate_allowed(candidates, profile)
+    return _probe_movie_candidates(
+        conn, candidates, profile, movie.get("original_language"),
+        acquire_timeout=30.0,
+    )
 
 
 def search_movie(conn, movie: Mapping[str, Any], *, query: str | None = None,
@@ -306,17 +441,38 @@ def search_movie(conn, movie: Mapping[str, Any], *, query: str | None = None,
     movie_id = int(movie["id"])
     if active_download(conn, movie_id=movie_id):
         return {"queued": False, "message": "A download for this movie is already active."}
+    if not query and not movie_available(movie):
+        message = (
+            "Not available yet under the movie's minimum availability "
+            f"({movie.get('minimum_availability') or 'released'})."
+        )
+        conn.execute("UPDATE movies SET last_search_at = ?, search_message = ? WHERE id = ?",
+                     (_now(), message, movie_id))
+        conn.commit()
+        return {"queued": False, "message": message}
+
     profile = _profile(conn, movie["quality_profile_id"])
     candidates = matching.movie_candidates(
         conn, movie, query_override=query, min_score=0.85 if not query else 0.45
     )
-    current = movie["resolution"] if movie.get("file_path") else None
-    choice = quality.choose_release(candidates, profile, current=current)
+    budget = [probe.search_budget(conn)]
+    annotated = _probe_movie_candidates(
+        conn, candidates, profile, movie.get("original_language"), budget=budget
+    ) if candidates else []
+    current = movie if movie.get("file_path") else None
+    choice = quality.choose_release(
+        annotated, profile, current=current,
+        original_language=movie.get("original_language"),
+    )
 
     if choice is None:
-        message = ("No matching VOD found in your playlists."
-                   if not candidates else
-                   "No allowed release available (check the quality profile).")
+        if not candidates:
+            message = "No matching VOD found in your playlists."
+        else:
+            reasons = [entry.get("reason") for entry in annotated if entry.get("reason")]
+            message = "No allowed release available"
+            if reasons:
+                message += f": {reasons[0]}"
         conn.execute("UPDATE movies SET last_search_at = ?, search_message = ? WHERE id = ?",
                      (_now(), message, movie_id))
         conn.commit()
@@ -335,12 +491,13 @@ def search_movie(conn, movie: Mapping[str, Any], *, query: str | None = None,
     download = downloader.enqueue_movie(
         conn, movie, choice, reason="upgrade" if upgrade else reason
     )
-    message = f"Queued {choice['resolution']} release from {choice['source_name']}."
+    label = choice.get("quality_label") or choice.get("resolution") or "unknown"
+    message = f"Queued {label} release from {choice['source_name']}."
     conn.execute("UPDATE movies SET last_search_at = ?, search_message = ? WHERE id = ?",
                  (_now(), message, movie_id))
     conn.commit()
     logger.info("library: movie %s -> download #%s (%s)", movie["title"],
-                download["id"], choice["resolution"])
+                download["id"], label)
     return {"queued": True, "download": download, "release": choice, "message": message}
 
 
@@ -361,14 +518,21 @@ def grab_movie(conn, movie_id: int, source_id: int, remote_id: str,
         raise LookupError("That VOD is no longer in the playlist; update the playlist and try again.")
     if active_download(conn, movie_id=movie_id):
         raise ValueError("A download for this movie is already active.")
+    profile = _profile(conn, movie["quality_profile_id"])
     parsed = matching.parse_name(item["name"])
     release = {
         **dict(item),
         "source_name": source["name"],
         "source_kind": source["kind"],
         "resolution": parsed.resolution,
+        "source": parsed.source,
         "score": 1.0,
     }
+    release = probe.probe_movie_release(conn, release, acquire_timeout=30.0)
+    allowed, reason_text = profile.check(release, movie.get("original_language"))
+    if not allowed:
+        raise ValueError(f"This release is not allowed by the profile: {reason_text}")
+    release["quality_label"] = _tier_label(profile, release)
     from . import downloader
 
     return downloader.enqueue_movie(conn, movie, release, reason=reason)
@@ -422,71 +586,111 @@ def get_episode(conn, episode_id: int) -> dict | None:
     return _row(db.get_one(conn, "SELECT * FROM series_episodes WHERE id = ?", (int(episode_id),)))
 
 
-def _sync_episodes(conn, series_id: int, episodes: list[dict], *, monitor_new: bool) -> None:
+def _sync_episodes(conn, series_id: int, episodes: list[dict], *,
+                   add_mode: str | None = None) -> None:
     """Upsert provider metadata without destroying local state.
 
     Existing monitored flags, files and search timestamps win; only metadata
     columns are refreshed. Episodes that disappear from the provider are kept,
     because deleting a row would orphan a file that already exists on disk.
+
+    On the first import ``add_mode`` decides which episodes start monitored.
+    On later refreshes a genuinely new episode follows the series'
+    ``monitor_new_seasons`` rule: all, future (unaired/unknown) or none. This
+    is Sonarr's new-season announcement behaviour without a notification
+    channel.
     """
+    series = get_series(conn, int(series_id))
+    rule = _monitor_new_seasons(series.get("monitor_new_seasons") if series else "all")
+    series_monitored = bool(series and series.get("monitored"))
+    latest_season = max(
+        (int(episode["season"]) for episode in episodes if int(episode["season"]) > 0),
+        default=None,
+    )
     for episode in episodes:
         season = int(episode["season"])
         number = int(episode["episode"])
+        existing = db.get_one(
+            conn,
+            "SELECT id FROM series_episodes WHERE series_id = ? AND season = ? AND episode = ?",
+            (int(series_id), season, number),
+        )
+        if existing is not None:
+            conn.execute(
+                """
+                UPDATE series_episodes SET
+                    absolute_number = ?, title = ?, overview = ?, air_date = ?,
+                    tvdb_id = ?
+                WHERE id = ?
+                """,
+                (
+                    episode.get("absolute_number"),
+                    episode.get("title") or f"Episode {number}",
+                    episode.get("overview") or "", episode.get("air_date"),
+                    episode.get("tvdb_id"), existing["id"],
+                ),
+            )
+            continue
+        if add_mode is not None:
+            should_monitor = _monitor_episode_on_add(episode, add_mode, latest_season)
+        else:
+            should_monitor = _monitor_new_episode(episode, rule)
         conn.execute(
             """
             INSERT INTO series_episodes (
                 series_id, season, episode, absolute_number, title, overview,
                 air_date, tvdb_id, monitored
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(series_id, season, episode) DO UPDATE SET
-                absolute_number = excluded.absolute_number,
-                title = excluded.title,
-                overview = excluded.overview,
-                air_date = excluded.air_date,
-                tvdb_id = excluded.tvdb_id
             """,
             (
                 int(series_id), season, number, episode.get("absolute_number"),
                 episode.get("title") or f"Episode {number}",
                 episode.get("overview") or "", episode.get("air_date"),
                 episode.get("tvdb_id"),
-                1 if (monitor_new and season != 0) else 0,
+                1 if (series_monitored and should_monitor) else 0,
             ),
         )
     conn.commit()
 
 
 def add_series(conn, tmdb_id: int, *, profile_id: int | None = None,
-               monitored: bool = True, search_now: bool = True) -> dict:
+               monitored: bool = True, search_now: bool = True,
+               monitor_mode: str = "all", monitor_new_seasons: str = "all",
+               priority: int = 0) -> dict:
     if db.get_one(conn, "SELECT id FROM series WHERE tmdb_id = ?", (int(tmdb_id),)):
         raise ValueError("That series is already in your library.")
     profile = _profile_row(conn, profile_id)
     details = metadata.series_details(conn, int(tmdb_id))
+    add_mode = _add_monitor_mode(monitor_mode)
+    new_seasons_rule = _monitor_new_seasons(monitor_new_seasons)
     now = _now()
     cursor = conn.execute(
         """
         INSERT INTO series (
-            tmdb_id, tvdb_id, title, original_title, alt_titles, year, overview,
-            genres, poster_path, backdrop_path, first_air_date, status, rating,
-            added_at, updated_at, monitored, quality_profile_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tmdb_id, tvdb_id, title, original_title, original_language,
+            alt_titles, year, overview, genres, poster_path, backdrop_path,
+            first_air_date, status, rating, added_at, updated_at, monitored,
+            monitor_new_seasons, priority, quality_profile_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             details["tmdb_id"], details.get("tvdb_id"), details["title"],
-            details.get("original_title"),
+            details.get("original_title"), details.get("original_language"),
             json.dumps(details.get("alt_titles") or [], ensure_ascii=False),
             details.get("year"), details.get("overview"),
             json.dumps(details.get("genres") or [], ensure_ascii=False),
             details.get("poster_path"), details.get("backdrop_path"),
             details.get("first_air_date"), details.get("status"), details.get("rating"),
-            now, now, 1 if monitored else 0, int(profile["id"]),
+            now, now, 1 if monitored else 0, new_seasons_rule,
+            max(-100, min(100, int(priority or 0))), int(profile["id"]),
         ),
     )
     conn.commit()
     series = get_series(conn, int(cursor.lastrowid))
-    refresh_series_episodes(conn, series, monitor_new=monitored)
+    refresh_series_episodes(conn, series, add_mode=add_mode)
     series = get_series(conn, series["id"])
-    logger.info("library: added series %s (tmdb %s)", series["title"], tmdb_id)
+    logger.info("library: added series %s (tmdb %s, monitor %s)",
+                series["title"], tmdb_id, add_mode)
     if search_now:
         try:
             search_series(conn, series, reason="add")
@@ -496,9 +700,9 @@ def add_series(conn, tmdb_id: int, *, profile_id: int | None = None,
 
 
 def refresh_series_episodes(conn, series: Mapping[str, Any], *, refresh: bool = False,
-                            monitor_new: bool = True) -> str:
+                            add_mode: str | None = None) -> str:
     episodes, source, tvdb_id = metadata.episodes_for_series(conn, series, refresh=refresh)
-    _sync_episodes(conn, int(series["id"]), episodes, monitor_new=monitor_new)
+    _sync_episodes(conn, int(series["id"]), episodes, add_mode=add_mode)
     conn.execute(
         "UPDATE series SET tvdb_id = COALESCE(?, tvdb_id), last_refreshed_at = ?, "
         "updated_at = ? WHERE id = ?",
@@ -517,14 +721,16 @@ def refresh_series(conn, series_id: int) -> dict:
     details = metadata.series_details(conn, series["tmdb_id"], refresh=True)
     conn.execute(
         """
-        UPDATE series SET tvdb_id = ?, title = ?, original_title = ?, alt_titles = ?,
-            year = ?, overview = ?, genres = ?, poster_path = ?, backdrop_path = ?,
-            first_air_date = ?, status = ?, rating = ?, updated_at = ?
+        UPDATE series SET tvdb_id = ?, title = ?, original_title = ?,
+            original_language = ?, alt_titles = ?, year = ?, overview = ?,
+            genres = ?, poster_path = ?, backdrop_path = ?, first_air_date = ?,
+            status = ?, rating = ?, updated_at = ?
         WHERE id = ?
         """,
         (
             details.get("tvdb_id") or series.get("tvdb_id"),
             details["title"], details.get("original_title"),
+            details.get("original_language"),
             json.dumps(details.get("alt_titles") or [], ensure_ascii=False),
             details.get("year"), details.get("overview"),
             json.dumps(details.get("genres") or [], ensure_ascii=False),
@@ -540,7 +746,9 @@ def refresh_series(conn, series_id: int) -> dict:
 
 
 def update_series(conn, series_id: int, *, monitored: bool | None = None,
-                  profile_id: int | None = None) -> dict:
+                  profile_id: int | None = None,
+                  monitor_new_seasons: str | None = None,
+                  priority: int | None = None) -> dict:
     series = get_series(conn, series_id)
     if series is None:
         raise LookupError("That series no longer exists.")
@@ -551,6 +759,12 @@ def update_series(conn, series_id: int, *, monitored: bool | None = None,
         _profile_row(conn, profile_id)
         conn.execute("UPDATE series SET quality_profile_id = ? WHERE id = ?",
                      (int(profile_id), series_id))
+    if monitor_new_seasons is not None:
+        conn.execute("UPDATE series SET monitor_new_seasons = ? WHERE id = ?",
+                     (_monitor_new_seasons(monitor_new_seasons), series_id))
+    if priority is not None:
+        conn.execute("UPDATE series SET priority = ? WHERE id = ?",
+                     (max(-100, min(100, int(priority))), series_id))
     conn.commit()
     return get_series(conn, series_id)
 
@@ -637,16 +851,22 @@ def provider_series_episodes(conn, source_row: Mapping[str, Any], remote_id: str
             pass
 
     headers = _source_headers(source_row)
-    client = xtream.XtreamClient(
-        source_row["base_url"], source_row["username"], source_row["password"],
-        user_agent=headers.get("user_agent"),
-        referrer=headers.get("referrer"),
-        headers=headers.get("headers"),
-    )
-    try:
-        payload = client.series_info(remote_id)
-    finally:
-        client.close()
+    # get_series_info is a provider API call and counts against the account's
+    # connection limit. It is deliberately inside the cache miss only: a
+    # cached episode list must remain readable while a download uses the slot.
+    with connections.acquire(
+        conn, source_id, purpose="Series metadata", timeout=10.0
+    ):
+        client = xtream.XtreamClient(
+            source_row["base_url"], source_row["username"], source_row["password"],
+            user_agent=headers.get("user_agent"),
+            referrer=headers.get("referrer"),
+            headers=headers.get("headers"),
+        )
+        try:
+            payload = client.series_info(remote_id)
+        finally:
+            client.close()
 
     raw = payload.get("episodes") if isinstance(payload, dict) else None
     if not isinstance(raw, dict):
@@ -698,6 +918,10 @@ def _provider_maps(conn, candidates: list[dict], *, limit: int = 8) -> list[tupl
             continue
         try:
             episodes = provider_series_episodes(conn, source, candidate["remote_id"])
+        except connections.ConnectionBusy:
+            # Do not disguise a busy playlist as "series not found": the user
+            # can retry, and the automatic task will try again next run.
+            raise
         except Exception as exc:
             logger.warning("library: could not list episodes for provider series %s: %s",
                            candidate.get("name"), exc)
@@ -725,42 +949,52 @@ def _episodes_to_search(conn, series: Mapping[str, Any], *, episode_id: int | No
         if not episode.get("file_path"):
             out.append(episode)
             continue
-        if include_files and profile.upgrades and not profile.cutoff_met(episode.get("resolution")):
+        if include_files and profile.upgrades and not profile.cutoff_met(episode):
             out.append(episode)
     return out
 
 
-def _choose_provider_episode(
-    providers: list[tuple[dict, dict, dict]], episode: Mapping[str, Any],
-    profile: quality.Profile,
-) -> tuple[dict, dict, dict] | None:
-    choices = []
-    for candidate, source, mapping in providers:
+def _episode_release(candidate: Mapping[str, Any], source: Mapping[str, Any],
+                     provider_episode: Mapping[str, Any]) -> dict:
+    return {
+        **dict(candidate),
+        "source_name": source["name"],
+        "source_kind": source["kind"],
+        "provider_episode": dict(provider_episode),
+        "resolution": candidate.get("resolution") or "unknown",
+        "source": candidate.get("source") or "unknown",
+        "score": candidate.get("score") or 0.0,
+    }
+
+
+def _probe_episode_releases(
+    conn, providers: list[tuple[dict, dict, dict]], episode: Mapping[str, Any],
+    profile: quality.Profile, original_language: str | None,
+    *, budget: list[int], acquire_timeout: float = 5.0,
+) -> list[dict]:
+    """Build and probe the provider releases for one Sonarr episode."""
+    limit = probe.max_candidates(conn)
+    releases: list[dict] = []
+    for index, (candidate, source, mapping) in enumerate(providers):
         provider_episode = mapping.get((int(episode["season"]), int(episode["episode"])))
         if provider_episode is None:
             continue
-        if not profile.allows(candidate.get("resolution")):
+        release = _episode_release(candidate, source, provider_episode)
+        if index >= limit or budget[0] <= 0:
+            release["allowed"] = False
+            release["reason"] = "Not probed in this search."
+            releases.append(release)
             continue
-        choices.append((candidate, source, provider_episode))
-    if not choices:
-        return None
-
-    current = episode.get("resolution") if episode.get("file_path") else None
-    current_rank = quality.RANK.get(current or "unknown", len(quality.RESOLUTIONS) - 1)
-    if current is not None:
-        if not profile.upgrades or profile.cutoff_met(current):
-            return None
-        choices = [
-            choice for choice in choices
-            if quality.RANK.get(choice[0].get("resolution", "unknown"), len(quality.RESOLUTIONS) - 1) < current_rank
-        ]
-        if not choices:
-            return None
-    choices.sort(key=lambda choice: (
-        -float(choice[0].get("score") or 0.0),
-        quality.RANK.get(choice[0].get("resolution", "unknown"), len(quality.RESOLUTIONS) - 1),
-    ))
-    return choices[0]
+        release = probe.probe_episode_release(
+            conn, release, acquire_timeout=acquire_timeout
+        )
+        budget[0] -= 1
+        allowed, reason = profile.check(release, original_language)
+        release["allowed"] = allowed
+        release["reason"] = reason
+        release["quality_label"] = _tier_label(profile, release) if allowed else None
+        releases.append(release)
+    return releases
 
 
 def search_series(conn, series: Mapping[str, Any], *, episode_id: int | None = None,
@@ -799,8 +1033,10 @@ def search_series(conn, series: Mapping[str, Any], *, episode_id: int | None = N
     profile = _profile(conn, series["quality_profile_id"])
     from . import downloader
 
+    budget = [probe.search_budget(conn)]
     queued = 0
     skipped = 0
+    rejected = 0
     for episode in episodes:
         if active_download(conn, episode_id=episode["id"]):
             continue
@@ -808,12 +1044,25 @@ def search_series(conn, series: Mapping[str, Any], *, episode_id: int | None = N
                 conn, episode_id=episode["id"]):
             skipped += 1
             continue
-        choice = _choose_provider_episode(providers, episode, profile)
-        if choice is None:
+        if budget[0] <= 0:
+            break
+        releases = _probe_episode_releases(
+            conn, providers, episode, profile, series.get("original_language"),
+            budget=budget,
+        )
+        if not releases:
+            rejected += 1
             continue
-        candidate, source, provider_episode = choice
+        choice = quality.choose_release(
+            releases, profile,
+            current=episode if episode.get("file_path") else None,
+            original_language=series.get("original_language"),
+        )
+        if choice is None:
+            rejected += 1
+            continue
         downloader.enqueue_episode(
-            conn, series, episode, candidate, provider_episode,
+            conn, series, episode, choice, choice["provider_episode"],
             reason="upgrade" if episode.get("file_path") else reason,
         )
         queued += 1
@@ -824,6 +1073,11 @@ def search_series(conn, series: Mapping[str, Any], *, episode_id: int | None = N
         message = f"Queued {queued} episode{'s' if queued != 1 else ''}."
     elif skipped:
         message = "Recent download failures were skipped; retry one manually."
+    elif budget[0] <= 0:
+        message = ("The probe budget was exhausted; the next search continues "
+                   "with the remaining episodes.")
+    elif rejected:
+        message = "No allowed release passed the stream probe and quality profile."
     else:
         message = "No allowed release available (check the quality profile)."
     conn.execute("UPDATE series SET last_search_at = ?, search_message = ? WHERE id = ?",
@@ -843,18 +1097,14 @@ def manual_episode_releases(conn, series_id: int, episode_id: int,
     candidates = matching.series_candidates(
         conn, series, query_override=query, min_score=0.45 if query else 0.65
     )
-    out = []
-    for candidate, source, mapping in _provider_maps(conn, candidates, limit=12):
-        provider_episode = mapping.get((int(episode["season"]), int(episode["episode"])))
-        if provider_episode is None:
-            continue
-        out.append({
-            **candidate,
-            "source_name": source["name"],
-            "provider_episode": provider_episode,
-            "allowed": profile.allows(candidate.get("resolution")),
-        })
+    providers = _provider_maps(conn, candidates, limit=12)
+    budget = [probe.search_budget(conn)]
+    out = _probe_episode_releases(
+        conn, providers, episode, profile, series.get("original_language"),
+        budget=budget, acquire_timeout=30.0,
+    )
     out.sort(key=lambda entry: (
+        not entry.get("allowed"),
         -float(entry.get("score") or 0.0),
         quality.RANK.get(entry.get("resolution", "unknown"), len(quality.RESOLUTIONS) - 1),
     ))
@@ -887,19 +1137,27 @@ def grab_episode(conn, series_id: int, episode_id: int, source_id: int,
     if item is None:
         raise LookupError("That series is no longer in the playlist; update it and try again.")
     parsed = matching.parse_name(item["name"])
-    candidate = {
+    release = {
         **dict(item),
         "source_name": source["name"],
         "source_kind": source["kind"],
+        "provider_episode": provider_episode,
         "resolution": parsed.resolution,
+        "source": parsed.source,
         "score": 1.0,
     }
+    profile = _profile(conn, series["quality_profile_id"])
+    release = probe.probe_episode_release(conn, release, acquire_timeout=30.0)
+    allowed, reason_text = profile.check(release, series.get("original_language"))
+    if not allowed:
+        raise ValueError(f"This episode is not allowed by the profile: {reason_text}")
+    release["quality_label"] = _tier_label(profile, release)
     if active_download(conn, episode_id=episode_id):
         raise ValueError("A download for this episode is already active.")
     from . import downloader
 
-    return downloader.enqueue_episode(conn, series, episode, candidate,
-                                      provider_episode, reason="manual")
+    return downloader.enqueue_episode(conn, series, episode, release,
+                                      release["provider_episode"], reason="manual")
 
 
 # -------------------------------------------------------------- import/files
@@ -945,9 +1203,17 @@ def import_download(conn, download: Mapping[str, Any], temp_path: Path) -> Path:
         _move_into_place(temp_path, final)
         conn.execute(
             "UPDATE movies SET file_path = ?, file_size = ?, resolution = ?, "
-            "imported_at = ?, updated_at = ? WHERE id = ?",
-            (str(final), final.stat().st_size, download.get("resolution"),
-             _now(), _now(), movie["id"]),
+            "source = COALESCE(?, source), quality_label = COALESCE(?, quality_label), "
+            "audio_languages = COALESCE(?, audio_languages), "
+            "subtitle_languages = COALESCE(?, subtitle_languages), "
+            "media_info = COALESCE(?, media_info), imported_at = ?, updated_at = ? "
+            "WHERE id = ?",
+            (
+                str(final), final.stat().st_size, download.get("resolution"),
+                download.get("source"), download.get("quality_label"),
+                download.get("audio_languages"), download.get("subtitle_languages"),
+                download.get("media_info"), _now(), _now(), movie["id"],
+            ),
         )
         conn.commit()
         if previous and Path(previous) != final:
@@ -967,8 +1233,16 @@ def import_download(conn, download: Mapping[str, Any], temp_path: Path) -> Path:
     _move_into_place(temp_path, final)
     conn.execute(
         "UPDATE series_episodes SET file_path = ?, file_size = ?, resolution = ?, "
-        "imported_at = ? WHERE id = ?",
-        (str(final), final.stat().st_size, download.get("resolution"), _now(), episode["id"]),
+        "source = COALESCE(?, source), quality_label = COALESCE(?, quality_label), "
+        "audio_languages = COALESCE(?, audio_languages), "
+        "subtitle_languages = COALESCE(?, subtitle_languages), "
+        "media_info = COALESCE(?, media_info), imported_at = ? WHERE id = ?",
+        (
+            str(final), final.stat().st_size, download.get("resolution"),
+            download.get("source"), download.get("quality_label"),
+            download.get("audio_languages"), download.get("subtitle_languages"),
+            download.get("media_info"), _now(), episode["id"],
+        ),
     )
     conn.commit()
     if previous and Path(previous) != final:
@@ -988,6 +1262,8 @@ def _movie_target(conn, movie: Mapping[str, Any], download: Mapping[str, Any]) -
         "title": movie["title"],
         "year": movie.get("year") or "",
         "resolution": download.get("resolution") or "unknown",
+        "source": quality.source_label(download.get("source")),
+        "quality": download.get("quality_label") or download.get("resolution") or "unknown",
     }
     folder = root / naming.render_component(
         templates["folder"], values, naming.MOVIE_FOLDER_TOKENS,
@@ -1025,6 +1301,8 @@ def _episode_target(conn, series: Mapping[str, Any], episode: Mapping[str, Any],
         "episode": episode["episode"],
         "episode_title": episode.get("title") or f"Episode {int(episode['episode'])}",
         "resolution": download.get("resolution") or "unknown",
+        "source": quality.source_label(download.get("source")),
+        "quality": download.get("quality_label") or download.get("resolution") or "unknown",
     }
     filename = naming.render_component(
         templates["file"], values, naming.EPISODE_FILE_TOKENS,
@@ -1063,9 +1341,9 @@ def movie_needs_search(conn, movie: Mapping[str, Any]) -> bool:
     if not movie.get("monitored"):
         return False
     if not movie.get("file_path"):
-        return True
+        return movie_available(movie)
     profile = _profile(conn, movie["quality_profile_id"])
-    return profile.upgrades and not profile.cutoff_met(movie.get("resolution"))
+    return profile.upgrades and not profile.cutoff_met(movie)
 
 
 def series_needs_search(conn, series: Mapping[str, Any]) -> bool:
@@ -1076,12 +1354,13 @@ def series_needs_search(conn, series: Mapping[str, Any]) -> bool:
 
 
 def wanted_movies(conn) -> list[dict]:
-    return [
+    rows = [
         dict(row) for row in conn.execute(
             "SELECT * FROM movies WHERE monitored = 1 AND file_path IS NULL "
             "ORDER BY title COLLATE NOCASE"
         )
     ]
+    return [movie for movie in rows if movie_available(movie)]
 
 
 def wanted_episodes(conn) -> list[dict]:
@@ -1117,6 +1396,7 @@ __all__ = [
     "list_series",
     "manual_episode_releases",
     "manual_movie_releases",
+    "movie_available",
     "movie_needs_search",
     "movie_status",
     "movie_templates",

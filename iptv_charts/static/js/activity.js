@@ -4,7 +4,7 @@
   'use strict';
 
   const {
-    $, get, post, del, setStatus, element, feedback, formatBytes, timeAgo,
+    $, get, post, patch, del, setStatus, element, feedback, formatBytes, timeAgo,
   } = Manager;
 
   const queueBody = $('#queue-body');
@@ -75,7 +75,8 @@
     const bits = [
       download.kind === 'episode' ? 'Episode' : 'Movie',
       download.source_name || 'Unknown playlist',
-      download.resolution || 'unknown',
+      download.quality_label || download.resolution || 'unknown',
+      `priority ${download.priority || 0}`,
     ];
     main.append(element('span', 'muted', bits.join(' · ')));
     if (download.release_name) main.append(element('span', 'muted small', download.release_name));
@@ -97,6 +98,16 @@
     }
 
     const actions = element('div', 'queue-actions');
+    const priority = document.createElement('input');
+    priority.type = 'number';
+    priority.className = 'priority-input';
+    priority.min = '-100';
+    priority.max = '100';
+    priority.step = '1';
+    priority.value = String(download.priority || 0);
+    priority.title = 'Queue priority — higher runs first';
+    priority.dataset.priority = download.id;
+    actions.append(priority);
     if (active) {
       const cancel = element('button', 'btn btn-sm btn-danger', 'Cancel');
       cancel.type = 'button';
@@ -167,6 +178,20 @@
     });
     tasksBody.append(table);
   }
+
+  document.addEventListener('change', async (event) => {
+    const priority = event.target.closest('[data-priority]');
+    if (!priority) return;
+    try {
+      await patch(`/api/downloads/${priority.dataset.priority}`, {
+        priority: Number(priority.value) || 0,
+      });
+      setStatus(status, 'Queue priority updated.', 'ok');
+      refresh();
+    } catch (error) {
+      setStatus(status, error.message, 'bad');
+    }
+  });
 
   document.addEventListener('click', async (event) => {
     const run = event.target.closest('[data-run-task]');

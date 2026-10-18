@@ -58,6 +58,9 @@
           <div class="library-badges">
             {{ status_badge('downloading' if movie.download else movie.status) }}
             {% if movie.monitored %}<span class="badge badge-monitored">Monitored</span>{% endif %}
+            {% if not movie.available and not movie.file_path %}
+              <span class="badge badge-muted">Awaiting release</span>
+            {% endif %}
           </div>
           {{ progress(movie.download) }}
         </div>
@@ -82,6 +85,18 @@
             <option value="{{ profile.id }}">{{ profile.name }} ({{ profile.resolutions|join(', ') }})</option>
           {% endfor %}
         </select>
+      </label>
+      <label class="field">
+        <span>Download when</span>
+        <select id="movie-availability">
+          <option value="released" selected>Released (avoid cams)</option>
+          <option value="in_cinemas">In cinemas / release date reached</option>
+          <option value="announced">Announced (search immediately)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Queue priority <small class="muted">higher runs first</small></span>
+        <input type="number" id="movie-priority" min="-100" max="100" step="1" value="0">
       </label>
       <label class="check"><input type="checkbox" id="movie-monitored" checked> Monitored</label>
       <label class="check"><input type="checkbox" id="movie-search-now" checked> Search and download now</label>

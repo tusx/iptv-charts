@@ -17,7 +17,7 @@ DEFAULT_BASE = "https://api.themoviedb.org/3"
 DEFAULT_IMAGE_BASE = "https://image.tmdb.org/t/p"
 CONNECT_TIMEOUT = 12
 READ_TIMEOUT = 30
-DEFAULT_USER_AGENT = "IPTVCharts/0.2"
+DEFAULT_USER_AGENT = "IPTVCharts/0.3"
 
 #: Sizes accepted by the local image proxy. Deliberately a whitelist rather
 #: than "whatever is in the URL": the proxy must not become an SSRF gadget.
@@ -80,6 +80,7 @@ def normalise_summary(raw: dict, *, kind: str) -> dict:
         "tmdb_id": int(raw["id"]),
         "title": str(title or original or "Untitled"),
         "original_title": str(original or title or ""),
+        "original_language": raw.get("original_language"),
         "year": _year(date),
         "release_date": date or None,
         "overview": raw.get("overview") or "",

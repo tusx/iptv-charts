@@ -50,13 +50,33 @@ os.environ["PATH"] = f"{_FAKE_BIN}:{os.environ.get('PATH', '')}"
     "#!/bin/sh\n"
     "last=''\n"
     "for arg in \"$@\"; do last=\"$arg\"; done\n"
-    "height=1080\n"
-    "case \"$(head -c 64 \"$last\" 2>/dev/null)\" in\n"
-    "  *RES:2160*) height=2160 ;;\n"
-    "  *RES:720*) height=720 ;;\n"
-    "  *RES:480*) height=480 ;;\n"
+    "case \"$last\" in\n"
+    "  http*)\n"
+    "    id=$(printf '%s' \"$last\" | sed -n 's#.*/\\([0-9][0-9]*\\)\\.[A-Za-z0-9]*$#\\1#p')\n"
+    "    width=1920; height=1080\n"
+    "    audio='{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"channels\":2,\"tags\":{\"language\":\"eng\"}}'\n"
+    "    subs=''\n"
+    "    case \"$id\" in\n"
+    "      60002|60003|60020|60021) width=3840; height=2160 ;;\n"
+    "    esac\n"
+    "    case \"$id\" in\n"
+    "      60003) audio='{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"channels\":2,\"tags\":{\"language\":\"spa\"}}';\n"
+    "             subs=',{\"index\":2,\"codec_type\":\"subtitle\",\"codec_name\":\"subrip\",\"tags\":{\"language\":\"eng\"}}' ;;\n"
+    "      60020) audio='{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"channels\":2,\"tags\":{\"language\":\"spa\"}}' ;;\n"
+    "      60021) subs=',{\"index\":2,\"codec_type\":\"subtitle\",\"codec_name\":\"subrip\",\"tags\":{\"language\":\"eng\"}}' ;;\n"
+    "    esac\n"
+    "    printf '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"width\":%s,\"height\":%s},%s%s],\"format\":{\"size\":8192,\"duration\":\"7200\",\"format_name\":\"mp4\"}}' \"$width\" \"$height\" \"$audio\" \"$subs\"\n"
+    "    ;;\n"
+    "  *)\n"
+    "    width=1920; height=1080\n"
+    "    case \"$(head -c 64 \"$last\" 2>/dev/null)\" in\n"
+    "      *RES:2160*) width=3840; height=2160 ;;\n"
+    "      *RES:720*) width=1280; height=720 ;;\n"
+    "      *RES:480*) width=854; height=480 ;;\n"
+    "    esac\n"
+    "    printf '{\"streams\":[{\"width\":%s,\"height\":%s}]}' \"$width\" \"$height\"\n"
+    "    ;;\n"
     "esac\n"
-    "printf '{\"streams\":[{\"height\":%s}]}' \"$height\"\n"
 )
 (_FAKE_BIN / "ffprobe").chmod(0o755)
 
@@ -122,6 +142,22 @@ SPECIAL_VOD = [
      "stream_id": 60014, "stream_icon": "http://localhost/m60014.jpg",
      "rating": "6.0", "added": "1700100000", "category_id": "2",
      "container_extension": "m3u8"},
+    {"num": 9, "name": "Probe Movie (2024) [2160p] CAM", "stream_type": "movie",
+     "stream_id": 60020, "stream_icon": "http://localhost/m60020.jpg",
+     "rating": "6.0", "added": "1700100000", "category_id": "2",
+     "container_extension": "mkv"},
+    {"num": 10, "name": "Probe Movie (2024) [2160p] WEB-DL", "stream_type": "movie",
+     "stream_id": 60021, "stream_icon": "http://localhost/m60021.jpg",
+     "rating": "6.0", "added": "1700100000", "category_id": "2",
+     "container_extension": "mkv"},
+    {"num": 11, "name": "Probe Movie (2024) [1080p] WEB-DL", "stream_type": "movie",
+     "stream_id": 60022, "stream_icon": "http://localhost/m60022.jpg",
+     "rating": "6.0", "added": "1700100000", "category_id": "2",
+     "container_extension": "mp4"},
+    {"num": 12, "name": "Future Movie (2099) [1080p]", "stream_type": "movie",
+     "stream_id": 60023, "stream_icon": "http://localhost/m60023.jpg",
+     "rating": "6.0", "added": "1700100000", "category_id": "2",
+     "container_extension": "mp4"},
 ]
 
 SPECIAL_SERIES = [
@@ -130,6 +166,12 @@ SPECIAL_SERIES = [
      "category_id": "3", "last_modified": "1700200000"},
     {"num": 2, "name": "GR - Supernatural [1080p]", "series_id": 70002,
      "cover": "http://localhost/s70002.jpg", "plot": "A plot",
+     "category_id": "3", "last_modified": "1700200000"},
+    {"num": 3, "name": "Throttle Show (2024) [1080p]", "series_id": 70003,
+     "cover": "http://localhost/s70003.jpg", "plot": "A plot",
+     "category_id": "3", "last_modified": "1700200000"},
+    {"num": 4, "name": "Monitor Show (2024) [1080p]", "series_id": 70004,
+     "cover": "http://localhost/s70004.jpg", "plot": "A plot",
      "category_id": "3", "last_modified": "1700200000"},
 ]
 
@@ -149,6 +191,24 @@ SERIES_INFO = {
     "70002": {"episodes": {
         "1": [
             {"id": 80101, "episode_num": 1, "title": "Pilot",
+             "container_extension": "mp4", "info": {"duration": "00:40:00"}},
+        ],
+    }},
+    "70003": {"episodes": {
+        "1": [
+            {"id": 80201, "episode_num": 1, "title": "Throttle One",
+             "container_extension": "mp4", "info": {"duration": "00:40:00"}},
+            {"id": 80202, "episode_num": 2, "title": "Throttle Two",
+             "container_extension": "mp4", "info": {"duration": "00:40:00"}},
+        ],
+    }},
+    "70004": {"episodes": {
+        "1": [
+            {"id": 80301, "episode_num": 1, "title": "Released One",
+             "container_extension": "mp4", "info": {"duration": "00:40:00"}},
+        ],
+        "2": [
+            {"id": 80302, "episode_num": 1, "title": "Future One",
              "container_extension": "mp4", "info": {"duration": "00:40:00"}},
         ],
     }},
@@ -202,6 +262,18 @@ TMDB_MOVIES = {
           "poster_path": "/hls.jpg", "backdrop_path": None, "vote_average": 6.0,
           "runtime": 90, "genres": [{"name": "Drama"}],
           "external_ids": {"imdb_id": "tt0610"}, "alternative_titles": {"titles": []}},
+    611: {"title": "Probe Movie", "original_title": "Probe Movie",
+          "release_date": "2024-08-01", "overview": "Choose the WEB-DL, not the CAM.",
+          "poster_path": "/probe.jpg", "backdrop_path": None, "vote_average": 6.0,
+          "runtime": 90, "genres": [{"name": "Drama"}],
+          "external_ids": {"imdb_id": "tt0611"}, "alternative_titles": {"titles": []},
+          "original_language": "en"},
+    614: {"title": "Future Movie", "original_title": "Future Movie",
+          "release_date": "2099-01-01", "overview": "Not released for a long time.",
+          "poster_path": "/future.jpg", "backdrop_path": None, "vote_average": 6.0,
+          "runtime": 90, "genres": [{"name": "Science Fiction"}],
+          "external_ids": {"imdb_id": "tt0614"}, "alternative_titles": {"titles": []},
+          "original_language": "en"},
 }
 
 TMDB_SERIES = {
@@ -222,6 +294,23 @@ TMDB_SERIES = {
            "external_ids": {"tvdb_id": 9102},
            "seasons": [{"season_number": 1, "episode_count": 1}],
            "alternative_titles": {"results": []}},
+    9003: {"name": "Throttle Show", "original_name": "Throttle Show",
+           "first_air_date": "2024-01-01", "overview": "Connection limit test.",
+           "poster_path": "/throttle.jpg", "backdrop_path": None,
+           "vote_average": 6.0, "status": "Continuing",
+           "genres": [{"name": "Drama"}],
+           "external_ids": {"tvdb_id": 9103},
+           "seasons": [{"season_number": 1, "episode_count": 2}],
+           "alternative_titles": {"results": []}},
+    9004: {"name": "Monitor Show", "original_name": "Monitor Show",
+           "first_air_date": "2024-01-01", "overview": "Monitoring modes.",
+           "poster_path": "/monitor.jpg", "backdrop_path": None,
+           "vote_average": 6.0, "status": "Continuing",
+           "genres": [{"name": "Drama"}],
+           "external_ids": {"tvdb_id": 9104},
+           "seasons": [{"season_number": 1, "episode_count": 1},
+                       {"season_number": 2, "episode_count": 1}],
+           "alternative_titles": {"results": []}},
 }
 
 TVDB_EPISODES = {
@@ -237,6 +326,18 @@ TVDB_EPISODES = {
         {"id": 92011, "seasonNumber": 1, "number": 1, "name": "Pilot",
          "aired": "2005-09-13", "overview": "First.", "image": ""},
     ],
+    9103: [
+        {"id": 93011, "seasonNumber": 1, "number": 1, "name": "Throttle One",
+         "aired": "2024-01-01", "overview": "First.", "image": ""},
+        {"id": 93012, "seasonNumber": 1, "number": 2, "name": "Throttle Two",
+         "aired": "2024-01-08", "overview": "Second.", "image": ""},
+    ],
+    9104: [
+        {"id": 94011, "seasonNumber": 1, "number": 1, "name": "Released One",
+         "aired": "2024-01-01", "overview": "First.", "image": ""},
+        {"id": 94021, "seasonNumber": 2, "number": 1, "name": "Future One",
+         "aired": "2099-01-01", "overview": "Future.", "image": ""},
+    ],
 }
 
 MEDIA_MARKERS = {
@@ -244,11 +345,18 @@ MEDIA_MARKERS = {
     60009: ("1080", "mp4"), 60010: ("1080", "mp4"), 60011: ("1080", "mp4"),
     80001: ("1080", "mp4"), 80002: ("1080", "mp4"), 80011: ("1080", "mp4"),
     80101: ("1080", "mp4"), 60013: ("720", "mp4"), 60014: ("1080", "mkv"),
+    60020: ("2160", "mkv"), 60021: ("2160", "mkv"), 60022: ("1080", "mp4"),
+    60023: ("1080", "mp4"), 80201: ("1080", "mp4"), 80202: ("1080", "mp4"),
+    80301: ("1080", "mp4"), 80302: ("1080", "mp4"),
 }
 
 
 class ManagerHandler(integration.Handler):
     dead_attempts: dict[int, int] = {}
+    #: Start/end times for the two "Throttle Show" episode requests. The
+    #: connection-limit test asserts these intervals never overlap.
+    throttle_intervals: list[tuple[float, float]] = []
+    throttle_lock = threading.Lock()
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -309,6 +417,12 @@ class ManagerHandler(integration.Handler):
             return
         media_id = int(match.group(1))
         extension = match.group(2)
+        if media_id in (80201, 80202):
+            started = time.time()
+            time.sleep(0.35)
+            finished = time.time()
+            with self.throttle_lock:
+                self.throttle_intervals.append((started, finished))
         if media_id == 60011:
             self._send(b"<html><body>login please</body></html>", "text/html")
             return
@@ -387,7 +501,13 @@ class ManagerHandler(integration.Handler):
             if details is None:
                 self.send_error(404)
                 return
-            self._json({"id": int(movie_match.group(1)), **details})
+            tmdb_id = int(movie_match.group(1))
+            self._json({
+                "id": tmdb_id, **details,
+                "original_language": details.get(
+                    "original_language", "es" if tmdb_id == 604 else "en"
+                ),
+            })
             return
         series_match = re.match(r"^/tv/(\d+)$", sub)
         if series_match:
@@ -395,7 +515,10 @@ class ManagerHandler(integration.Handler):
             if details is None:
                 self.send_error(404)
                 return
-            self._json({"id": int(series_match.group(1)), **details})
+            self._json({
+                "id": int(series_match.group(1)), **details,
+                "original_language": details.get("original_language", "en"),
+            })
             return
         season_match = re.match(r"^/tv/(\d+)/season/(\d+)$", sub)
         if season_match:
@@ -425,6 +548,9 @@ class ManagerHandler(integration.Handler):
             "overview": details["overview"], "poster_path": details.get("poster_path"),
             "backdrop_path": details.get("backdrop_path"),
             "vote_average": details.get("vote_average"),
+            "original_language": details.get(
+                "original_language", "es" if tmdb_id == 604 else "en"
+            ),
         }
 
     def _series_summary(self, tmdb_id: int, details: dict) -> dict:
@@ -435,6 +561,7 @@ class ManagerHandler(integration.Handler):
             "overview": details["overview"], "poster_path": details.get("poster_path"),
             "backdrop_path": details.get("backdrop_path"),
             "vote_average": details.get("vote_average"),
+            "original_language": details.get("original_language", "en"),
         }
 
     # ------------------------------------------------------------------- tvdb
@@ -515,6 +642,16 @@ def wait_download(download_id: int, timeout: float = 30.0):
         ),
         timeout=timeout,
     )
+
+
+def downloads_for_series(series_id: int) -> list[dict]:
+    conn = db.connect()
+    try:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM downloads WHERE series_id = ? ORDER BY id", (series_id,)
+        )]
+    finally:
+        conn.close()
 
 
 def page_text(client, path: str) -> str:
@@ -726,6 +863,210 @@ def main() -> int:
         db.set_setting(conn, metadata.TVDB_KEY, "test-tvdb-key")
         conn.close()
 
+        # ------------------------------------------------------- probe/quality
+        section("probe-first custom quality, audio and subtitles")
+        response = client.post("/api/quality-profiles", json={
+            "name": "4K WEB-DL English",
+            "qualities": [{"resolution": "2160p", "sources": ["web-dl"]}],
+            "cutoff": "2160p WEB-DL",
+            "upgrades": True,
+            "audio_mode": "original",
+            "subtitle_mode": "required",
+            "subtitle_languages": ["eng"],
+            "probe_required": True,
+        })
+        check("custom profile created", response.status_code, 201)
+        custom_profile = response.get_json()["profile"]
+        check("custom profile tier round-trips",
+              custom_profile["qualities"][0]["sources"], ["web-dl"])
+        check("custom profile audio mode", custom_profile["audio_mode"], "original")
+
+        response = client.post("/api/movies", json={
+            "tmdb_id": 611, "quality_profile_id": custom_profile["id"],
+            "monitored": True, "search": False,
+        })
+        check("probe movie added", response.status_code, 201)
+        probe_movie = response.get_json()["movie"]
+        releases = client.get(f"/api/movies/{probe_movie['id']}/releases").get_json()["releases"]
+        by_id = {str(release["remote_id"]): release for release in releases}
+        check("both probe releases listed", len(by_id) >= 2, True)
+        webdl_release = by_id.get("60021")
+        cam_release = by_id.get("60020")
+        check_true("WEB-DL release was probed", webdl_release and webdl_release.get("probe_ok"))
+        if webdl_release:
+            check("probe reports real 2160p", webdl_release["resolution"], "2160p")
+            check("probe reports English audio", webdl_release["audio_languages"], ["eng"])
+            check("probe reports English subtitles", webdl_release["subtitle_languages"], ["eng"])
+            check("profile allows WEB-DL", webdl_release["allowed"], True)
+            check("quality tier label attached", webdl_release["quality_label"], "2160p WEB-DL")
+        if cam_release:
+            check("CAM is outside the WEB-DL profile", cam_release["allowed"], False)
+            check_true("CAM rejection says why", "source" in (cam_release.get("reason") or ""))
+        response = client.get(f"/api/movies/{probe_movie['id']}/releases")
+        check("manual releases status", response.status_code, 200)
+        conn = db.connect()
+        probe_rows = conn.execute(
+            "SELECT COUNT(*) AS n FROM stream_probes WHERE source_id = ?", (source_id,)
+        ).fetchone()["n"]
+        conn.close()
+        check_true("probe results are cached", probe_rows >= 2)
+
+        response = client.post(f"/api/movies/{probe_movie['id']}/grab", json={
+            "source_id": webdl_release["source_id"],
+            "remote_id": webdl_release["remote_id"],
+        })
+        check("probed grab accepted", response.status_code, 200)
+        probe_download = response.get_json()["download"]
+        probe_done = wait_download(probe_download["id"])
+        check("probed release imported", probe_done["status"], "imported")
+        check("probed download source", probe_done["source"], "web-dl")
+        check("probed download quality", probe_done["quality_label"], "2160p WEB-DL")
+        conn = db.connect()
+        stored_movie = conn.execute(
+            "SELECT source, quality_label, audio_languages, subtitle_languages "
+            "FROM movies WHERE id = ?", (probe_movie["id"],)
+        ).fetchone()
+        conn.close()
+        check("movie stores probed source", stored_movie["source"], "web-dl")
+        check("movie stores probed quality", stored_movie["quality_label"], "2160p WEB-DL")
+        check("movie stores probed audio", stored_movie["audio_languages"], '["eng"]')
+        check("movie stores probed subtitles", stored_movie["subtitle_languages"], '["eng"]')
+        response = client.post("/api/probes/clear", json={})
+        check("probe cache cleared", response.status_code, 200)
+        check_true("probe cache clear reports rows", response.get_json()["cleared"] >= 2)
+
+        # ---------------------------------------------------------- availability
+        section("minimum availability blocks an unreleased movie")
+        response = client.post("/api/movies", json={
+            "tmdb_id": 614, "quality_profile_id": hd["id"],
+            "monitored": True, "search": True,
+            "minimum_availability": "released",
+        })
+        check("future movie added", response.status_code, 201)
+        future_movie = response.get_json()["movie"]
+        check("future movie was not downloaded", latest_download(movie_id=future_movie["id"]), None)
+        check_true("future movie explains why",
+                   "Not available" in (future_movie.get("search_message") or ""))
+        response = client.patch(f"/api/movies/{future_movie['id']}", json={
+            "minimum_availability": "announced",
+        })
+        check("availability changed", response.status_code, 200)
+        response = client.post(f"/api/movies/{future_movie['id']}/search")
+        check("announced movie search accepted", response.status_code, 200)
+        future_download = wait_until(lambda: latest_download(movie_id=future_movie["id"]))
+        check_true("announced movie queued", future_download)
+        future_done = wait_download(future_download["id"])
+        check("announced movie imported", future_done["status"], "imported")
+
+        # ------------------------------------------------------- monitor modes
+        section("Sonarr-style monitor modes and new seasons")
+        response = client.post("/api/series", json={
+            "tmdb_id": 9004, "quality_profile_id": hd["id"],
+            "monitored": True, "search": False,
+            "monitor_mode": "future", "monitor_new_seasons": "none",
+        })
+        check("future-only series added", response.status_code, 201)
+        monitor_series = response.get_json()["series"]
+        conn = db.connect()
+        monitor_episodes = {
+            (row["season"], row["episode"]): row
+            for row in conn.execute(
+                "SELECT * FROM series_episodes WHERE series_id = ?",
+                (monitor_series["id"],)
+            )
+        }
+        conn.close()
+        check("released episode is not monitored in future mode",
+              monitor_episodes[(1, 1)]["monitored"], 0)
+        check("future episode is monitored in future mode",
+              monitor_episodes[(2, 1)]["monitored"], 1)
+
+        TVDB_EPISODES[9104].append({
+            "id": 94031, "seasonNumber": 3, "number": 1, "name": "Season Three",
+            "aired": "2099-02-01", "overview": "New season.", "image": "",
+        })
+        response = client.post(f"/api/series/{monitor_series['id']}/refresh")
+        check("series refresh with a new season", response.status_code, 200)
+        conn = db.connect()
+        new_season = conn.execute(
+            "SELECT monitored FROM series_episodes WHERE series_id = ? "
+            "AND season = 3 AND episode = 1", (monitor_series["id"],)
+        ).fetchone()
+        conn.close()
+        check("monitor_new_seasons=none leaves the new season alone",
+              new_season["monitored"], 0)
+
+        response = client.patch(f"/api/series/{monitor_series['id']}", json={
+            "monitor_new_seasons": "all",
+        })
+        check("new-season rule changed", response.status_code, 200)
+        TVDB_EPISODES[9104].append({
+            "id": 94032, "seasonNumber": 3, "number": 2, "name": "Season Three B",
+            "aired": "2099-03-01", "overview": "New season.", "image": "",
+        })
+        client.post(f"/api/series/{monitor_series['id']}/refresh")
+        conn = db.connect()
+        new_season_b = conn.execute(
+            "SELECT monitored FROM series_episodes WHERE series_id = ? "
+            "AND season = 3 AND episode = 2", (monitor_series["id"],)
+        ).fetchone()
+        conn.close()
+        check("monitor_new_seasons=all monitors the new season",
+              new_season_b["monitored"], 1)
+
+        # ------------------------------------------------------ connection limit
+        section("connection limit serialises a season")
+        response = client.patch(f"/api/sources/{source_id}", json={
+            "connection_limit": 1,
+        })
+        check("source connection limit updated", response.status_code, 200)
+        check("source connection limit stored",
+              response.get_json()["source"]["connection_limit"], 1)
+        response = client.post("/api/settings/downloads", json={"concurrency": 3})
+        check("worker count raised", response.status_code, 200)
+        downloader.ensure_started()
+        ManagerHandler.throttle_intervals.clear()
+
+        response = client.post("/api/series", json={
+            "tmdb_id": 9003, "quality_profile_id": hd["id"],
+            "monitored": True, "search": True, "monitor_mode": "all",
+        })
+        check("throttle series added", response.status_code, 201)
+        throttle_series = response.get_json()["series"]
+        throttle_downloads = wait_until(
+            lambda: (lambda rows: rows if rows and all(
+                row["status"] in ("imported", "failed", "cancelled") for row in rows
+            ) else None)(downloads_for_series(throttle_series["id"])),
+            timeout=40,
+        )
+        check_true("two throttled episodes downloaded", throttle_downloads)
+        if throttle_downloads:
+            check("both throttled episodes imported",
+                  sorted(row["status"] for row in throttle_downloads),
+                  ["imported", "imported"])
+        intervals = sorted(ManagerHandler.throttle_intervals)
+        check("two media requests observed", len(intervals), 2)
+        if len(intervals) == 2:
+            check("one connection at a time", intervals[0][1] <= intervals[1][0], True)
+        response = client.patch(f"/api/sources/{source_id}", json={
+            "connection_limit": None,
+        })
+        check("source limit restored to auto", response.status_code, 200)
+        client.post("/api/settings/downloads", json={"concurrency": 1})
+
+        section("queue priority edit")
+        conn = db.connect()
+        priority_download = conn.execute(
+            "SELECT id FROM downloads WHERE series_id = ? ORDER BY id LIMIT 1",
+            (throttle_series["id"],)
+        ).fetchone()
+        conn.close()
+        response = client.patch(f"/api/downloads/{priority_download['id']}", json={
+            "priority": 25,
+        })
+        check("priority edit accepted", response.status_code, 200)
+        check("priority stored", response.get_json()["download"]["priority"], 25)
+
         # --------------------------------------------------------------- cancel
         section("cancel a slow download")
         response = client.post("/api/movies", json={
@@ -849,6 +1190,7 @@ def main() -> int:
         # -------------------------------------------------------------- pages/api
         section("rendered pages and settings APIs")
         for path, needle in (
+            ("/", "Save limit"),
             ("/movies", "The Matrix"),
             (f"/movies/{movie['id']}", "The Matrix"),
             (f"/series/{series['id']}", "The Beginning"),
@@ -856,11 +1198,17 @@ def main() -> int:
             ("/wanted", "Wanted"),
             ("/activity", "Queue"),
             ("/scan", "Library scan"),
-            ("/settings", "Metadata providers"),
-            ("/settings/profiles", "Quality profiles"),
+            ("/settings", "Probe cache"),
+            ("/settings/profiles", "Quality hierarchy"),
         ):
             text = page_text(client, path)
             check_true(f"{path} renders", needle in text)
+
+        settings_page = page_text(client, "/settings")
+        check_true("settings shows ffprobe", "ffprobe" in settings_page)
+        profiles_page = page_text(client, "/settings/profiles")
+        check_true("profiles page shows the custom tier",
+                   "2160p WEB-DL" in profiles_page)
 
         activity_payload = client.get("/api/activity").get_json()
         check("activity API has a queue", isinstance(activity_payload.get("active"), list), True)

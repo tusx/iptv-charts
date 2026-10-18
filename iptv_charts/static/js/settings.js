@@ -177,8 +177,27 @@
         await withButton($('#downloads-save'), 'Saving…', () => postJSON('/api/settings/downloads', {
           concurrency: Number($('#download-concurrency').value),
           max_attempts: Number($('#download-attempts').value),
+          probe_cache_hours: Number($('#probe-cache-hours').value),
+          probe_timeout_seconds: Number($('#probe-timeout').value),
+          probe_max_candidates: Number($('#probe-max-candidates').value),
+          probe_search_budget: Number($('#probe-search-budget').value),
         }));
         setStatus(status, 'Saved.', 'ok');
+      } catch (error) {
+        setStatus(status, error.message, 'bad');
+      }
+    });
+  }
+
+  const clearProbes = $('#probes-clear');
+  if (clearProbes) {
+    clearProbes.addEventListener('click', async () => {
+      const status = $('#downloads-status');
+      setStatus(status, 'Clearing…');
+      try {
+        const result = await withButton(clearProbes, 'Clearing…',
+          () => postJSON('/api/probes/clear', {}));
+        setStatus(status, `Cleared ${result.cleared} cached probe(s).`, 'ok');
       } catch (error) {
         setStatus(status, error.message, 'bad');
       }
