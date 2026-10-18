@@ -151,6 +151,43 @@ def query_items(conn: sqlite3.Connection, source_id: int, *, text: str = "",
 DEFAULT_CATEGORY_LIMIT = 300
 
 
+def search_catalog(conn: sqlite3.Connection, kind: str, text: str, *,
+                   limit: int = 200) -> list[dict]:
+    """Search the whole catalog for one kind, across every playlist.
+
+    Used by the library's release matcher: a movie is not tied to the playlist
+    it happens to be browsed from, so the per-source query above is the wrong
+    shape. The CROSS JOIN is the same planner-defeating trick described in the
+    module docstring; without it, a title search over 300k rows takes seconds.
+    """
+    if kind not in ("live", "vod", "series"):
+        raise ValueError(f"Unknown item kind {kind!r}.")
+    limit = max(1, min(int(limit), 500))
+    fts = fts_query(text)
+    if not fts:
+        return []
+
+    params: list = [fts, kind]
+    rows = conn.execute(
+        """
+        SELECT i.id, i.source_id, i.kind, i.remote_id, i.name, i.logo,
+               i.container_ext, i.request_headers, i.added_ts,
+               s.name AS source_name, s.kind AS source_kind
+        FROM items_fts f
+        CROSS JOIN items i
+        CROSS JOIN sources s
+        WHERE items_fts MATCH ?
+          AND i.id = f.rowid
+          AND i.kind = ?
+          AND s.id = i.source_id
+        ORDER BY i.name COLLATE NOCASE
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def categories_for(conn: sqlite3.Connection, source_id: int,
                    kind: str = "", limit: int | None = DEFAULT_CATEGORY_LIMIT) -> dict:
     """Categories for the filter dropdown, optionally scoped to one kind.
@@ -290,8 +327,15 @@ def series_episodes(source_row, series_id: str) -> list[dict]:
     """
     from .clients import xtream
 
+    try:
+        extra = json.loads(source_row["request_headers"] or "{}")
+    except (TypeError, ValueError):
+        extra = {}
     client = xtream.XtreamClient(
-        source_row["base_url"], source_row["username"], source_row["password"]
+        source_row["base_url"], source_row["username"], source_row["password"],
+        user_agent=extra.get("user_agent"),
+        referrer=extra.get("referrer"),
+        headers=extra.get("headers"),
     )
     try:
         payload = client.series_info(series_id)
@@ -359,5 +403,6 @@ __all__ = [
     "guess_media_type",
     "query_items",
     "resolve_series_episode",
+    "search_catalog",
     "series_episodes",
 ]

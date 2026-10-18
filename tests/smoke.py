@@ -21,7 +21,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from iptv_charts import config, db, player  # noqa: E402
+from iptv_charts import (config, db, items, matching, naming, player,  # noqa: E402
+                         quality)
 from iptv_charts.clients import m3u, xtream  # noqa: E402
 from iptv_charts.errors import SyncCancelled  # noqa: E402
 
@@ -674,6 +675,141 @@ def test_web() -> None:
             os.environ.pop("IPTV_CHARTS_CONFIG_DIR", None)
 
 
+# ------------------------------------------------------------ manager foundations
+def test_manager_foundations() -> None:
+    section("quality profiles")
+    check("4K tag wins over 1080p", quality.parse_resolution("Movie [2160p] [1080p]"), "2160p")
+    check("4K-Q bracket recognised",
+          quality.parse_resolution("ES - Un talento único [[4K-Q]-Q] (2026)"), "2160p")
+    check("FHD is 1080p", quality.parse_resolution("Movie [FHD]"), "1080p")
+    check("no tag is unknown", quality.parse_resolution("Movie (2024)"), "unknown")
+    check("height maps to tier", quality.resolution_from_height(1080), "1080p")
+    check("2160 height maps to tier", quality.resolution_from_height(2160), "2160p")
+
+    profile = quality.Profile(("1080p", "720p", "480p", "unknown"), "1080p", True)
+    releases = [
+        {"resolution": "720p", "score": 0.9},
+        {"resolution": "1080p", "score": 0.8},
+        {"resolution": "2160p", "score": 0.7},
+    ]
+    check("missing file takes best allowed",
+          quality.choose_release(releases, profile)["resolution"], "1080p")
+    check("below-cutoff file upgrades",
+          quality.choose_release(releases, profile, current="720p")["resolution"], "1080p")
+    check("cutoff stops upgrades",
+          quality.choose_release(releases, profile, current="1080p"), None)
+    no_upgrades = quality.Profile(("1080p", "720p"), "1080p", False)
+    check("upgrades disabled means no replacement",
+          quality.choose_release(releases, no_upgrades, current="720p"), None)
+    check("profile rejects an unknown resolution",
+          raises(quality.validate_profile, ["nonsense"], exc=ValueError), "raised")
+
+    section("naming and path safety")
+    check("illegal characters removed", naming.sanitize_component('a/b:c*?"'), "abc")
+    check("reserved device name escaped", naming.sanitize_component("CON"), "_CON")
+    check("empty metadata has a fallback", naming.sanitize_component(""), "Unknown")
+    check("episode template renders",
+          naming.render_component(
+              naming.DEFAULT_EPISODE_FILE,
+              {"series": "Dark Hearts", "season": 1, "episode": 2,
+               "episode_title": "Pilot", "resolution": "1080p"},
+              naming.EPISODE_FILE_TOKENS,
+          ),
+          "Dark Hearts - S01E02 - Pilot [1080p]")
+    check("missing year does not leave empty brackets",
+          naming.render_component(
+              naming.DEFAULT_MOVIE_FOLDER, {"title": "Wonder", "year": ""},
+              naming.MOVIE_FOLDER_TOKENS,
+          ),
+          "Wonder")
+    check("a separator in a template is refused",
+          raises(naming.validate_template, "{title}/{year}", naming.MOVIE_FILE_TOKENS,
+                 exc=naming.TemplateError), "raised")
+    check("an unknown placeholder is refused",
+          raises(naming.validate_template, "{bogus}", naming.MOVIE_FILE_TOKENS,
+                 exc=naming.TemplateError), "raised")
+    check("extension is sanitised", naming.safe_extension("MKV?x"), "mkvx")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "media"
+        root.mkdir()
+        check("path outside the media root is refused",
+              raises(naming.confine, Path(tmp) / "outside.mkv", root,
+                     exc=naming.TemplateError), "raised")
+
+    section("provider name matching")
+    wonder = matching.parse_name("EN - Wonder [4K-Q] (2017) JULIA ROBERTS")
+    check("year extracted", wonder.year, 2017)
+    check("resolution extracted", wonder.resolution, "2160p")
+    check("cast noise leaves a matchable title",
+          matching.score_name(wonder, ["wonder"], 2017), 1.0)
+    supernatural = matching.parse_name("GR - Supernatural [1080p]")
+    check("provider names without a year parse", supernatural.year, None)
+    check("series title still matches",
+          matching.score_name(supernatural, ["supernatural"], None), 1.0)
+    check("episode marker parsed", matching.episode_marker("Show S02E03"), (2, 3))
+    check("title that is a year survives",
+          matching.parse_name("1917 (2019)").title_variants[0], "1917")
+    not_a_year = matching.parse_name("Blade Runner 2049 (2017)")
+    check("a number in the title is not the release year", not_a_year.year, 2017)
+    check("the title keeps the number", not_a_year.title_variants[0], "blade runner 2049")
+
+    section("catalog-wide matching")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "catalog.db"
+        db.init_db(path)
+        conn = db.connect(path)
+        conn.execute(
+            "INSERT INTO sources (id, name, kind, created_at, base_url, username, password) "
+            "VALUES (1, 'Fixture', 'xtream', 0, 'http://example', 'u', 'p')"
+        )
+        conn.executemany(
+            "INSERT INTO items (source_id, kind, remote_id, name, container_ext) "
+            "VALUES (1, ?, ?, ?, ?)",
+            [
+                ("vod", "60001", "The Matrix (1999) [1080p]", "mp4"),
+                ("vod", "60002", "The Matrix (1999) [2160p]", "mkv"),
+                ("vod", "60003", "The Matrix S01E01 [1080p]", "mp4"),
+                ("series", "70001", "GR - Supernatural [1080p]", None),
+            ],
+        )
+        conn.commit()
+        found = items.search_catalog(conn, "vod", "the matrix", limit=20)
+        check("catalog-wide FTS finds both releases", len(found), 3)
+        movie_row = {"title": "The Matrix", "original_title": "The Matrix",
+                     "alt_titles": "[]", "year": 1999}
+        candidates = matching.movie_candidates(conn, movie_row, min_score=0.5)
+        check("movie matching drops episode-shaped VODs", len(candidates), 2)
+        check("candidates are ordered best resolution first", candidates[0]["resolution"], "2160p")
+        series_row = {"title": "Supernatural", "original_title": "Supernatural",
+                      "alt_titles": "[]", "year": None}
+        series_candidates = matching.series_candidates(conn, series_row, min_score=0.5)
+        check("series matching handles a missing year", len(series_candidates), 1)
+        conn.close()
+
+    section("schema migration")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "catalog.db"
+        db.init_db(path)
+        conn = db.connect(path)
+        conn.execute("ALTER TABLE items DROP COLUMN request_headers")
+        conn.execute("PRAGMA user_version = 0")
+        conn.execute("DELETE FROM quality_profiles")
+        conn.execute("DELETE FROM task_state")
+        conn.commit()
+        conn.close()
+        db.init_db(path)
+        conn = db.connect(path)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        profiles = conn.execute("SELECT COUNT(*) AS n FROM quality_profiles").fetchone()["n"]
+        tasks = conn.execute("SELECT COUNT(*) AS n FROM task_state").fetchone()["n"]
+        conn.close()
+        check("migration adds the request_headers column", "request_headers" in columns, True)
+        check("schema version recorded", version, db.SCHEMA_VERSION)
+        check("migration seeds quality profiles", profiles, 2)
+        check("migration seeds task state", tasks, 4)
+
+
 def main() -> int:
     test_config()
     test_db()
@@ -683,6 +819,7 @@ def main() -> int:
     test_items()
     test_player()
     test_player_bridge()
+    test_manager_foundations()
     test_web()
 
     passed = sum(1 for ok, _, _ in _results if ok)

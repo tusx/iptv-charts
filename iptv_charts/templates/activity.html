@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Activity · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="crumb"><a href="{{ url_for('sources_list') }}">Playlists</a> / Activity</p>
+    <h1>Activity</h1>
+    <p class="subtitle">Downloads, history and the scheduled library tasks.</p>
+  </div>
+  <div class="page-actions">
+    <button class="btn btn-sm" type="button" data-run-task="search_missing">Search missing</button>
+    <button class="btn btn-sm" type="button" data-run-task="refresh_metadata">Refresh metadata</button>
+    <button class="btn btn-sm" type="button" data-run-task="refresh_catalog">Refresh playlists</button>
+    <button class="btn btn-sm" type="button" data-run-task="scan_library">Scan library</button>
+    <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.scan_page') }}">Review scan</a>
+  </div>
+</section>
+<p class="hint" id="activity-status" role="status"></p>
+
+<section class="activity-section">
+  <div class="panel-head">
+    <h2>Queue</h2>
+    <span class="muted" id="queue-count"></span>
+  </div>
+  <div id="queue-body"><p class="muted">Loading…</p></div>
+</section>
+
+<section class="activity-section">
+  <div class="panel-head">
+    <h2>History</h2>
+  </div>
+  <div id="history-body"><p class="muted">Loading…</p></div>
+</section>
+
+<section class="activity-section">
+  <div class="panel-head">
+    <h2>Tasks</h2>
+  </div>
+  <div id="tasks-body"><p class="muted">Loading…</p></div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/activity.js') }}"></script>
+{% endblock %}

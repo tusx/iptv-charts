@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Library scan · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="crumb"><a href="{{ url_for('manager.activity') }}">Activity</a> / Library scan</p>
+    <h1>Library scan</h1>
+    <p class="subtitle">
+      Files already in {{ media_host_dir }} are matched to the library for review.
+    </p>
+  </div>
+  <div class="page-actions">
+    <button class="btn btn-primary" id="scan-now" type="button">Scan now</button>
+    <button class="btn" id="scan-import-all" type="button">Import all high-confidence</button>
+  </div>
+</section>
+
+<p class="hint" id="scan-status" role="status">
+  {% if scan_task and scan_task.status == 'running' %}Scanning…{% endif %}
+</p>
+
+<div class="scan-summary">
+  <span class="badge badge-muted">{{ counts.pending }} pending</span>
+  <span class="badge badge-downloaded">{{ counts.imported }} imported</span>
+  <span class="badge badge-cancelled">{{ counts.ignored }} ignored</span>
+</div>
+
+{% if results %}
+  <div class="table-wrap">
+    <table class="data-table scan-table">
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Kind</th>
+          <th>Parsed</th>
+          <th>Match</th>
+          <th>Confidence</th>
+          <th>Status</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for result in results %}
+          <tr>
+            <td>
+              <span class="scan-file">{{ result.path.split('/')[-1] }}</span>
+              <span class="scan-path muted" title="{{ result.path }}">{{ result.path }}</span>
+            </td>
+            <td>{{ result.kind|title }}</td>
+            <td>
+              {{ result.title or '—' }}
+              {% if result.year %} ({{ result.year }}){% endif %}
+              {% if result.season is not none %} · S{{ '%02d'|format(result.season) }}E{{ '%02d'|format(result.episode) }}{% endif %}
+              <div class="muted">{{ result.resolution or 'unknown' }}</div>
+            </td>
+            <td>
+              {% if result.matched_movie_id %}Movie #{{ result.matched_movie_id }}
+              {% elif result.matched_series_id %}Series #{{ result.matched_series_id }}
+              {% elif result.tmdb_id %}TMDB {{ result.tmdb_id }}
+              {% else %}—{% endif %}
+            </td>
+            <td>{{ '%.0f'|format((result.confidence or 0) * 100) }}%</td>
+            <td><span class="badge badge-{{ result.status }}">{{ result.status|title }}</span></td>
+            <td class="scan-actions">
+              {% if result.status == 'pending' %}
+                <button class="btn btn-sm" type="button" data-import="{{ result.id }}">Import</button>
+                <button class="btn btn-sm btn-ghost" type="button" data-ignore="{{ result.id }}">Ignore</button>
+              {% endif %}
+              <div class="muted scan-message">{{ result.message or '' }}</div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% else %}
+  <div class="empty-state">
+    <h2>No scan results</h2>
+    <p>Run a scan to look for files already in the media folders.</p>
+  </div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/scan.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Quality profiles · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="crumb"><a href="{{ url_for('settings') }}">Settings</a> / Quality profiles</p>
+    <h1>Quality profiles</h1>
+    <p class="subtitle">Which resolutions are acceptable, and when upgrades should stop.</p>
+  </div>
+  <div class="page-actions">
+    <button class="btn btn-primary" id="new-profile" type="button">New profile</button>
+  </div>
+</section>
+<p class="hint" id="profile-status" role="status"></p>
+
+<div class="table-wrap">
+  <table class="data-table">
+    <thead>
+      <tr><th>Name</th><th>Allowed resolutions</th><th>Cutoff</th><th>Upgrades</th><th>Used by</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for profile in profiles %}
+        <tr>
+          <td><strong>{{ profile.name }}</strong></td>
+          <td>{{ profile.resolutions|join(' → ') }}</td>
+          <td>{{ profile.cutoff or '—' }}</td>
+          <td>{{ 'Yes' if profile.upgrades else 'No' }}</td>
+          <td>{{ usage.get(profile.id, 0) }}</td>
+          <td class="row-actions">
+            <button class="btn btn-sm" type="button" data-edit-profile="{{ profile.id }}">Edit</button>
+            <button class="btn btn-sm btn-danger" type="button" data-delete-profile="{{ profile.id }}"
+                    {% if usage.get(profile.id, 0) or profiles|length <= 1 %}disabled{% endif %}>Delete</button>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<dialog class="dialog" id="profile-dialog">
+  <div class="dialog-head">
+    <h2 id="profile-dialog-title">New profile</h2>
+    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <div class="dialog-body">
+    <label class="field">
+      <span>Name</span>
+      <input type="text" id="profile-name" maxlength="80" placeholder="HD">
+    </label>
+    <div class="field">
+      <span>Allowed resolutions</span>
+      <div class="choices" id="profile-resolutions"></div>
+    </div>
+    <label class="field">
+      <span>Upgrade until (cutoff)</span>
+      <select id="profile-cutoff"></select>
+    </label>
+    <label class="check"><input type="checkbox" id="profile-upgrades" checked> Allow upgrades when a better release appears</label>
+    <p class="hint" id="profile-dialog-status" role="status"></p>
+  </div>
+  <div class="dialog-foot">
+    <button class="btn btn-ghost" type="button" data-close>Cancel</button>
+    <button class="btn btn-primary" type="button" id="profile-save">Save profile</button>
+  </div>
+</dialog>
+
+<script>
+  window.PROFILES = {{ profiles|tojson }};
+  window.RESOLUTIONS = {{ resolutions|tojson }};
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/profiles.js') }}"></script>
+{% endblock %}

@@ -12,12 +12,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import threading
 import webbrowser
 
-from iptv_charts import config
+from iptv_charts import config, downloader, scheduler
 from iptv_charts.app import create_app
 
 
@@ -77,9 +78,19 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_browser:
         _open_browser_later(url)
 
+    def start_background_services() -> None:
+        # The downloader recovers rows interrupted by a restart; the scheduler
+        # then sets its persisted next-run times. Both are daemon threads.
+        downloader.start()
+        scheduler.start()
+
     if args.dev:
         # Reloader is convenient for editing but must never be the default:
         # it is single-threaded by default and not intended to be left running.
+        # The reloader runs this file twice; only the serving child (the one
+        # Flask re-executes with WERKZEUG_RUN_MAIN) may run the workers/tasks.
+        if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+            start_background_services()
         app.run(host=args.host, port=port, debug=True, threaded=True)
     else:
         import logging
@@ -109,7 +120,12 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signal.SIGTERM, _shutdown)
         signal.signal(signal.SIGINT, _shutdown)
 
-        server.run()
+        start_background_services()
+        try:
+            server.run()
+        finally:
+            scheduler.stop()
+            downloader.shutdown()
 
     return 0
 

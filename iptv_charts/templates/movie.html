@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% from "_macros.html" import poster, status_badge, progress %}
+{% block title %}{{ movie.title }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="detail-page">
+  <p class="crumb"><a href="{{ url_for('manager.movies') }}">Movies</a> / {{ movie.title }}</p>
+
+  <div class="detail-hero">
+    <div class="detail-poster">
+      {{ poster(movie.poster, movie.title, 'poster-large') }}
+    </div>
+    <div class="detail-info">
+      <h1>{{ movie.title }}</h1>
+      <p class="detail-meta">
+        {{ movie.year or 'Year unknown' }}
+        {% if movie.runtime %} · {{ movie.runtime }} min{% endif %}
+        {% if movie.rating %} · ★ {{ '%.1f'|format(movie.rating) }}{% endif %}
+        {% if movie.resolution %} · {{ movie.resolution }}{% endif %}
+      </p>
+      {% if movie.genres %}
+        <p class="detail-genres">{{ movie.genres|join(' · ') }}</p>
+      {% endif %}
+      <p class="detail-overview">{{ movie.overview or 'No overview available.' }}</p>
+      <div class="library-badges">
+        {{ status_badge(status) }}
+        {% if movie.monitored %}<span class="badge badge-monitored">Monitored</span>{% endif %}
+      </div>
+      <div class="detail-actions">
+        <button class="btn btn-primary" id="movie-search-now" type="button">Search now</button>
+        <button class="btn" id="movie-manual-search" type="button">Manual search</button>
+        <button class="btn btn-ghost" id="movie-refresh" type="button">Refresh metadata</button>
+        <button class="btn btn-danger" id="movie-delete" type="button">Delete</button>
+      </div>
+      <p class="hint" id="movie-action-status" role="status"></p>
+    </div>
+  </div>
+
+  <div class="detail-columns">
+    <section class="detail-panel">
+      <h2>File</h2>
+      {% if movie.file_path %}
+        <dl class="meta-list">
+          <dt>Path</dt><dd class="mono wrap-anywhere">{{ movie.file_path }}</dd>
+          <dt>Size</dt><dd>{{ (movie.file_size / 1048576)|round(1) if movie.file_size else 'Unknown' }} MiB</dd>
+          <dt>Resolution</dt><dd>{{ movie.resolution or 'Unknown' }}</dd>
+          <dt>Imported</dt><dd>{{ format_age(movie.imported_at) }}</dd>
+        </dl>
+      {% else %}
+        <p class="muted">No file on disk yet.</p>
+      {% endif %}
+
+      {% if movie.download %}
+        <div class="download-panel">
+          <div class="download-panel-head">
+            <strong>{{ movie.download.status|title }}</strong>
+            <span class="muted">{{ movie.download.release_name }}</span>
+          </div>
+          {{ progress(movie.download) }}
+          <button class="btn btn-sm btn-danger" data-cancel-download="{{ movie.download.id }}" type="button">Cancel download</button>
+        </div>
+      {% endif %}
+
+      <h2>Edit</h2>
+      <form id="movie-edit-form" class="stack-form">
+        <label class="check">
+          <input type="checkbox" id="movie-monitored-edit" {% if movie.monitored %}checked{% endif %}>
+          Monitored
+        </label>
+        <label class="field">
+          <span>Quality profile</span>
+          <select id="movie-profile-edit">
+            {% for profile in profiles %}
+              <option value="{{ profile.id }}" {% if profile.id == movie.quality_profile_id %}selected{% endif %}>
+                {{ profile.name }} ({{ profile.resolutions|join(', ') }})
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+        <button class="btn" type="submit">Save</button>
+        <span class="hint" id="movie-edit-status" role="status"></span>
+      </form>
+    </section>
+
+    <aside class="detail-side">
+      <h2>History</h2>
+      {% if history %}
+        <ul class="history-list">
+          {% for event in history %}
+            <li>
+              <span class="badge badge-{{ event.event }}">{{ event.event|title }}</span>
+              <span>{{ event.message or '' }}</span>
+              <time>{{ format_age(event.created_at) }}</time>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="muted">Nothing has happened yet.</p>
+      {% endif %}
+    </aside>
+  </div>
+</section>
+
+<dialog class="dialog dialog-wide" id="movie-search-dialog">
+  <div class="dialog-head">
+    <h2>Manual search</h2>
+    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <div class="dialog-body">
+    <div class="search-field">
+      <input type="search" id="movie-release-query" placeholder="Search the IPTV catalog" autocomplete="off">
+    </div>
+    <p class="hint" id="movie-release-status" role="status"></p>
+    <div class="release-list" id="movie-release-list"></div>
+  </div>
+  <div class="dialog-foot">
+    <span class="spacer"></span>
+    <button class="btn btn-ghost" type="button" data-close>Close</button>
+  </div>
+</dialog>
+
+<dialog class="dialog" id="movie-delete-dialog">
+  <div class="dialog-head">
+    <h2>Delete {{ movie.title }}?</h2>
+    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <div class="dialog-body">
+    <p>The library entry will be removed. Choose whether the downloaded file should go too.</p>
+    <label class="check"><input type="checkbox" id="movie-delete-files"> Also delete the file from disk</label>
+  </div>
+  <div class="dialog-foot">
+    <button class="btn btn-ghost" type="button" data-close>Cancel</button>
+    <button class="btn btn-danger" type="button" id="movie-delete-confirm">Delete</button>
+  </div>
+</dialog>
+
+<script>
+  window.MOVIE_ID = {{ movie.id }};
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/movie.js') }}"></script>
+{% endblock %}

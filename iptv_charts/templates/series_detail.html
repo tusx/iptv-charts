@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% from "_macros.html" import poster, status_badge, progress %}
+{% block title %}{{ series.title }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="detail-page">
+  <p class="crumb"><a href="{{ url_for('manager.series') }}">Series</a> / {{ series.title }}</p>
+
+  <div class="detail-hero">
+    <div class="detail-poster">
+      {{ poster(series.poster, series.title, 'poster-large') }}
+    </div>
+    <div class="detail-info">
+      <h1>{{ series.title }}</h1>
+      <p class="detail-meta">
+        {{ series.year or 'Year unknown' }}
+        {% if series.status %} · {{ series.status }}{% endif %}
+        {% if series.rating %} · ★ {{ '%.1f'|format(series.rating) }}{% endif %}
+      </p>
+      {% if series.genres %}
+        <p class="detail-genres">{{ series.genres|join(' · ') }}</p>
+      {% endif %}
+      <p class="detail-overview">{{ series.overview or 'No overview available.' }}</p>
+      <div class="library-badges">
+        {% if series.monitored %}<span class="badge badge-monitored">Monitored</span>{% endif %}
+        {% if series.tvdb_id %}<span class="badge badge-muted">TVDB {{ series.tvdb_id }}</span>{% endif %}
+      </div>
+      <div class="detail-actions">
+        <button class="btn btn-primary" id="series-search-now" type="button">Search missing</button>
+        <button class="btn btn-ghost" id="series-refresh" type="button">Refresh metadata</button>
+        <button class="btn btn-danger" id="series-delete" type="button">Delete</button>
+      </div>
+      <p class="hint" id="series-action-status" role="status"></p>
+    </div>
+  </div>
+
+  <div class="detail-columns">
+    <section class="detail-panel">
+      <div class="panel-head">
+        <h2>Episodes</h2>
+        <span class="muted">{{ seasons|length }} season{{ '' if seasons|length == 1 else 's' }}</span>
+      </div>
+      {% if seasons %}
+        {% for season, episodes in seasons %}
+          {% set season_monitored = episodes|selectattr('monitored')|list|length == episodes|length %}
+          <details class="season" open>
+            <summary>
+              <span class="season-name">Season {{ season }}</span>
+              <span class="muted">{{ episodes|length }} episode{{ '' if episodes|length == 1 else 's' }}</span>
+              <label class="check season-monitor" onclick="event.stopPropagation()">
+                <input type="checkbox" data-season-monitor="{{ season }}" {% if season_monitored %}checked{% endif %}>
+                Monitored
+              </label>
+            </summary>
+            <div class="episode-list">
+              {% for episode in episodes %}
+                <div class="episode-row">
+                  <span class="episode-code">S{{ '%02d'|format(episode.season) }}E{{ '%02d'|format(episode.episode) }}</span>
+                  <span class="episode-title" title="{{ episode.title }}">{{ episode.title or 'Episode ' ~ episode.episode }}</span>
+                  <span class="episode-date">{{ episode.air_date or '' }}</span>
+                  <span class="episode-resolution">{{ episode.resolution or '' }}</span>
+                  {{ status_badge('downloading' if episode.download else episode.status) }}
+                  <label class="check">
+                    <input type="checkbox" data-episode-monitor="{{ episode.id }}" {% if episode.monitored %}checked{% endif %}>
+                    Monitor
+                  </label>
+                  <span class="episode-actions">
+                    <button class="btn btn-sm" type="button" data-episode-search="{{ episode.id }}">Search</button>
+                    <button class="btn btn-sm btn-ghost" type="button" data-episode-manual="{{ episode.id }}">Manual</button>
+                  </span>
+                </div>
+                {% if episode.download %}
+                  <div class="episode-download">{{ progress(episode.download) }}</div>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </details>
+        {% endfor %}
+      {% else %}
+        <p class="muted">No episodes have been loaded from the metadata provider yet. Use Refresh metadata.</p>
+      {% endif %}
+
+      <h2>Edit</h2>
+      <form id="series-edit-form" class="stack-form">
+        <label class="check">
+          <input type="checkbox" id="series-monitored-edit" {% if series.monitored %}checked{% endif %}>
+          Monitored
+        </label>
+        <label class="field">
+          <span>Quality profile</span>
+          <select id="series-profile-edit">
+            {% for profile in profiles %}
+              <option value="{{ profile.id }}" {% if profile.id == series.quality_profile_id %}selected{% endif %}>
+                {{ profile.name }} ({{ profile.resolutions|join(', ') }})
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+        <button class="btn" type="submit">Save</button>
+        <span class="hint" id="series-edit-status" role="status"></span>
+      </form>
+    </section>
+
+    <aside class="detail-side">
+      <h2>History</h2>
+      {% if history %}
+        <ul class="history-list">
+          {% for event in history %}
+            <li>
+              <span class="badge badge-{{ event.event }}">{{ event.event|title }}</span>
+              <span>{{ event.message or '' }}</span>
+              <time>{{ format_age(event.created_at) }}</time>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="muted">Nothing has happened yet.</p>
+      {% endif %}
+    </aside>
+  </div>
+</section>
+
+<dialog class="dialog dialog-wide" id="episode-search-dialog">
+  <div class="dialog-head">
+    <h2>Manual episode search</h2>
+    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <div class="dialog-body">
+    <div class="search-field">
+      <input type="search" id="episode-release-query" placeholder="Search the IPTV catalog" autocomplete="off">
+    </div>
+    <p class="hint" id="episode-release-status" role="status"></p>
+    <div class="release-list" id="episode-release-list"></div>
+  </div>
+  <div class="dialog-foot">
+    <span class="spacer"></span>
+    <button class="btn btn-ghost" type="button" data-close>Close</button>
+  </div>
+</dialog>
+
+<dialog class="dialog" id="series-delete-dialog">
+  <div class="dialog-head">
+    <h2>Delete {{ series.title }}?</h2>
+    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <div class="dialog-body">
+    <p>The library entry and every episode row will be removed. Choose whether files should go too.</p>
+    <label class="check"><input type="checkbox" id="series-delete-files"> Also delete downloaded files from disk</label>
+  </div>
+  <div class="dialog-foot">
+    <button class="btn btn-ghost" type="button" data-close>Cancel</button>
+    <button class="btn btn-danger" type="button" id="series-delete-confirm">Delete</button>
+  </div>
+</dialog>
+
+<script>
+  window.SERIES_ID = {{ series.id }};
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/series_detail.js') }}"></script>
+{% endblock %}

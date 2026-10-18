@@ -188,7 +188,9 @@ class XtreamClient:
     """Talks to one Xtream panel."""
 
     def __init__(self, base_url: str, username: str, password: str,
-                 user_agent: str | None = None) -> None:
+                 user_agent: str | None = None,
+                 referrer: str | None = None,
+                 headers: dict | None = None) -> None:
         self.base_url = normalise_base_url(base_url)
         self.username = (username or "").strip()
         self.password = (password or "").strip()
@@ -199,6 +201,18 @@ class XtreamClient:
 
         self._session = requests.Session()
         self._session.headers["User-Agent"] = self.user_agent
+        if referrer:
+            self._session.headers["Referer"] = str(referrer)
+        # Playlist-supplied headers are untrusted. requests itself rejects
+        # newlines, but skip malformed entries explicitly so a bad playlist
+        # cannot take the whole sync down.
+        for name, value in (headers or {}).items():
+            if not isinstance(name, str) or not name.strip():
+                continue
+            text = str(value)
+            if any(char in name for char in "\r\n:") or any(char in text for char in "\r\n"):
+                continue
+            self._session.headers[name.strip()] = text
 
     # ------------------------------------------------------------------ http
     def _api_url(self) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sqlite3
 import sys
 import time
@@ -12,8 +13,10 @@ from urllib.parse import urlsplit
 
 from flask import Flask, abort, g, render_template, request
 
-from . import config, db, items, player, sync
+from . import config, db, items, metadata, naming, player, sync
 from .api import bp as api_bp
+from .manager_api import bp as manager_api_bp
+from .manager_web import bp as manager_web_bp
 
 #: Hostnames that mean "this machine". Used for both the Host header and the
 #: Origin of writes.
@@ -81,6 +84,8 @@ def create_app() -> Flask:
 
     db.init_db()
     app.register_blueprint(api_bp)
+    app.register_blueprint(manager_api_bp, url_prefix="/api")
+    app.register_blueprint(manager_web_bp)
 
     @app.before_request
     def _guard_request():
@@ -190,7 +195,7 @@ def create_app() -> Flask:
 
     @app.route("/settings")
     def settings():
-        """Where the external player is chosen.
+        """Player, metadata, media, download and scheduler settings.
 
         The player list is probed here rather than cached from the last page
         render: this is the one page where being a minute out of date is a
@@ -199,6 +204,17 @@ def create_app() -> Flask:
         conn = get_conn()
         command = db.get_setting(conn, player.COMMAND_KEY, "") or ""
         available = player.available(conn, refresh=True)
+
+        def setting(key: str, default: str) -> str:
+            return db.get_setting(conn, key, default) or default
+
+        templates = {
+            "movie_folder": setting("movie_folder_template", naming.DEFAULT_MOVIE_FOLDER),
+            "movie_file": setting("movie_file_template", naming.DEFAULT_MOVIE_FILE),
+            "series_folder": setting("series_folder_template", naming.DEFAULT_SERIES_FOLDER),
+            "season_folder": setting("season_folder_template", naming.DEFAULT_SEASON_FOLDER),
+            "episode_file": setting("episode_file_template", naming.DEFAULT_EPISODE_FILE),
+        }
         return render_template(
             "settings.html",
             # The custom command is offered as its own radio below, so it is
@@ -214,6 +230,22 @@ def create_app() -> Flask:
             # is what makes the choice real.
             bridge_outdated=any(found.id == player.BRIDGE_PLAYER_ID
                                 for found in available),
+            tmdb_configured=metadata.has_tmdb(conn),
+            tvdb_configured=metadata.has_tvdb(conn),
+            metadata_language=metadata.language(conn),
+            media_dir=str(config.media_dir()),
+            media_host_dir=config.media_host_dir(),
+            media_dir_configured=bool(os.environ.get("IPTV_CHARTS_MEDIA_DIR")),
+            templates=templates,
+            download_concurrency=setting("download_concurrency", "1"),
+            download_max_attempts=setting("download_max_attempts", "3"),
+            search_interval_hours=setting("search_interval_hours", "6"),
+            refresh_interval_hours=setting("refresh_interval_hours", "168"),
+            catalog_refresh_hours=setting("catalog_refresh_hours", "24"),
+            ffmpeg_available=bool(shutil.which("ffmpeg")),
+            profile_count=db.get_one(
+                conn, "SELECT COUNT(*) AS n FROM quality_profiles"
+            )["n"],
         )
 
     # Playback has no page of its own: the browse page opens the player in a

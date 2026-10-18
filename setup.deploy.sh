@@ -20,6 +20,9 @@
 #   IPTV_IMAGE       image name (default iptv-charts)
 #   IPTV_VOLUME      volume name (default iptv-charts-data)
 #   IPTV_CONTAINER   container name (default iptv-charts)
+#   IPTV_MEDIA_DIR   media folder on the host (default ~/Media/IPTV Charts);
+#                    Movies/ and Series/ are created inside it and mounted at
+#                    /media. --destroy never touches this folder.
 
 set -euo pipefail
 
@@ -35,6 +38,10 @@ INTERNAL_PORT=8770
 # per-user, 0700 and cleared on logout, which is exactly right for this --
 # it is not state worth keeping.
 QUEUE_DIR="${IPTV_CHARTS_PLAY_QUEUE_DIR:-${XDG_RUNTIME_DIR:-/tmp}/iptv-charts}"
+
+# Where downloads are written on the host. Movies/ and Series/ live inside it;
+# the container sees the whole folder at /media.
+MEDIA_DIR="${IPTV_MEDIA_DIR:-$HOME/Media/IPTV Charts}"
 
 info()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -76,6 +83,7 @@ case "${1:-}" in
             echo "not created"
         fi
         printf 'url:       http://127.0.0.1:%s/\n' "$HOST_PORT"
+        printf 'media:     %s\n' "$MEDIA_DIR"
         printf 'bridge:    '
         if [[ -f "$QUEUE_DIR/play-bridge.pid" ]] \
            && kill -0 "$(cat "$QUEUE_DIR/play-bridge.pid")" 2>/dev/null; then
@@ -166,6 +174,12 @@ fi
 mkdir -p "$QUEUE_DIR"
 chmod 700 "$QUEUE_DIR"
 
+# --------------------------------------------------------------------- media
+# The app writes Movies/ and Series/ here. Creating the folders up front makes
+# the first import land in the expected place, and keeps the bind mount from
+# being created root-owned by podman.
+mkdir -p "$MEDIA_DIR/Movies" "$MEDIA_DIR/Series"
+
 # --------------------------------------------------------------------- deploy
 if podman container exists "$CONTAINER" 2>/dev/null; then
     info "replacing existing container $CONTAINER"
@@ -187,6 +201,8 @@ podman run -d \
     -p "127.0.0.1:${HOST_PORT}:${INTERNAL_PORT}" \
     -v "${VOLUME}:/data:U" \
     -v "${QUEUE_DIR}:/playqueue$(volume_label)" \
+    -v "${MEDIA_DIR}:/media$(volume_label)" \
+    -e "IPTV_CHARTS_MEDIA_HOST_DIR=${MEDIA_DIR}" \
     --label "io.github.tusx.iptv-charts=true" \
     "$IMAGE" >/dev/null
 
@@ -238,6 +254,7 @@ cat <<EOF
 
   Container: $CONTAINER   (podman logs -f $CONTAINER)
   Volume:    $VOLUME      (persists across rebuilds)
+  Media:     $MEDIA_DIR   (Movies/ and Series/; never deleted by --destroy)
   URL:       $url
   Bridge:    ./scripts/player-bridge.sh --status
 

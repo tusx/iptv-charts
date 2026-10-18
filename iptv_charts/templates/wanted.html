@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% from "_macros.html" import poster, empty %}
+{% block title %}Wanted · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="crumb"><a href="{{ url_for('sources_list') }}">Playlists</a> / Wanted</p>
+    <h1>Wanted</h1>
+    <p class="subtitle">
+      {{ movies|length }} missing movie{{ '' if movies|length == 1 else 's' }} ·
+      {{ episodes|length }} missing episode{{ '' if episodes|length == 1 else 's' }}
+    </p>
+  </div>
+  <div class="page-actions">
+    <button type="button" class="btn btn-primary" id="search-missing-btn">Search everything missing</button>
+  </div>
+</section>
+
+<section class="wanted-section">
+  <h2>Missing movies</h2>
+  {% if movies %}
+    <div class="wanted-list">
+      {% for movie in movies %}
+        <a class="wanted-row" href="{{ url_for('manager.movie_detail', movie_id=movie.id) }}">
+          {{ poster(movie.poster, movie.title, 'poster-tiny') }}
+          <span class="wanted-title">{{ movie.title }} <span class="muted">({{ movie.year or '?' }})</span></span>
+          <span class="wanted-meta">{{ movie.resolution or 'No file' }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="muted">Every monitored movie has a file.</p>
+  {% endif %}
+</section>
+
+<section class="wanted-section">
+  <h2>Missing episodes</h2>
+  {% if episodes %}
+    <div class="wanted-list">
+      {% for episode in episodes %}
+        <a class="wanted-row" href="{{ url_for('manager.series_detail', series_id=episode.series_id) }}">
+          <span class="poster-frame poster-tiny"><span class="poster-fallback">{{ episode.series_title[:1]|upper }}</span></span>
+          <span class="wanted-title">
+            {{ episode.series_title }}
+            <span class="muted">S{{ '%02d'|format(episode.season) }}E{{ '%02d'|format(episode.episode) }} · {{ episode.title }}</span>
+          </span>
+          <span class="wanted-meta">{{ episode.air_date or 'Air date unknown' }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="muted">Every aired, monitored episode has a file.</p>
+  {% endif %}
+</section>
+
+<section class="wanted-section">
+  <h2>Below cutoff</h2>
+  <p class="hint">These files exist but are below the quality profile's cutoff, and upgrades are enabled.</p>
+  {% if cutoff_movies or cutoff_episodes %}
+    <div class="wanted-list">
+      {% for movie in cutoff_movies %}
+        <a class="wanted-row" href="{{ url_for('manager.movie_detail', movie_id=movie.id) }}">
+          {{ poster(movie.poster, movie.title, 'poster-tiny') }}
+          <span class="wanted-title">{{ movie.title }} <span class="muted">({{ movie.year or '?' }})</span></span>
+          <span class="wanted-meta">{{ movie.resolution or 'unknown' }}</span>
+        </a>
+      {% endfor %}
+      {% for episode in cutoff_episodes %}
+        <a class="wanted-row" href="{{ url_for('manager.series_detail', series_id=episode.series_id) }}">
+          <span class="poster-frame poster-tiny"><span class="poster-fallback">{{ episode.series_title[:1]|upper }}</span></span>
+          <span class="wanted-title">
+            {{ episode.series_title }}
+            <span class="muted">S{{ '%02d'|format(episode.season) }}E{{ '%02d'|format(episode.episode) }}</span>
+          </span>
+          <span class="wanted-meta">{{ episode.resolution or 'unknown' }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="muted">No files are below their profile cutoff.</p>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script>
+  document.getElementById('search-missing-btn')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    try {
+      await Manager.post('/api/tasks/search_missing/run');
+      Manager.feedback(button, 'Search started');
+    } catch (error) {
+      Manager.feedback(button, error.message, false);
+    }
+  });
+</script>
+{% endblock %}

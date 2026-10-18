@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% from "_macros.html" import poster, status_badge, progress, empty %}
+{% block title %}Movies · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="crumb"><a href="{{ url_for('sources_list') }}">Playlists</a> / Movies</p>
+    <h1>Movies</h1>
+    <p class="subtitle">
+      {{ counts.total }} in the library · {{ counts.downloaded }} downloaded ·
+      {{ counts.missing }} missing
+    </p>
+  </div>
+  <div class="page-actions">
+    {% if tmdb_configured %}
+      <button type="button" class="btn btn-primary" id="add-movie-btn">Add movie</button>
+    {% else %}
+      <a class="btn" href="{{ url_for('settings') }}#metadata-settings">Set up TMDB</a>
+    {% endif %}
+    <button type="button" class="btn btn-ghost" id="search-missing-btn">Search missing</button>
+  </div>
+</section>
+
+{% if not tmdb_configured %}
+  <div class="note note-warn">
+    Add a TMDB API key on the <a href="{{ url_for('settings') }}#metadata-settings">settings page</a>
+    to search for movies and fetch posters and metadata.
+  </div>
+{% endif %}
+
+<form class="library-filter" method="get" action="{{ url_for('manager.movies') }}">
+  <div class="search-field">
+    <input type="search" name="q" value="{{ q }}" placeholder="Search your movie library" aria-label="Search your movie library">
+  </div>
+  <select name="status" aria-label="Filter by status">
+    <option value="" {% if not status %}selected{% endif %}>All movies</option>
+    <option value="monitored" {% if status == 'monitored' %}selected{% endif %}>Monitored</option>
+    <option value="missing" {% if status == 'missing' %}selected{% endif %}>Missing</option>
+    <option value="downloaded" {% if status == 'downloaded' %}selected{% endif %}>Downloaded</option>
+  </select>
+  <button class="btn btn-sm" type="submit">Filter</button>
+</form>
+
+{% if movies %}
+  <div class="library-grid">
+    {% for movie in movies %}
+      <article class="library-card">
+        <a class="library-poster-link" href="{{ url_for('manager.movie_detail', movie_id=movie.id) }}">
+          {{ poster(movie.poster, movie.title) }}
+        </a>
+        <div class="library-card-body">
+          <a class="library-title" href="{{ url_for('manager.movie_detail', movie_id=movie.id) }}">{{ movie.title }}</a>
+          <div class="library-sub">
+            {{ movie.year or 'Year unknown' }}
+            {% if movie.resolution %} · {{ movie.resolution }}{% endif %}
+          </div>
+          <div class="library-badges">
+            {{ status_badge('downloading' if movie.download else movie.status) }}
+            {% if movie.monitored %}<span class="badge badge-monitored">Monitored</span>{% endif %}
+          </div>
+          {{ progress(movie.download) }}
+        </div>
+      </article>
+    {% endfor %}
+  </div>
+{% else %}
+  {{ empty('No movies yet', 'Add a movie from TMDB, or adjust the filters above.') }}
+{% endif %}
+
+<dialog class="dialog dialog-wide" id="add-movie-dialog">
+  <div class="dialog-head">
+    <h2>Add a movie</h2>
+    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <div class="dialog-body">
+    <div class="dialog-options">
+      <label class="field">
+        <span>Quality profile</span>
+        <select id="movie-profile">
+          {% for profile in profiles %}
+            <option value="{{ profile.id }}">{{ profile.name }} ({{ profile.resolutions|join(', ') }})</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="movie-monitored" checked> Monitored</label>
+      <label class="check"><input type="checkbox" id="movie-search-now" checked> Search and download now</label>
+    </div>
+    <div class="field">
+      <span>Search TMDB</span>
+      <input type="search" id="movie-search-input" placeholder="Movie title" autocomplete="off">
+    </div>
+    <p class="hint" id="movie-search-status" role="status"></p>
+    <div class="metadata-results" id="movie-search-results"></div>
+  </div>
+  <div class="dialog-foot">
+    <span class="spacer"></span>
+    <button class="btn btn-ghost" type="button" data-close>Close</button>
+  </div>
+</dialog>
+
+{% if not profiles %}
+  <p class="note note-bad">No quality profiles exist. Create one on the
+    <a href="{{ url_for('manager.profiles_page') }}">profiles page</a> first.</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/movies.js') }}"></script>
+{% endblock %}

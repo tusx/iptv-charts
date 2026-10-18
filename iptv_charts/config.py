@@ -84,6 +84,44 @@ def play_queue_path() -> Path | None:
     return Path(raw) if raw else None
 
 
+def media_dir() -> Path:
+    """Root of the downloaded media library.
+
+    In the container this is ``/media``, bind-mounted from a host folder by
+    setup.deploy.sh. In dev mode it defaults to ``~/Media/IPTV Charts`` so a
+    download still lands somewhere sensible without extra configuration.
+    """
+    raw = os.environ.get("IPTV_CHARTS_MEDIA_DIR")
+    # Deliberately not created here: settings and health should be safe to
+    # read without touching the user's home directory. The library helpers
+    # below create the folders when something is actually written.
+    return Path(raw) if raw else Path.home() / "Media" / "IPTV Charts"
+
+
+def media_host_dir() -> str:
+    """The media path as the user knows it on the host, for display."""
+    return os.environ.get("IPTV_CHARTS_MEDIA_HOST_DIR") or str(media_dir())
+
+
+def movie_library_dir() -> Path:
+    path = media_dir() / "Movies"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def series_library_dir() -> Path:
+    path = media_dir() / "Series"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def incomplete_dir() -> Path:
+    """Staging area on the same filesystem as the library, for atomic imports."""
+    path = media_dir() / ".incomplete"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def spool_dir() -> Path:
     """Scratch space for spooling large API responses to disk.
 

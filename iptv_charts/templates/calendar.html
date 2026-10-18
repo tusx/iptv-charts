@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% from "_macros.html" import poster, status_badge, empty %}
+{% block title %}Calendar · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="crumb"><a href="{{ url_for('sources_list') }}">Playlists</a> / Calendar</p>
+    <h1>Calendar</h1>
+    <p class="subtitle">Episode air dates and movie release dates from your library metadata.</p>
+  </div>
+  <div class="page-actions calendar-nav">
+    <a class="btn btn-ghost btn-sm" href="{{ url_for('manager.calendar_view', month=previous) }}">← Previous</a>
+    <strong>{{ month_label }}</strong>
+    <a class="btn btn-ghost btn-sm" href="{{ url_for('manager.calendar_view', month=following) }}">Next →</a>
+  </div>
+</section>
+
+{% if days %}
+  <div class="calendar-days">
+    {% for day, items in days %}
+      <section class="calendar-day">
+        <h2>{{ day }}</h2>
+        <div class="calendar-items">
+          {% for item in items %}
+            {% if item.kind == 'episode' %}
+              <a class="calendar-item" href="{{ url_for('manager.series_detail', series_id=item.series_id) }}">
+                {{ poster(item.poster, item.series_title, 'poster-tiny') }}
+                <span class="calendar-item-body">
+                  <strong>{{ item.series_title }}</strong>
+                  <span>S{{ '%02d'|format(item.season) }}E{{ '%02d'|format(item.episode) }} · {{ item.title }}</span>
+                </span>
+                {{ status_badge('downloaded' if item.downloaded else 'missing') }}
+              </a>
+            {% else %}
+              <a class="calendar-item" href="{{ url_for('manager.movie_detail', movie_id=item.id) }}">
+                {{ poster(item.poster, item.title, 'poster-tiny') }}
+                <span class="calendar-item-body">
+                  <strong>{{ item.title }}</strong>
+                  <span>Movie release</span>
+                </span>
+                {{ status_badge('downloaded' if item.downloaded else 'missing') }}
+              </a>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </section>
+    {% endfor %}
+  </div>
+{% else %}
+  {{ empty('Nothing this month', 'No episodes or movie releases have dates in this month. Try another month.') }}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+{% endblock %}

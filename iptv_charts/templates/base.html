@@ -15,8 +15,19 @@
 
     <nav class="topbar-nav">
       {% block nav %}
+        {% set endpoint = request.endpoint or '' %}
+        <a href="{{ url_for('manager.movies') }}"
+           {% if endpoint in ('manager.movies', 'manager.movie_detail') %}class="active"{% endif %}>Movies</a>
+        <a href="{{ url_for('manager.series') }}"
+           {% if endpoint in ('manager.series', 'manager.series_detail') %}class="active"{% endif %}>Series</a>
+        <a href="{{ url_for('manager.calendar_view') }}"
+           {% if endpoint == 'manager.calendar_view' %}class="active"{% endif %}>Calendar</a>
+        <a href="{{ url_for('manager.wanted') }}"
+           {% if endpoint == 'manager.wanted' %}class="active"{% endif %}>Wanted</a>
+        <a href="{{ url_for('manager.activity') }}"
+           {% if endpoint == 'manager.activity' %}class="active"{% endif %}>Activity</a>
         <a href="{{ url_for('settings') }}"
-           {% if request.endpoint == 'settings' %}class="active"{% endif %}>Settings</a>
+           {% if endpoint in ('settings', 'manager.profiles_page') %}class="active"{% endif %}>Settings</a>
       {% endblock %}
     </nav>
 

@@ -117,6 +117,203 @@
   <h2>What will run</h2>
   <pre class="command-preview" id="settings-preview"></pre>
 </section>
+
+<section class="settings-card" id="metadata-settings">
+  <h2>Metadata providers</h2>
+  <p class="hint">
+    TMDB supplies movie and series search, posters and overviews. TVDB is
+    optional: when a key is present it supplies episode names, numbers and air
+    dates; without it, TMDB episode data is used instead.
+  </p>
+  <form class="stack-form" id="metadata-form" autocomplete="off">
+    <label class="field">
+      <span>TMDB API key</span>
+      <input type="password" id="tmdb-key" spellcheck="false"
+             placeholder="{% if tmdb_configured %}Configured — leave blank to keep it{% else %}Paste a TMDB API key{% endif %}">
+    </label>
+    <label class="check"><input type="checkbox" id="tmdb-clear"> Remove the stored TMDB key</label>
+    <label class="field">
+      <span>TVDB API key</span>
+      <input type="password" id="tvdb-key" spellcheck="false"
+             placeholder="{% if tvdb_configured %}Configured — leave blank to keep it{% else %}Optional{% endif %}">
+    </label>
+    <label class="field">
+      <span>TVDB subscriber PIN (only if your key needs one)</span>
+      <input type="password" id="tvdb-pin" spellcheck="false" placeholder="Optional">
+    </label>
+    <label class="check"><input type="checkbox" id="tvdb-clear"> Remove the stored TVDB key</label>
+    <label class="field">
+      <span>Metadata language</span>
+      <input type="text" id="metadata-language" value="{{ metadata_language }}" placeholder="en-US">
+    </label>
+    <div class="settings-actions">
+      <button class="btn btn-primary" type="submit" id="metadata-save">Save metadata settings</button>
+      <button class="btn" type="button" data-test-metadata="tmdb">Test TMDB</button>
+      <button class="btn" type="button" data-test-metadata="tvdb">Test TVDB</button>
+      <span class="hint" id="metadata-status" role="status"></span>
+    </div>
+  </form>
+  <p class="hint">
+    Keys are stored in the app database and are included in backups. They are
+    never displayed again after saving.
+  </p>
+</section>
+
+<section class="settings-card" id="profiles-settings">
+  <h2>Quality profiles</h2>
+  <p class="hint">
+    A profile decides which resolutions are acceptable and when upgrades stop.
+    Movies and series choose one when they are added.
+    You have {{ profile_count }} profile{{ '' if profile_count == 1 else 's' }}.
+  </p>
+  <a class="btn" href="{{ url_for('manager.profiles_page') }}">Edit quality profiles</a>
+</section>
+
+<section class="settings-card" id="media-settings">
+  <h2>Media management</h2>
+  <p class="hint">
+    Downloads are written under <strong>{{ media_host_dir }}</strong>.
+    {% if media_dir_configured %}
+      Inside the container that is <code>{{ media_dir }}</code>, bind-mounted by
+      <code>setup.deploy.sh</code>.
+    {% else %}
+      Change the location with <code>IPTV_MEDIA_DIR</code> in
+      <code>setup.deploy.sh</code> (container) or
+      <code>IPTV_CHARTS_MEDIA_DIR</code> (dev).
+    {% endif %}
+  </p>
+  <dl class="meta-list">
+    <dt>Movies</dt><dd class="mono wrap-anywhere">{{ media_host_dir }}/Movies</dd>
+    <dt>Series</dt><dd class="mono wrap-anywhere">{{ media_host_dir }}/Series</dd>
+  </dl>
+  <form class="stack-form" id="media-form" autocomplete="off">
+    <label class="field">
+      <span>Movie folder</span>
+      <input type="text" id="movie-folder-template" value="{{ templates.movie_folder }}">
+    </label>
+    <label class="field">
+      <span>Movie file</span>
+      <input type="text" id="movie-file-template" value="{{ templates.movie_file }}">
+    </label>
+    <label class="field">
+      <span>Series folder</span>
+      <input type="text" id="series-folder-template" value="{{ templates.series_folder }}">
+    </label>
+    <label class="field">
+      <span>Season folder</span>
+      <input type="text" id="season-folder-template" value="{{ templates.season_folder }}">
+    </label>
+    <label class="field">
+      <span>Episode file</span>
+      <input type="text" id="episode-file-template" value="{{ templates.episode_file }}">
+    </label>
+    <p class="hint">
+      Placeholders: <code>{title}</code>, <code>{year}</code>,
+      <code>{resolution}</code>, <code>{season:00}</code>,
+      <code>{episode:00}</code>, <code>{series}</code>,
+      <code>{episode_title}</code>. Each template is one path component; the
+      extension is chosen from the downloaded file.
+    </p>
+    <div class="settings-actions">
+      <button class="btn btn-primary" type="submit" id="media-save">Save naming</button>
+      <span class="hint" id="media-status" role="status"></span>
+    </div>
+  </form>
+  <pre class="command-preview" id="media-preview" hidden></pre>
+</section>
+
+<section class="settings-card" id="download-settings">
+  <h2>Downloads</h2>
+  <p class="hint">
+    Downloads pause while a playlist sync is running, because both use the
+    provider's connection limit.
+  </p>
+  <form class="stack-form" id="downloads-form">
+    <div class="field-row">
+      <label class="field">
+        <span>Concurrent downloads</span>
+        <select id="download-concurrency">
+          <option value="1" {% if download_concurrency == '1' %}selected{% endif %}>1 (safest)</option>
+          <option value="2" {% if download_concurrency == '2' %}selected{% endif %}>2</option>
+          <option value="3" {% if download_concurrency == '3' %}selected{% endif %}>3</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Attempts per download</span>
+        <input type="number" id="download-attempts" min="1" max="10" value="{{ download_max_attempts }}">
+      </label>
+    </div>
+    <p class="hint">
+      ffmpeg: {% if ffmpeg_available %}<span class="pill pill-ok">available</span>{% else %}<span class="pill pill-warn">not installed</span> — direct files still download, HLS needs it.{% endif %}
+    </p>
+    <div class="settings-actions">
+      <button class="btn btn-primary" type="submit" id="downloads-save">Save download settings</button>
+      <span class="hint" id="downloads-status" role="status"></span>
+    </div>
+  </form>
+</section>
+
+<section class="settings-card" id="scheduler-settings">
+  <h2>Automation</h2>
+  <p class="hint">
+    Search missing runs automatically, metadata is refreshed on a schedule, and
+    playlists can be refreshed before searches so new VODs are found. Set
+    playlist refresh to 0 to disable it.
+  </p>
+  <form class="stack-form" id="scheduler-form">
+    <div class="field-row">
+      <label class="field">
+        <span>Search missing every (hours)</span>
+        <input type="number" id="search-interval" min="1" max="8760" step="0.5" value="{{ search_interval_hours }}">
+      </label>
+      <label class="field">
+        <span>Refresh metadata every (hours)</span>
+        <input type="number" id="refresh-interval" min="1" max="8760" step="0.5" value="{{ refresh_interval_hours }}">
+      </label>
+      <label class="field">
+        <span>Refresh playlists every (hours)</span>
+        <input type="number" id="catalog-interval" min="0" max="8760" step="0.5" value="{{ catalog_refresh_hours }}">
+      </label>
+    </div>
+    <div class="settings-actions">
+      <button class="btn btn-primary" type="submit" id="scheduler-save">Save automation settings</button>
+      <span class="hint" id="scheduler-status" role="status"></span>
+    </div>
+  </form>
+</section>
+
+<section class="settings-card" id="scan-settings">
+  <h2>Library scan</h2>
+  <p class="hint">
+    Find files already in the media folders, match them to TMDB entries, and
+    review the matches before importing them. A scan also detects files that
+    have gone missing from disk.
+  </p>
+  <a class="btn" href="{{ url_for('manager.scan_page') }}">Open library scan</a>
+</section>
+
+<section class="settings-card" id="backup-settings">
+  <h2>Backup and restore</h2>
+  <p class="hint">
+    The ZIP contains playlists, credentials, API keys, the movie/series
+    libraries, quality profiles, queue and history — but not the IPTV catalog,
+    which is rebuilt by a sync. <strong>Keep the file private: it contains
+    secrets in plain text.</strong>
+  </p>
+  <div class="settings-actions">
+    <button class="btn" type="button" id="backup-export">Download backup</button>
+    <span class="hint" id="backup-status" role="status"></span>
+  </div>
+  <hr class="settings-rule">
+  <p class="hint">Restoring replaces the current library, settings and playlists.</p>
+  <div class="field-row">
+    <label class="field">
+      <span>Backup ZIP</span>
+      <input type="file" id="backup-file" accept=".zip,application/zip">
+    </label>
+    <button class="btn btn-danger" type="button" id="backup-restore">Restore backup</button>
+  </div>
+</section>
 {% endblock %}
 
 {% block scripts %}

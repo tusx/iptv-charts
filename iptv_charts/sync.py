@@ -28,7 +28,9 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from . import db
 from .clients import m3u, xtream
@@ -43,9 +45,10 @@ KINDS = ("live", "vod", "series")
 _ITEM_COLUMNS = (
     "(source_id, kind, remote_id, num, name, category_id, logo, epg_channel_id,"
     " container_ext, added_ts, tv_archive, rating, plot, genre, duration,"
-    " cast_list, director, release_date, youtube_trailer, tmdb_id)"
+    " cast_list, director, release_date, youtube_trailer, tmdb_id,"
+    " request_headers)"
 )
-_ITEM_PLACEHOLDERS = "(" + ",".join("?" * 20) + ")"
+_ITEM_PLACEHOLDERS = "(" + ",".join("?" * 21) + ")"
 
 
 # ----------------------------------------------------------------------- jobs
@@ -307,8 +310,15 @@ def is_busy() -> bool:
 # ------------------------------------------------------------------ xtream
 def _sync_xtream(conn, source, job: Job) -> None:
     source_id = source["id"]
+    try:
+        headers = json.loads(source["request_headers"] or "{}")
+    except (TypeError, ValueError):
+        headers = {}
     client = xtream.XtreamClient(
-        source["base_url"], source["username"], source["password"]
+        source["base_url"], source["username"], source["password"],
+        user_agent=headers.get("user_agent"),
+        referrer=headers.get("referrer"),
+        headers=headers.get("headers"),
     )
 
     try:
@@ -507,10 +517,13 @@ def _sync_m3u(conn, source, job: Job) -> None:
                     "num": None,
                     "logo": channel.logo,
                     "epg_channel_id": channel.tvg_id,
-                    "container_ext": None,
+                    # The extension is used for download filenames; M3U has
+                    # no separate container field, so read it from the URL.
+                    "container_ext": _m3u_extension(channel.url) if kind == "vod" else None,
                     "added_ts": None,
                     "tv_archive": None,
                     "category_remote_id": None,
+                    "request_headers": _m3u_headers(channel),
                 },
                 category_id,
             ))
@@ -549,6 +562,26 @@ def _category_for(conn, source_id: int, kind: str, group: str,
 
 
 # ------------------------------------------------------------------ helpers
+def _m3u_extension(url: str) -> str | None:
+    """The container extension an M3U VOD URL implies, when it has one."""
+    suffix = Path(urlparse(url).path).suffix.lower().lstrip(".")
+    if suffix.isalnum() and 0 < len(suffix) <= 8:
+        return suffix
+    return None
+
+
+def _m3u_headers(channel) -> str | None:
+    """Preserve per-stream HTTP requirements instead of silently dropping them."""
+    headers: dict[str, Any] = {}
+    if channel.user_agent:
+        headers["user_agent"] = channel.user_agent
+    if channel.referrer:
+        headers["referrer"] = channel.referrer
+    if channel.headers:
+        headers["headers"] = dict(channel.headers)
+    return json.dumps(headers) if headers else None
+
+
 def _item_row(source_id: int, kind: str, item: dict, category_id: int | None) -> tuple:
     return (
         source_id, kind, item["remote_id"], item.get("num"), item["name"],
@@ -557,6 +590,7 @@ def _item_row(source_id: int, kind: str, item: dict, category_id: int | None) ->
         item.get("rating"), item.get("plot"), item.get("genre"),
         item.get("duration"), item.get("cast_list"), item.get("director"),
         item.get("release_date"), item.get("youtube_trailer"), item.get("tmdb_id"),
+        item.get("request_headers"),
     )
 
 

@@ -8,7 +8,9 @@ its own. Connections are never shared across threads.
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -16,6 +18,13 @@ from typing import Iterator
 from . import config
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+
+#: Bumped whenever schema.sql starts relying on a column that existing
+#: databases do not have. New tables appear through CREATE IF NOT EXISTS;
+#: columns need an explicit step below.
+SCHEMA_VERSION = 1
+
+_TASKS = ("search_missing", "refresh_metadata", "refresh_catalog", "scan_library")
 
 # Applied to every connection that serves requests.
 #
@@ -87,10 +96,52 @@ def apply_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing database up to ``SCHEMA_VERSION``.
+
+    ``schema.sql`` is intentionally all ``IF NOT EXISTS``, so it can only add
+    tables and indexes. Columns on tables that already exist need a real
+    migration, and this is where those live. Kept out of ``apply_schema``
+    because ``bulk_load`` re-runs that on every sync to restore the FTS
+    triggers.
+    """
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= SCHEMA_VERSION:
+        return
+
+    if version < 1:
+        if "request_headers" not in _columns(conn, "items"):
+            conn.execute("ALTER TABLE items ADD COLUMN request_headers TEXT")
+
+        # Seeded once rather than in schema.sql: a user who deletes a profile
+        # should not find it re-created on the next restart.
+        now = int(time.time())
+        for name, resolutions, cutoff in (
+            ("HD", ["1080p", "720p", "480p", "unknown"], "1080p"),
+            ("4K", ["2160p", "1080p", "720p"], "2160p"),
+        ):
+            conn.execute(
+                "INSERT OR IGNORE INTO quality_profiles "
+                "(name, resolutions, cutoff, upgrades, created_at) "
+                "VALUES (?, ?, ?, 1, ?)",
+                (name, json.dumps(resolutions), cutoff, now),
+            )
+        for name in _TASKS:
+            conn.execute("INSERT OR IGNORE INTO task_state (name) VALUES (?)", (name,))
+
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.commit()
+
+
 def init_db(path: Path | None = None) -> None:
     conn = connect(path)
     try:
         apply_schema(conn)
+        migrate(conn)
     finally:
         conn.close()
 

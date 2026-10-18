@@ -92,7 +92,11 @@ if $check_only; then
 
     echo
     echo "==> end-to-end tests (HTTP API + rendered pages)"
-    exec "$venv/bin/python" "$root/tests/endtoend.py"
+    "$venv/bin/python" "$root/tests/endtoend.py" || exit 1
+
+    echo
+    echo "==> manager tests (library, downloads, scan, backup)"
+    exec "$venv/bin/python" "$root/tests/manager.py"
 fi
 
 # ----------------------------------------------------------------------- run

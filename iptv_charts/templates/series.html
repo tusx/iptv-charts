@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% from "_macros.html" import poster, status_badge, empty %}
+{% block title %}Series · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="crumb"><a href="{{ url_for('sources_list') }}">Playlists</a> / Series</p>
+    <h1>Series</h1>
+    <p class="subtitle">
+      {{ counts.total }} series · {{ counts.episodes }} episodes ·
+      {{ counts.downloaded_episodes }} downloaded
+    </p>
+  </div>
+  <div class="page-actions">
+    {% if tmdb_configured %}
+      <button type="button" class="btn btn-primary" id="add-series-btn">Add series</button>
+    {% else %}
+      <a class="btn" href="{{ url_for('settings') }}#metadata-settings">Set up TMDB</a>
+    {% endif %}
+    <button type="button" class="btn btn-ghost" id="search-missing-btn">Search missing</button>
+  </div>
+</section>
+
+{% if not tmdb_configured %}
+  <div class="note note-warn">
+    Add a TMDB API key on the <a href="{{ url_for('settings') }}#metadata-settings">settings page</a>
+    to search for series and fetch posters and metadata. A TVDB key is optional and
+    supplies episode names and air dates.
+  </div>
+{% endif %}
+
+<form class="library-filter" method="get" action="{{ url_for('manager.series') }}">
+  <div class="search-field">
+    <input type="search" name="q" value="{{ q }}" placeholder="Search your series library" aria-label="Search your series library">
+  </div>
+  <select name="status" aria-label="Filter by status">
+    <option value="" {% if not status %}selected{% endif %}>All series</option>
+    <option value="monitored" {% if status == 'monitored' %}selected{% endif %}>Monitored</option>
+  </select>
+  <button class="btn btn-sm" type="submit">Filter</button>
+</form>
+
+{% if series %}
+  <div class="library-grid">
+    {% for item in series %}
+      <article class="library-card">
+        <a class="library-poster-link" href="{{ url_for('manager.series_detail', series_id=item.id) }}">
+          {{ poster(item.poster, item.title) }}
+        </a>
+        <div class="library-card-body">
+          <a class="library-title" href="{{ url_for('manager.series_detail', series_id=item.id) }}">{{ item.title }}</a>
+          <div class="library-sub">
+            {{ item.year or 'Year unknown' }} ·
+            {{ item.episode_have }}/{{ item.episode_count }} episodes
+          </div>
+          <div class="library-badges">
+            {% if item.episode_missing %}<span class="badge badge-missing">{{ item.episode_missing }} missing</span>
+            {% else %}<span class="badge badge-downloaded">Complete</span>{% endif %}
+            {% if item.monitored %}<span class="badge badge-monitored">Monitored</span>{% endif %}
+          </div>
+        </div>
+      </article>
+    {% endfor %}
+  </div>
+{% else %}
+  {{ empty('No series yet', 'Add a series from TMDB, or adjust the filters above.') }}
+{% endif %}
+
+<dialog class="dialog dialog-wide" id="add-series-dialog">
+  <div class="dialog-head">
+    <h2>Add a series</h2>
+    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <div class="dialog-body">
+    <div class="dialog-options">
+      <label class="field">
+        <span>Quality profile</span>
+        <select id="series-profile">
+          {% for profile in profiles %}
+            <option value="{{ profile.id }}">{{ profile.name }} ({{ profile.resolutions|join(', ') }})</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="series-monitored" checked> Monitored</label>
+      <label class="check"><input type="checkbox" id="series-search-now" checked> Search and download now</label>
+    </div>
+    <div class="field">
+      <span>Search TMDB</span>
+      <input type="search" id="series-search-input" placeholder="Series title" autocomplete="off">
+    </div>
+    <p class="hint" id="series-search-status" role="status"></p>
+    <div class="metadata-results" id="series-search-results"></div>
+  </div>
+  <div class="dialog-foot">
+    <span class="spacer"></span>
+    <button class="btn btn-ghost" type="button" data-close>Close</button>
+  </div>
+</dialog>
+
+{% if not profiles %}
+  <p class="note note-bad">No quality profiles exist. Create one on the
+    <a href="{{ url_for('manager.profiles_page') }}">profiles page</a> first.</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/series.js') }}"></script>
+{% endblock %}

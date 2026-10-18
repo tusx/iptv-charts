@@ -1,0 +1,47 @@
+{% macro poster(url, title, extra='') -%}
+<span class="poster-frame {{ extra }}">
+  {% if url %}
+    <img src="{{ url }}" alt="" loading="lazy">
+  {% else %}
+    <span class="poster-fallback" aria-hidden="true">{{ (title or '?')[:1]|upper }}</span>
+  {% endif %}
+</span>
+{%- endmacro %}
+
+{% macro status_badge(status) -%}
+  {% set labels = {
+    'downloaded': 'Downloaded',
+    'missing': 'Missing',
+    'downloading': 'Downloading',
+    'unaired': 'Unaired',
+    'queued': 'Queued',
+    'importing': 'Importing',
+    'failed': 'Failed',
+    'cancelled': 'Cancelled',
+  } %}
+  <span class="badge badge-{{ status }}">{{ labels.get(status, status|title) }}</span>
+{%- endmacro %}
+
+{% macro progress(download) -%}
+  {% if download %}
+    <div class="mini-progress" title="{{ download.bytes_done or 0 }} bytes">
+      <span class="mini-progress-bar {% if download.fraction is none %}progress-indeterminate{% endif %}"
+            style="width: {{ ((download.fraction or 0) * 100)|round(1) }}%"></span>
+    </div>
+    <div class="mini-progress-label">
+      {{ download.status|title }}
+      {% if download.bytes_total %}
+        · {{ (download.bytes_done / 1048576)|round(1) }} / {{ (download.bytes_total / 1048576)|round(1) }} MiB
+      {% elif download.bytes_done %}
+        · {{ (download.bytes_done / 1048576)|round(1) }} MiB
+      {% endif %}
+    </div>
+  {% endif %}
+{%- endmacro %}
+
+{% macro empty(title, message) -%}
+  <div class="empty-state">
+    <h2>{{ title }}</h2>
+    <p>{{ message }}</p>
+  </div>
+{%- endmacro %}
