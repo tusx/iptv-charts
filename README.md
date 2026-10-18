@@ -24,6 +24,10 @@ API for other software. Provider catalogs and metadata keys stay local.
 - **Update** one playlist or **Update all**, with a Cancel button.
 - **Staleness reminders**: a playlist not refreshed in 24h says so, with a
   one-click refresh.
+- **Set a connection limit** when adding a playlist, or edit it on the playlist
+  card. Leave it blank to use the provider's reported limit, defaulting to 1
+  when the provider does not report one. The limit is enforced across syncs,
+  metadata calls, probes and downloads.
 - **Remove** a playlist and its downloaded catalog in one click.
 - **Browse** any playlist with full-text **search**, kind tabs (Live / VOD /
   Series), a category filter, and sorting by name, recency or rating, paging
@@ -42,22 +46,33 @@ API for other software. Provider catalogs and metadata keys stay local.
   Series use TMDB for search, art and overviews, and TVDB for episode names,
   numbers and air dates when a TVDB key is configured (TMDB episodes are the
   fallback).
-- **Monitor** movies and individual episodes or entire seasons, and choose a
-  **quality profile** (resolution tiers and a cutoff).
+- **Monitor** movies and individual episodes or entire seasons, with
+  **quality profiles** that order resolution and source tiers and can require
+  original audio or specific subtitle languages.
+- **Probe before download**: ffprobe reads the provider URL first and reports
+  the real resolution, video codec/HDR, every audio track and language, every
+  embedded subtitle track, duration and size. The download starts only when
+  those facts satisfy the quality profile. Probe results are cached per stream.
 - **Automatic search** of every playlist's IPTV catalog for a matching VOD or
   provider series episode. Matching understands the way real catalogs name
   things: `ES - Un talento único [[4K-Q]-Q] (2026)`, `EN - Wonder [4K-Q] (2017)
   JULIA ROBERTS`, `GR - Supernatural [1080p]` with no year, and `[X][WatchMDH]`
   group tags.
-- **Manual search** when automatic matching misses, with a query override and
-  a list of every candidate release.
-- **Built-in download queue** with progress, cancel, retry, history and a
-  durable SQLite queue that survives restarts. Direct HTTP downloads resume;
-  HLS playlists are remuxed with ffmpeg.
+- **Manual search** when automatic matching misses, with a query override, a
+  list of every candidate release, and the probed stream facts next to each.
+- **Built-in download queue** with progress, cancel, retry, history, editable
+  **priority**, and a durable SQLite queue that survives restarts. Direct HTTP
+  downloads resume; HLS playlists are remuxed with ffmpeg without transcoding.
+- **Per-playlist connection limits** enforced across playlist syncs, metadata
+  calls, probes and downloads. A season downloads one episode at a time when
+  the playlist allows one connection.
 - **Import and rename** completed files into the media folders. The default
   names are Radarr/Sonarr-style and fully editable.
-- **Quality upgrades** replace an existing file when a better allowed
-  resolution appears and the profile's cutoff has not been reached.
+- **Quality upgrades** replace an existing file when a better allowed tier
+  appears and the profile's cutoff has not been reached.
+- **Radarr/Sonarr-style add choices**: minimum availability for movies
+  (announced, in cinemas, or released), monitor all/future/first/latest/no
+  episodes for series, and what to do when a new season is discovered.
 - **Calendar** of episode air dates and movie release dates, and **Wanted**
   views for missing movies, aired monitored episodes, and files below cutoff.
 - **Library scan**: find files already on disk, match them to TMDB, review the
@@ -72,8 +87,12 @@ API for other software. Provider catalogs and metadata keys stay local.
 - The **info/stats page** with charts: account details, category breakdown,
   and when content was added. Account and server data is already fetched and
   stored on every sync, so this page is presentation only.
-- A public API for other software is deliberately out of scope, as are
-  indexers, torrent clients, notifications, custom formats and lists.
+- Advanced Radarr/Sonarr options that do not fit a single provider-backed
+  downloader are still out of scope: score-based custom formats, delay
+  profiles, tags, a mass editor, notifications, import lists, indexers and
+  torrent clients. Source, audio and subtitle constraints cover the common
+  "custom quality" cases; a public API for other software is also deliberately
+  out of scope.
 
 ## Quick start
 
@@ -194,6 +213,27 @@ whether to search immediately. Adding also captures alternative titles, which
 matters because a provider may call a film `Un talento único` while TMDB's
 English title is `A Unique Talent`.
 
+The add dialog also carries the Radarr/Sonarr-style choices:
+
+- **Movies — download when**: `announced` searches immediately; `in cinemas`
+  waits for the TMDB release date; `released` (the default) also waits for the
+  status to say it is released. A future movie stays monitored but is not
+  searched, and the detail page says why.
+- **Series — monitor episodes**: all, upcoming only, first season, latest
+  season, or none. "Upcoming only" monitors unaired/unknown-date episodes and
+  leaves already-released episodes unmonitored.
+- **Series — when a new season appears**: monitor all new episodes, monitor
+  future episodes only, or ignore new seasons. A metadata refresh discovers new
+  episodes and applies this rule; it does not download them until they air and
+  the search task runs.
+- **Queue priority**: a number from -100 to 100. Higher values are claimed
+  first; the priority can also be changed from the Activity queue and the
+  detail pages.
+
+The source restrictions on a quality tier are read from the provider release
+name (WEB-DL, WEBRip, BluRay, HDTV, CAM, …). Audio and subtitle requirements
+come from the stream probe, not the name.
+
 Automatic search looks across every playlist in the catalog, not just one. It
 normalises names (diacritics, leading `ES -` style locale prefixes, quality
 tags, group tags, cast noise), extracts a release year and resolution, and
@@ -214,41 +254,87 @@ episode downloads require an Xtream playlist**. Movies work with both. TVDB
 and TMDB numbering can differ from a provider's numbering; when it does,
 manual search is the escape hatch.
 
-### Quality profiles and upgrades
+### Quality profiles, probes and upgrades
 
-**Settings → Quality profiles** (or the profiles link) edits profiles. Each
-profile has:
+**Settings → Quality profiles** (or the profiles link) edits profiles. A
+profile is an **ordered hierarchy of quality tiers**, best first. Each tier is
+a resolution plus an optional set of allowed sources:
 
-- an ordered list of allowed resolutions: `2160p`, `1080p`, `720p`, `480p`,
-  `unknown`;
-- an optional cutoff — once the file is at or above it, no further upgrades;
-- an upgrades switch.
+- `2160p WEB-DL` — only 4K WEB-DL, never a CAM or another source;
+- `1080p WEB-DL`;
+- `1080p` — any source at 1080p;
+- `720p`;
+- `480p`;
+- `unknown`.
+
+Tiers can be added, removed and moved up or down; the order is the quality
+hierarchy. The cutoff is a tier name, and acts as a stopping point, not a
+ceiling. If a better allowed tier exists, it still wins, so "upgrade until
+1080p WEB-DL" does not prevent a 2160p WEB-DL release from being chosen. An
+upgrades switch disables replacements entirely.
+
+Each profile also has:
+
+- **Audio**: any, original-language audio, a single audio track, or multiple
+  audio tracks. Optionally, one of a chosen set of languages must also be
+  present.
+- **Subtitles**: any, required, or no subtitle tracks. A required profile can
+  name languages (English, Hindi, …) or `original`.
+- **Require a successful probe**: on by default. If ffprobe cannot read the
+  stream, the release is reported as unverified instead of being guessed at.
+  Turning this off falls back to the provider's name for resolution/source
+  while still using the probe when it succeeds.
+
+The probe determines the real facts: ffprobe reads the URL, not the downloaded
+file. It reports video codec, HDR, width/height, audio codecs/channels and
+language tags, embedded subtitle tracks and language tags, duration, container
+and size. Results are cached (24 hours by default; editable under Downloads)
+and count against the playlist's connection limit.
 
 Two profiles are seeded: **HD** (1080p/720p/480p/unknown, cutoff 1080p) and
-**4K** (2160p/1080p/720p, cutoff 2160p). The add dialog lets you choose one,
-so picking a resolution is a single choice.
+**4K** (2160p/1080p/720p, cutoff 2160p). Existing profiles from older versions
+are migrated to resolution-only tiers and probe-required on. The add dialog
+lets you choose a profile, so picking a quality is a single choice.
 
 A profile that is in use cannot be deleted until its movies and series are
 reassigned, and at least one profile always remains.
 
-### Downloads and naming
+### Downloads, connection limits and naming
 
-The built-in queue lives in SQLite and is processed by 1–3 worker threads
-(default 1, to respect provider connection limits). It pauses new jobs while a
-playlist sync is running. A download can be cancelled, retried after failure,
-and inspected in **Activity**.
+The built-in queue lives in SQLite and is processed by 1–3 worker threads. The
+**playlist's own connection limit** is the hard limit, not a global pause: a
+sync, a metadata call, a probe and a download all take a slot from the same
+per-source registry. The effective limit is, in order:
+
+1. the **connection limit** set on the playlist (add dialog or the card on the
+   Playlists page);
+2. the provider's reported `max_connections`;
+3. **1** when neither is known.
+
+When a season is queued against a playlist that allows one connection, its
+episodes are claimed and downloaded one at a time. The download workers stand
+aside while a sync or probe is waiting for a slot, so a busy queue cannot
+starve a sync. Different playlists can download in parallel.
+
+Queue rows carry a **priority** (-100 to 100, default 0); higher priorities are
+claimed first. A download can be cancelled, retried after failure, and
+inspected in **Activity**, where the priority can be edited.
 
 - **Direct files** are streamed to `media/.incomplete/` with Range resume,
   Content-Length checks, progress persisted to the database, and a disk-space
   preflight.
-- **HLS** (`.m3u8`) is remuxed with ffmpeg. The container image installs
-  ffmpeg; in dev mode it is optional, but HLS downloads require it.
+- **HLS** (`.m3u8`) is remuxed with ffmpeg using stream copy (`-c copy`). No
+  transcoding is done anywhere; Jellyfin or any other player handles playback.
+  The container image installs ffmpeg; in dev mode it is optional, but HLS
+  downloads require it.
 - A downloaded file is checked before import: an HTML login/error page served
-  with HTTP 200 is rejected, and ffprobe (when available) must recognise the
-  file as video. Its probed frame height becomes the stored resolution.
+  with HTTP 200 is rejected, and ffprobe must recognise the file as video. The
+  URL probe has already made the quality decision; the local probe is a final
+  integrity/type check.
 - Imports are an atomic rename on the same filesystem, followed by a database
-  update and a history event. An upgrade deletes the previous recorded file
-  only after the new one is in place.
+  update and a history event. The probed source, quality tier, audio/subtitle
+  languages and media facts are stored on the library row. An upgrade deletes
+  the previous recorded file only after the new one is in place.
 
 Default names:
 
@@ -261,9 +347,11 @@ Default names:
 | Episode file | `{series} - S{season:00}E{episode:00} - {episode_title} [{resolution}]` |
 
 All five are editable in **Settings → Media management**, with a live preview.
+File templates also accept `{source}` and `{quality}` (the matched tier label).
 Tokens are `{title}`, `{series}`, `{year}`, `{season}`, `{episode}`,
-`{episode_title}` and `{resolution}`; `{season:00}` and `{episode:00}` pad the
-number. A template describes one path component, so a separator is refused.
+`{episode_title}`, `{resolution}`, `{source}` and `{quality}`; `{season:00}`
+and `{episode:00}` pad the number. A template describes one path component, so
+a separator is refused.
 Names are sanitised (illegal characters, reserved device names, length) and
 every final path is confined to the media root. Unmanaged files are never
 overwritten; a ` (2)` suffix is used instead.
@@ -277,7 +365,9 @@ The scheduler runs inside the app process (started by `run.py`; disabled with
   aired, monitored episodes are matched again; files below cutoff are upgraded
   when upgrades are enabled.
 - **Refresh metadata** — weekly by default. Refreshes TMDB/TVDB data and episode
-  lists. New episodes inherit the series' monitoring.
+  lists. Episodes discovered for the first time follow the series' **monitor
+  new seasons** rule (all, future only, or ignore). This is Sonarr's new-season
+  announcement behaviour without a notification channel.
 - **Refresh playlists** — daily by default (`0` disables it). Playlists older
   than the interval are synced so new VODs become available to search. This is
   the equivalent of Radarr's indexer refresh.
@@ -344,7 +434,8 @@ private.
   connection tests.
 - **Quality profiles** (link to the editor).
 - **Media management**: media paths and the five naming templates.
-- **Downloads**: concurrency, attempts, and whether ffmpeg is available.
+- **Downloads**: worker count, attempts, probe cache/timeout/candidate/budget
+  controls, a probe-cache clear button, and ffmpeg/ffprobe availability.
 - **Automation**: search, metadata and playlist-refresh intervals.
 - **Library scan** and **Backup and restore**.
 
@@ -394,15 +485,24 @@ queue and in the log; a provider page is not saved as a video.
 browse request during a sync never blocks it and never sees a half-written
 row. A sync is re-runnable; the app does not claim an atomic catalog swap, and
 a cancelled re-sync can leave a partial catalog until the next successful sync.
-The download queue deliberately pauses while a sync runs: provider accounts
-often limit concurrent connections, and one worker draining the queue already
-uses one. The scheduler defers searches during a sync for the same reason.
+**Provider connections are a shared, enforced limit.** A playlist's
+connection limit is not advisory: playlist syncs, `get_series_info` metadata
+calls, ffprobe stream probes and downloads all acquire a slot from one
+per-source registry. The download workers use a non-blocking acquire and skip a
+source whose slots are full, while syncs/probes wait; a waiting caller blocks
+new claims so it cannot be starved. When the limit is 1, a queued season is
+downloaded one episode at a time, and a sync starts only when the current
+download releases its slot. Playback launched outside the app (Jellyfin, an
+external player) cannot be accounted for; the app can only enforce what it
+opens itself.
 
 **Schema changes need a migration.** `schema.sql` is all `IF NOT EXISTS`, which
 adds new tables but cannot add a column to an existing table. `db.migrate`
-uses `PRAGMA user_version` for that; version 1 adds per-stream M3U headers,
-seeds quality profiles and task state. Existing databases are upgraded at
-startup.
+uses `PRAGMA user_version` for that; version 1 adds per-stream M3U headers and
+seeds quality profiles/task state, and version 2 adds stream probes, the
+quality-tier/source/audio/subtitle fields, per-playlist connection limits,
+queue priority, movie availability and new-season monitoring. Existing
+databases are upgraded at startup.
 
 **Search has to be written carefully.** The natural way to search an FTS index
 with a filter —
@@ -419,21 +519,30 @@ ability to reorder, pinning the FTS match as the outer loop, and the same query
 runs in **3 ms**. There is a regression test asserting the query plan. The
 library matcher uses the same shape without the source filter.
 
+## Documentation
+
+- [`docs/QUALITY_AND_CONNECTIONS.md`](docs/QUALITY_AND_CONNECTIONS.md) — how
+  quality tiers, probes, audio/subtitle checks, connection limits, priority
+  and monitoring rules work.
+- [`CHANGELOG.md`](CHANGELOG.md) — release history.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow and invariants.
+- [`LICENSE`](LICENSE) — MIT.
+
 ## Development
 
 ```bash
 ./setup.test.sh --check
 ```
 
-Runs five suites, ~450 checks, none of which touch the internet:
+Runs five suites, 546 checks, none of which touch the internet:
 
 | Suite | Covers |
 |---|---|
-| `tests/smoke.py` | Parsers, schema, migrations, FTS, streaming, player commands, quality/naming/matching, request guards |
+| `tests/smoke.py` | Parsers, schema, migrations, FTS, streaming, player commands, quality/naming/matching, languages, probes, connection limits, request guards |
 | `tests/integration.py` | Real ingest against a local fixture provider |
 | `tests/bridge.py` | The queue protocol, against the real host bridge and a fake player |
 | `tests/endtoend.py` | The HTTP API and rendered pages, via Flask's test client |
-| `tests/manager.py` | Fake TMDB/TVDB, catalog matching, downloads/imports, upgrades, cancel/retry, scan, backup/restore |
+| `tests/manager.py` | Fake TMDB/TVDB/probes, catalog matching, probe-first quality, audio/subtitle constraints, connection limits, priority, monitor modes, downloads/imports, upgrades, cancel/retry, scan, backup/restore |
 
 They exist to pin down the specific traps this codebase is built around:
 quoted commas in M3U titles, diacritic-folded search, the `stream_id` vs `num`
@@ -464,11 +573,15 @@ iptv_charts/
   items.py           catalog search and stream URL construction
   player.py          which player to use, how to run it, host bridge client
   metadata.py        provider selection, cache, image proxy
-  matching.py        provider name normalisation and release scoring
-  quality.py         resolution tiers, profiles, cutoff decisions
+  matching.py        provider name normalisation, source and release scoring
+  quality.py         quality tiers, source/audio/subtitle checks, cutoff decisions
+  languages.py       ISO 639-1/2B folding for metadata and stream tags
+  connections.py     per-playlist connection registry and fairness
+  streams.py         provider identity -> URL, headers, container, HLS
+  probe.py           ffprobe on the URL, normalised stream facts and cache
   naming.py          templates, sanitisation, path confinement
   library.py         movies/series CRUD, episode sync, search/grab, import
-  downloader.py      durable queue, HTTP/HLS downloads, progress, recovery
+  downloader.py      durable priority queue, HTTP/HLS downloads, recovery
   scheduler.py       periodic tasks and manual task runs
   scan.py            library scan/review/import
   backup.py          logical ZIP export and restore
@@ -512,7 +625,9 @@ provider identity, not accepted from the browser; player commands run without
 a shell; the host bridge re-checks what the app sends it. Downloads and image
 requests never become a generic URL fetcher: images only come from the TMDB
 image host through a validated path, and provider headers are stripped of
-control characters before being handed to requests or ffmpeg.
+control characters before being handed to requests or ffmpeg. ffprobe is run
+with a protocol whitelist (`http,https,tcp,tls,crypto`), a timeout, header
+sanitisation and no shell; it never receives a browser-supplied URL.
 
 Paths are confined to the media root. Naming templates are validated when
 saved and again when restored from a backup; metadata titles are sanitised;
@@ -534,8 +649,9 @@ come back.
 - Python 3.11+ (developed against 3.13)
 - Podman, for the container path only
 - `mpv` or `vlc`, entirely optional
-- `ffmpeg` for HLS downloads and ffprobe resolution checks; the container image
-  installs it, while dev mode works without it for direct files
+- `ffmpeg` for HLS remuxing and `ffprobe` for pre-download stream inspection;
+  the container image installs both. In dev mode, direct files still download
+  without them, but probe-required profiles and HLS need them.
 - A TMDB API key for Movies and Series; a TVDB API key is optional
 
 On Debian/Ubuntu, if `python3 -m venv` fails with `No module named 'ensurepip'`:

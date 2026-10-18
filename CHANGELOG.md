@@ -1,0 +1,76 @@
+# Changelog
+
+All notable changes to IPTV Charts are recorded here. The project follows
+semantic-ish versioning while the app is pre-1.0: the minor version changes
+when the library schema or user-visible workflow changes.
+
+## 0.3.0 — 2026-10-18
+
+### Added
+
+- **Pre-download stream probing.** ffprobe reads a provider URL and reports
+  real resolution, video codec/HDR, audio tracks and languages, embedded
+  subtitle tracks and languages, duration, container and size. Results are
+  cached per provider stream. Automatic and manual searches show the probed
+  facts; nothing is downloaded until the stream satisfies the profile.
+- **Custom quality hierarchies.** A profile is now an ordered list of tiers,
+  each combining a resolution with an optional source set (`WEB-DL`, `WEBRip`,
+  `BluRay`, `HDTV`, `CAM`, …). Tiers can be reordered, and a cutoff is a tier
+  rather than only a resolution.
+- **Audio and subtitle requirements.** Profiles can require original-language
+  audio, a single or multiple audio tracks, one of a chosen set of audio
+  languages, required subtitles in chosen languages (including the original
+  language), or no subtitle tracks. Language tags are normalised between TMDB
+  (ISO 639-1) and ffprobe (ISO 639-2/B).
+- **Per-playlist connection limits.** A playlist can carry an explicit limit;
+  otherwise the provider-reported maximum is used, falling back to one. The
+  limit is enforced across playlist syncs, `get_series_info` calls, probes and
+  downloads, including a fairness rule so a waiting sync/probe cannot be
+  starved by a busy download queue. A season downloads one episode at a time
+  at a limit of one.
+- **Queue priority.** Movies, series and individual queue rows have a priority
+  (-100 to 100); the download workers claim the highest priority first. The
+  queue priority is editable in Activity.
+- **Radarr/Sonarr add choices.** Movies have minimum availability (announced,
+  in cinemas, released). Series have a monitor mode (all, upcoming, first
+  season, latest season, none) and a "monitor new seasons" rule (all, future,
+  none). New episodes discovered by metadata refreshes follow that rule.
+- **`{source}` and `{quality}` naming tokens** for file templates.
+
+### Changed
+
+- Schema version 2 adds `stream_probes` and the quality/audio/subtitle,
+  connection-limit, priority, availability and monitor-rule columns. Existing
+  profiles are migrated to resolution-only tiers with probing required.
+- The downloader no longer pauses all work during a sync. It skips a playlist
+  whose connection slots are in use while other playlists continue.
+- Manual search and automatic search return profile decisions with a readable
+  reason; manual grabs are rejected when the probe or profile does not allow
+  the release.
+- Downloads store the probe facts and the matched quality tier, and imports
+  copy source/quality/audio/subtitle/media facts onto the library row.
+- No transcoding is performed. HLS is remuxed with `-c copy`; Jellyfin or
+  another player handles playback.
+- Backup/restore understands the new schema; probe caches are excluded like
+  the other derived caches.
+- Documentation, version and test coverage updated (546 checks).
+
+## 0.2.0 — 2026-10-18
+
+### Added
+
+- Movies and Series pages backed by TMDB, with optional TVDB episode data and
+  a TMDB fallback.
+- Automatic and manual matching of catalog VODs and Xtream provider episodes.
+- Quality profiles with resolution tiers, cutoff and upgrades.
+- A durable download queue with HTTP Range resume, HLS remuxing, progress,
+  cancel, retry and history.
+- Radarr/Sonarr-style naming and atomic imports into `Movies/` and `Series/`.
+- Calendar, Wanted, Activity, library scan/review/import, backup/restore.
+- Scheduler for missing searches, metadata refresh and playlist refresh.
+- Container media bind mount and ffmpeg in the image.
+
+## 0.1.0 — earlier
+
+- Local IPTV playlist browser: M3U/Xtream ingest, SQLite catalog, FTS search,
+  charts, browser playback, external player launch and host player bridge.

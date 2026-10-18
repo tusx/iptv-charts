@@ -1,0 +1,73 @@
+# Contributing
+
+IPTV Charts is a single-user, loopback-only application. Changes should keep
+that shape: one process, one SQLite database, no external services beyond the
+provider and metadata APIs the user configures.
+
+## Development setup
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+./setup.test.sh              # live dev server with auto-reload
+./setup.test.sh --check      # all five test suites, no network
+```
+
+The full check suite must pass before a change is merged. It uses local fixture
+servers for Xtream/M3U, TMDB, TVDB, media and ffmpeg/ffprobe; it does not touch
+the internet or the user's media library.
+
+The container path additionally needs Podman and the system ffmpeg/ffprobe
+package:
+
+```bash
+./setup.deploy.sh --build
+./setup.deploy.sh
+```
+
+## What to be careful about
+
+- **Schema changes.** `schema.sql` is all `IF NOT EXISTS`, so it cannot add a
+  column to an existing table or create an index over a column that does not
+  exist yet. Add columns and such indexes in `db.migrate` under a new
+  `SCHEMA_VERSION`, and keep `schema.sql` usable against the previous version.
+- **Provider connections.** Any new provider call must be considered against
+  `connections.py`. Syncs, `get_series_info`, probes and downloads share the
+  per-playlist limit; nesting acquisitions can deadlock at a limit of one.
+- **Untrusted names and headers.** Provider names, metadata titles, M3U headers
+  and backup contents are untrusted. Paths go through `naming`, headers through
+  `streams.clean_header`, URLs are rebuilt server-side, and every process is
+  started without a shell.
+- **Library identity.** Never store an `items.id`: a playlist sync replaces
+  catalog rows. Store `(source_id, kind, remote_id)` and an episode stream id.
+- **No transcoding.** HLS is remuxed with `-c copy`. The app files media for
+  Jellyfin; it does not implement playback processing.
+- **Probe-first quality.** A quality decision should use the probe result when
+  the profile requires one; do not silently fall back to the filename for
+  audio/subtitle requirements.
+
+## Tests
+
+| Suite | What it protects |
+|---|---|
+| `tests/smoke.py` | Parsers, migrations, FTS, quality/language/probe/connection units |
+| `tests/integration.py` | Ingest against the local fixture provider |
+| `tests/bridge.py` | The host player queue contract |
+| `tests/endtoend.py` | HTTP routes and rendered pages |
+| `tests/manager.py` | TMDB/TVDB/probes, library, queue, scan, backup |
+
+Add a focused check for each behaviour change. Failure messages in the suites
+are written for a person reading CI output; keep them specific.
+
+## Commits
+
+Keep commits scoped to one change with a subject in the imperative mood:
+
+```
+Probe provider streams before downloads
+Add per-playlist connection limits
+```
+
+Explain the *why* in the body when it is not obvious from the diff. Include
+tests and documentation in the same commit unless a separate documentation
+commit is genuinely clearer.
