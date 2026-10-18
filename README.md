@@ -13,11 +13,23 @@ API for other software. Provider catalogs and metadata keys stay local.
 
 ## What works today
 
+**Home**
+
+- A three-card dashboard for **IPTV**, **Movies** and **Series**, with the
+  actions that belong to each area: playlist add/update/browse/edit/remove and
+  update-all on the IPTV card; open/add/calendar/wanted/search-missing on the
+  library cards. Settings is no longer a directory of every feature.
+
 **Playlists**
 
 - **Add a playlist** as either an M3U URL or Xtream Codes credentials, with a
   **connection test** that reports what it found — account status, expiry,
   connection limits, channel estimate — before anything is saved.
+- **Edit a playlist** on its own page: name, M3U URL or Xtream server,
+  username, password, user agent, referrer and connection limit. A Test
+  connection button checks unsaved values; changing provider identity clears
+  the old catalog and queues a fresh sync. Passwords are never rendered back
+  to the page.
 - **Ingest** the whole catalog into SQLite: streaming parse, batched inserts,
   cancellable, and safe to re-run.
 - **Real progress bars** — bytes against a known total, not a spinner.
@@ -424,20 +436,26 @@ private.
 
 ## Settings
 
-`/settings` (also in the top bar) has cards for:
+`/settings` (also in the top bar) is one form with **one Save all settings
+button**. Every section is validated before anything is written, and the whole
+save is one SQLite transaction — an invalid naming template or interval cannot
+leave the other sections half-saved.
 
 - **External player** and a **custom command** with `{url}`, `{title}`,
   `{user_agent}` and `{referrer}` placeholders. A custom command runs on the
   host with your privileges, exactly as written; nothing is passed through a
   shell.
 - **Metadata providers**: TMDB and TVDB keys, optional PIN, language, and
-  connection tests.
-- **Quality profiles** (link to the editor).
-- **Media management**: media paths and the five naming templates.
-- **Downloads**: worker count, attempts, probe cache/timeout/candidate/budget
-  controls, a probe-cache clear button, and ffmpeg/ffprobe availability.
+  connection tests that use the stored keys.
+- **Media management**: media paths and the five naming templates with a
+  preview.
+- **Downloads and probing**: worker count, attempts, probe
+  cache/timeout/candidate/budget controls, a probe-cache clear action, and
+  ffmpeg/ffprobe availability.
 - **Automation**: search, metadata and playlist-refresh intervals.
-- **Library scan** and **Backup and restore**.
+
+Quality profiles, library scan, and backup/restore are action cards on the
+same page outside the settings form.
 
 ### Logs
 
@@ -524,6 +542,8 @@ library matcher uses the same shape without the source filter.
 - [`docs/QUALITY_AND_CONNECTIONS.md`](docs/QUALITY_AND_CONNECTIONS.md) — how
   quality tiers, probes, audio/subtitle checks, connection limits, priority
   and monitoring rules work.
+- [`docs/PLAYLISTS_AND_SETTINGS.md`](docs/PLAYLISTS_AND_SETTINGS.md) — home
+  dashboard, playlist editing/catalog identity, and the atomic settings save.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow and invariants.
 - [`LICENSE`](LICENSE) — MIT.
@@ -534,7 +554,7 @@ library matcher uses the same shape without the source filter.
 ./setup.test.sh --check
 ```
 
-Runs five suites, 546 checks, none of which touch the internet:
+Runs five suites, 613 checks, none of which touch the internet:
 
 | Suite | Covers |
 |---|---|
@@ -566,6 +586,7 @@ iptv_charts/
   api.py             JSON endpoints: probe, create, sync, status, settings
   manager_api.py      library, metadata, queue, task, scan, backup, profile API
   manager_web.py      Movies, Series, Calendar, Wanted, Activity, Scan, Profiles pages
+  settings_service.py atomic validation/save for the unified settings form
   config.py          path resolution, port selection, media folders
   db.py              SQLite connections, schema, migrations, bulk-load tuning
   sync.py            the ingest engine, progress state, cancellation
@@ -591,7 +612,7 @@ iptv_charts/
     tmdb.py          TMDB client and response normalisation
     tvdb.py          TVDB v4 login and episode client
     streaming.py     shared spool/progress primitives
-  templates/         Jinja templates
+  templates/         Jinja templates (home, playlist edit, unified settings, library)
   static/            CSS, JS, vendored hls.js
 scripts/
   player-bridge.sh   host-side watcher that plays streams for the container
@@ -628,6 +649,14 @@ image host through a validated path, and provider headers are stripped of
 control characters before being handed to requests or ffmpeg. ffprobe is run
 with a protocol whitelist (`http,https,tcp,tls,crypto`), a timeout, header
 sanitisation and no shell; it never receives a browser-supplied URL.
+
+The playlist edit page never renders the stored password. A blank password can
+only test/update an unchanged server URL and username; changing either
+requires re-entering it, so the stored credential cannot be sent to a
+caller-supplied server. Changing a playlist's identity clears its catalog,
+provider caches, probes, account snapshot and queued downloads before the
+resync. All responses also refuse framing (`X-Frame-Options: DENY` and CSP
+`frame-ancestors 'none'`).
 
 Paths are confined to the media root. Naming templates are validated when
 saved and again when restored from a backup; metadata titles are sanitised;

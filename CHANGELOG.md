@@ -4,6 +4,39 @@ All notable changes to IPTV Charts are recorded here. The project follows
 semantic-ish versioning while the app is pre-1.0: the minor version changes
 when the library schema or user-visible workflow changes.
 
+## 0.4.0 — 2026-10-18
+
+### Added
+
+- **Home dashboard** with three cards — IPTV, Movies and Series. The IPTV card
+  keeps the per-playlist Update/Browse/Edit/Remove actions and Update all/Add
+  playlist buttons; the library cards expose Open, Add, Calendar, Wanted and
+  Search missing actions directly.
+- **Playlist edit page** at `/playlists/<id>/edit`. It edits the display name,
+  M3U URL or Xtream server/username/password, user agent/referrer and
+  connection limit, with a Test connection button that can use the stored
+  password for an unchanged account. Provider changes clear the old catalog
+  and derived caches, reset the account snapshot and queue a sync.
+- **Unified settings form** with one Save button. Player, metadata, naming,
+  downloads/probing and automation are validated into memory and written in a
+  single SQLite transaction; a bad value in any section saves nothing. Action
+  buttons (provider tests, probe-cache clear, backup/restore) remain separate.
+- Management pages moved under `/playlists`; `/` is now the dashboard. The
+  existing playlist dialog is shared by both pages.
+- `settings_service.py` for atomic settings validation and saving.
+
+### Security
+
+- Playlist passwords are never rendered into the edit page.
+- A blank password may only test/update an unchanged server URL and username;
+  changing either requires re-entering the password, preventing a caller from
+  sending the stored password to a different server.
+- Changing provider identity clears items, categories, provider series caches,
+  stream probes, the account snapshot and queued downloads for that source.
+- Every response now sends `X-Frame-Options: DENY` and a
+  `Content-Security-Policy: frame-ancestors 'none'` header.
+- Test coverage increased to 613 checks across the five offline suites.
+
 ## 0.3.0 — 2026-10-18
 
 ### Added

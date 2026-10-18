@@ -45,6 +45,12 @@ package:
 - **Probe-first quality.** A quality decision should use the probe result when
   the profile requires one; do not silently fall back to the filename for
   audio/subtitle requirements.
+- **Settings saves are atomic.** Add new form fields to the nested payload and
+  `settings_service.py`; validate every section before writing, then commit in
+  one transaction. Keep actions (tests, backups, cache clearing) separate.
+- **Playlist credentials are special.** Never render a stored password. A
+  blank password may only test/update an unchanged server and username. Any
+  identity change must clear the old catalog/caches and queue a sync.
 
 ## Tests
 
