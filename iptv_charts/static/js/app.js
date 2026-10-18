@@ -73,6 +73,10 @@
   addOpeners.forEach((sel) => $(sel)?.addEventListener('click', openDialog));
   $('#add-close-btn')?.addEventListener('click', closeDialog);
   $('#add-cancel-btn')?.addEventListener('click', closeDialog);
+  if (new URLSearchParams(window.location.search).get('add') === '1' && dialog) {
+    openDialog();
+    history.replaceState({}, '', window.location.pathname);
+  }
 
   // Clicking the backdrop closes; clicking inside the form must not.
   dialog?.addEventListener('click', (event) => {
@@ -239,6 +243,30 @@
     button.addEventListener('click', () => syncOne(button.dataset.sourceId, button));
   });
 
+  $$('[data-search-missing]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = 'Starting…';
+      try {
+        await postJSON('/api/tasks/search_missing/run');
+        button.textContent = '✓ Search started';
+        window.setTimeout(() => {
+          button.disabled = false;
+          button.textContent = original;
+        }, 1600);
+      } catch (error) {
+        button.textContent = '✕ Failed';
+        button.title = error.message;
+        window.setTimeout(() => {
+          button.disabled = false;
+          button.textContent = original;
+          button.title = '';
+        }, 2200);
+      }
+    });
+  });
+
   $('#sync-all-btn')?.addEventListener('click', async (event) => {
     event.currentTarget.disabled = true;
     try {
@@ -301,7 +329,7 @@
 
   // -------------------------------------------------------------- progress UI
   function showCardError(sourceId, message) {
-    const card = document.querySelector(`.card[data-source-id="${sourceId}"]`);
+    const card = document.querySelector(`.source-card[data-source-id="${sourceId}"]`);
     const slot = $('.js-error', card || document);
     if (!slot) return;
     slot.hidden = false;
@@ -396,9 +424,25 @@
 
   function applySnapshot(snapshot) {
     // Per-card progress.
-    $$('.card[data-source-id]').forEach((card) => {
+    $$('.source-card[data-source-id]').forEach((card) => {
       const sourceId = Number(card.dataset.sourceId);
-      applyJob(card, snapshot.jobs[sourceId]);
+      const job = snapshot.jobs[sourceId];
+      applyJob(card, job);
+      const badge = card.querySelector('.home-sync-badge');
+      if (badge) {
+        const active = job && (job.state === 'queued' || job.state === 'running');
+        badge.hidden = !active;
+      }
+      const state = card.querySelector('.home-sync-state');
+      if (state && job) {
+        if (job.state === 'queued' || job.state === 'running') {
+          state.textContent = job.message || 'Syncing…';
+        } else if (job.state === 'error') {
+          state.textContent = 'Last update failed';
+        } else if (job.state === 'done') {
+          state.textContent = 'Updated just now';
+        }
+      }
     });
 
     // Batch header.

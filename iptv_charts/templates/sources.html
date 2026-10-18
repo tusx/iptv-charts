@@ -53,7 +53,7 @@
       {% set stale = source.last_synced_at
                      and (now - source.last_synced_at) > staleness_hours * 3600 %}
       {% set job = sync_state.jobs.get(source.id) %}
-      <article class="card" data-source-id="{{ source.id }}"
+      <article class="card source-card" data-source-id="{{ source.id }}"
                data-source-name="{{ source.name }}">
         <header class="card-head">
           <div>
@@ -116,7 +116,7 @@
 
         {# Live progress target. JS fills this during a sync. #}
         <div class="sync-slot" data-source-id="{{ source.id }}"
-             {% if not job or not job.active %}hidden{% endif %}>
+             {% if not job or job.state not in ('queued', 'running') %}hidden{% endif %}>
           <div class="sync-line">
             <span class="sync-phase js-sync-phase">{{ job.detail or job.message if job else '' }}</span>
             <span class="sync-count js-sync-count"></span>
@@ -135,15 +135,17 @@
 
         <footer class="card-actions">
           <button class="btn btn-ghost js-sync" data-source-id="{{ source.id }}"
-                  {% if job and job.active %}disabled{% endif %}>Update</button>
+                  {% if job and job.state in ('queued', 'running') %}disabled{% endif %}>Update</button>
           <button class="btn btn-ghost js-cancel" data-source-id="{{ source.id }}"
-                  {% if not job or not job.active %}hidden{% endif %}>Cancel</button>
+                  {% if not job or job.state not in ('queued', 'running') %}hidden{% endif %}>Cancel</button>
           <a class="btn btn-ghost js-browse" href="{{ url_for('browse', source_id=source.id) }}"
              {% if not (source.live_count + source.vod_count + source.series_count) %}
                aria-disabled="true" title="Nothing imported yet — run an update first"
              {% else %}
                title="Search and browse this playlist"
              {% endif %}>Browse</a>
+          <a class="btn btn-ghost" href="{{ url_for('edit_source', source_id=source.id) }}"
+             title="Edit provider details, headers and connection limit">Edit</a>
           <button class="btn btn-ghost btn-danger js-delete" data-source-id="{{ source.id }}"
                   data-source-name="{{ source.name }}" title="Remove this playlist">Remove</button>
         </footer>
@@ -163,93 +165,7 @@
   </div>
 {% endif %}
 
-{# ------------------------------------------------------------------ dialog #}
-<dialog id="add-dialog" class="dialog">
-  <form id="add-form" class="dialog-form" autocomplete="off">
-    <header class="dialog-head">
-      <h2>Add playlist</h2>
-      <button type="button" class="icon-btn" id="add-close-btn" aria-label="Close">×</button>
-    </header>
-
-    <div class="tabs" role="tablist">
-      <button type="button" class="tab is-active" role="tab" data-kind="m3u">M3U URL</button>
-      <button type="button" class="tab" role="tab" data-kind="xtream">Xtream Codes</button>
-    </div>
-
-    <div class="dialog-body">
-      <div class="field">
-        <label for="field-name">Name <span class="muted">(optional)</span></label>
-        <input id="field-name" name="name" type="text" placeholder="My provider">
-      </div>
-
-      <div class="field">
-        <label for="field-limit">
-          Connection limit <span class="muted">(optional)</span>
-        </label>
-        <input id="field-limit" name="connection_limit" type="number"
-               min="1" max="32" step="1"
-               placeholder="Auto — provider limit, else 1">
-        <p class="hint">
-          IPTV Charts will never use more than this many simultaneous
-          connections for this playlist. Leave it empty to use the provider's
-          reported limit, or 1 when the provider does not report one. A
-          season is downloaded one episode at a time when the limit is 1.
-        </p>
-      </div>
-
-      <div data-panel="m3u">
-        <div class="field">
-          <label for="field-m3u">Playlist URL</label>
-          <input id="field-m3u" name="m3u_url" type="text" spellcheck="false"
-                 placeholder="http://example.com:8080/get.php?username=…&amp;type=m3u_plus">
-        </div>
-        <details class="advanced">
-          <summary>Advanced</summary>
-          <div class="field">
-            <label for="field-ua">User-Agent</label>
-            <input id="field-ua" name="user_agent" type="text" spellcheck="false"
-                   placeholder="only if your provider requires one">
-          </div>
-          <div class="field">
-            <label for="field-ref">Referrer</label>
-            <input id="field-ref" name="referrer" type="text" spellcheck="false"
-                   placeholder="only if your provider requires one">
-          </div>
-        </details>
-      </div>
-
-      <div data-panel="xtream" hidden>
-        <div class="field">
-          <label for="field-base">Server URL</label>
-          <input id="field-base" name="base_url" type="text" spellcheck="false"
-                 placeholder="http://example.com:8080">
-          <p class="hint">Just the address and port — not the <code>player_api.php</code> part.</p>
-        </div>
-        <div class="field-row">
-          <div class="field">
-            <label for="field-user">Username</label>
-            <input id="field-user" name="username" type="text" spellcheck="false">
-          </div>
-          <div class="field">
-            <label for="field-pass">Password</label>
-            <input id="field-pass" name="password" type="password">
-          </div>
-        </div>
-      </div>
-
-      <div id="probe-result" class="probe-result" hidden></div>
-    </div>
-
-    <footer class="dialog-foot">
-      <button type="button" class="btn btn-ghost" id="probe-btn">Test connection</button>
-      <div class="spacer"></div>
-      <button type="button" class="btn btn-ghost" id="add-cancel-btn">Cancel</button>
-      <button type="submit" class="btn btn-primary" id="add-submit-btn">
-        Add &amp; sync
-      </button>
-    </footer>
-  </form>
-</dialog>
+{% include "_add_playlist_dialog.html" %}
 {% endblock %}
 
 {% block footer_extra %}

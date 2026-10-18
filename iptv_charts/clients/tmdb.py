@@ -17,7 +17,7 @@ DEFAULT_BASE = "https://api.themoviedb.org/3"
 DEFAULT_IMAGE_BASE = "https://image.tmdb.org/t/p"
 CONNECT_TIMEOUT = 12
 READ_TIMEOUT = 30
-DEFAULT_USER_AGENT = "IPTVCharts/0.3"
+DEFAULT_USER_AGENT = "IPTVCharts/0.4"
 
 #: Sizes accepted by the local image proxy. Deliberately a whitelist rather
 #: than "whatever is in the URL": the proxy must not become an SSRF gadget.

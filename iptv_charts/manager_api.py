@@ -17,7 +17,7 @@ import time
 from flask import Blueprint, Response, g, jsonify, request, send_file
 
 from . import (backup, connections, db, downloader, library, metadata,
-               naming, probe, quality, scan, scheduler)
+               naming, probe, quality, scan, scheduler, settings_service)
 from .clients import tmdb as tmdb_client
 from .clients import tvdb as tvdb_client
 
@@ -713,6 +713,23 @@ def delete_profile(profile_id: int):
 
 
 # ------------------------------------------------------------------- settings
+@bp.post("/settings/save")
+def save_all_settings():
+    """Validate and save every settings section in one transaction."""
+    conn = _conn()
+    try:
+        payload = _payload()
+        return jsonify(settings_service.save_all(conn, payload))
+    except settings_service.SettingsError as exc:
+        return jsonify({
+            "ok": False,
+            "error": str(exc),
+            "section": exc.section,
+        }), 400
+    except Exception as exc:
+        return _error(exc)
+
+
 def _save_setting(conn, key: str, value: str) -> None:
     db.set_setting(conn, key, value)
 

@@ -22,6 +22,10 @@
   let token = 0;
 
   $('#add-series-btn')?.addEventListener('click', () => open(dialog));
+  if (new URLSearchParams(window.location.search).get('add') === '1') {
+    open(dialog);
+    history.replaceState({}, '', window.location.pathname);
+  }
 
   const search = debounce(async () => {
     const query = input.value.trim();

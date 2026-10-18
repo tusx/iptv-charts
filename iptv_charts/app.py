@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from flask import Flask, abort, g, render_template, request
 
-from . import config, connections, db, items, metadata, naming, player, sync
+from . import config, connections, db, items, metadata, naming, player, sources, sync
 from .api import bp as api_bp
 from .manager_api import bp as manager_api_bp
 from .manager_web import bp as manager_web_bp
@@ -151,6 +151,48 @@ def create_app() -> Flask:
 
     # ------------------------------------------------------------------ routes
     @app.route("/")
+    def home():
+        conn = get_conn()
+        sources_rows = db.get_all(conn, _SOURCE_LIST_SQL)
+        movies = db.get_one(
+            conn,
+            "SELECT COUNT(*) AS total, "
+            "COALESCE(SUM(file_path IS NULL), 0) AS missing, "
+            "COALESCE(SUM(file_path IS NOT NULL), 0) AS downloaded, "
+            "COALESCE(SUM(monitored = 1), 0) AS monitored FROM movies",
+        )
+        series = db.get_one(conn, "SELECT COUNT(*) AS total, "
+                            "COALESCE(SUM(monitored = 1), 0) AS monitored FROM series")
+        episodes = db.get_one(
+            conn,
+            "SELECT COUNT(*) AS total, "
+            "COALESCE(SUM(file_path IS NOT NULL), 0) AS downloaded, "
+            "COALESCE(SUM(air_date IS NOT NULL AND air_date <= date('now') "
+            "AND file_path IS NULL), 0) AS missing FROM series_episodes",
+        )
+        return render_template(
+            "home.html",
+            sources=sources_rows,
+            sync_state=sync.snapshot(),
+            connection_counts=connections.snapshot(),
+            playlist_count=len(sources_rows),
+            catalog_items=sum(
+                (row["live_count"] or 0) + (row["vod_count"] or 0)
+                + (row["series_count"] or 0)
+                for row in sources_rows
+            ),
+            movie_counts=dict(movies),
+            series_counts={
+                "total": series["total"],
+                "monitored": series["monitored"],
+                "episodes": episodes["total"],
+                "downloaded_episodes": episodes["downloaded"],
+                "missing_episodes": episodes["missing"],
+            },
+            tmdb_configured=metadata.has_tmdb(conn),
+        )
+
+    @app.route("/playlists")
     def sources_list():
         conn = get_conn()
         rows = db.get_all(conn, _SOURCE_LIST_SQL)
@@ -158,6 +200,28 @@ def create_app() -> Flask:
         # immediately, rather than waiting for the first poll to come back.
         return render_template(
             "sources.html", sources=rows, sync_state=sync.snapshot(),
+            connection_counts=connections.snapshot(),
+        )
+
+    @app.route("/playlists/<int:source_id>/edit")
+    def edit_source(source_id: int):
+        conn = get_conn()
+        source = db.get_one(
+            conn,
+            "SELECT id, name, kind, base_url, username, m3u_url, "
+            "request_headers, connection_limit, max_connections, "
+            "account_status, exp_date, exp_unknown, is_trial, "
+            "last_synced_at, sync_status, sync_message "
+            "FROM sources WHERE id = ?",
+            (source_id,),
+        )
+        if source is None:
+            abort(404, description="That playlist no longer exists.")
+        return render_template(
+            "source_edit.html",
+            source=dict(source),
+            headers=sources.request_headers(source),
+            counts=items.counts_by_kind(conn, source_id),
             connection_counts=connections.snapshot(),
         )
 
@@ -266,6 +330,13 @@ def create_app() -> Flask:
         not actions), so what lands in the container log is what someone
         actually did: the writes, and anything that failed.
         """
+        # The app has no authentication and can display provider URLs/usernames
+        # on the edit page. Refuse framing so another page cannot clickjack a
+        # local user into editing or deleting a playlist.
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault(
+            "Content-Security-Policy", "frame-ancestors 'none'"
+        )
         if request.method == "GET" and response.status_code < 400:
             return response
         elapsed = (time.perf_counter() - getattr(g, "request_started", 0)) * 1000

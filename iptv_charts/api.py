@@ -90,13 +90,30 @@ def create_source():
 
 @bp.patch("/sources/<int:source_id>")
 def update_source(source_id: int):
-    """Edit the display name and the enforced connection limit."""
+    """Edit a playlist in place and re-sync when its identity changed."""
     conn = _conn()
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _fail("Expected a JSON object.")
+    existing = db.get_one(conn, "SELECT * FROM sources WHERE id = ?", (source_id,))
+    if existing is None:
+        return _fail("That playlist no longer exists.", 404)
+    if "kind" in payload and str(payload.get("kind") or "") != existing["kind"]:
+        return _fail("Remove and re-add the playlist to change its type.", 409)
+    job = sync.snapshot()["jobs"].get(source_id)
+    if job and job.get("state") in ("queued", "running"):
+        return _fail("That playlist is syncing. Wait for it to finish before editing it.", 409)
+
     try:
-        row = sources.update(
+        row, catalog_changed = sources.update(
             conn, source_id,
             name=payload.get("name") if "name" in payload else None,
+            m3u_url=payload.get("m3u_url") if "m3u_url" in payload else None,
+            base_url=payload.get("base_url") if "base_url" in payload else None,
+            username=payload.get("username") if "username" in payload else None,
+            password=str(payload.get("password")) if payload.get("password") else None,
+            user_agent=payload.get("user_agent") if "user_agent" in payload else None,
+            referrer=payload.get("referrer") if "referrer" in payload else None,
             connection_limit=(
                 None if payload.get("connection_limit") in (None, "", 0)
                 else int(payload.get("connection_limit"))
@@ -104,14 +121,86 @@ def update_source(source_id: int):
         )
     except (sources.ProbeError, TypeError, ValueError) as exc:
         return _fail(str(exc))
+
+    queued = sync.enqueue([source_id]) if catalog_changed else []
     return jsonify({
         "ok": True,
         "source": {
-            "id": row["id"], "name": row["name"],
+            "id": row["id"], "name": row["name"], "kind": row["kind"],
+            "base_url": row["base_url"], "username": row["username"],
+            "m3u_url": row["m3u_url"],
             "connection_limit": row["connection_limit"],
             "max_connections": row["max_connections"],
         },
+        "catalog_changed": catalog_changed,
+        "sync_queued": bool(queued),
     })
+
+
+@bp.post("/sources/<int:source_id>/probe")
+def probe_source(source_id: int):
+    """Test an edit form without saving it.
+
+    A blank password reuses the stored one only while the submitted server and
+    username match the stored values. If either changed, the password must be
+    entered again; otherwise this endpoint would be a way to send the stored
+    password to a caller-supplied server.
+    """
+    conn = _conn()
+    row = db.get_one(conn, "SELECT * FROM sources WHERE id = ?", (source_id,))
+    if row is None:
+        return _fail("That playlist no longer exists.", 404)
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _fail("Expected a JSON object.")
+    headers = sources.request_headers(row)
+    user_agent = (
+        payload.get("user_agent") if "user_agent" in payload
+        else headers.get("user_agent", "")
+    )
+    referrer = (
+        payload.get("referrer") if "referrer" in payload
+        else headers.get("referrer", "")
+    )
+
+    if row["kind"] == "xtream":
+        proposed_base = payload.get("base_url") or row["base_url"] or ""
+        proposed_user = payload.get("username") or row["username"] or ""
+        supplied_password = str(payload.get("password") or "")
+        if not supplied_password and (
+            proposed_base != (row["base_url"] or "")
+            or proposed_user != (row["username"] or "")
+        ):
+            return _fail(
+                "Enter the password again when testing a different server URL "
+                "or username."
+            )
+
+    try:
+        if row["kind"] == "xtream":
+            result = sources.probe(
+                "xtream",
+                name=payload.get("name", row["name"]),
+                base_url=proposed_base,
+                username=proposed_user,
+                password=supplied_password or row["password"] or "",
+                user_agent=user_agent or "",
+                referrer=referrer or "",
+                headers=headers.get("headers"),
+            )
+        else:
+            result = sources.probe(
+                "m3u",
+                name=payload.get("name", row["name"]),
+                m3u_url=payload.get("m3u_url") or row["m3u_url"] or "",
+                user_agent=user_agent or "",
+                referrer=referrer or "",
+            )
+    except sources.ProbeError as exc:
+        return _fail(str(exc))
+    except Exception as exc:  # noqa: BLE001 - surfaced to the user verbatim
+        return _fail(f"Unexpected error while testing: {exc}")
+    return jsonify({"ok": True, "result": result})
 
 
 @bp.post("/sources/<int:source_id>/sync")

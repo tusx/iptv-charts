@@ -682,6 +682,38 @@ def main() -> int:
         sync.enqueue([source_id])
         result = integration.wait_for_sync()
         check("catalog synced without error", result["jobs"][source_id]["state"], "done")
+
+        section("playlist edit page and credential safety")
+        response = client.get(f"/playlists/{source_id}/edit")
+        check("edit page status", response.status_code, 200)
+        edit_body = response.get_data(as_text=True)
+        check_true("edit page shows the account", "gooduser" in edit_body)
+        check_true("edit page does not render the password", 'value="pass"' not in edit_body)
+        response = client.post(f"/api/sources/{source_id}/probe", json={
+            "base_url": base, "username": "someone-else", "password": "",
+        })
+        check("blank password with a changed username is refused",
+              response.status_code, 400)
+        response = client.patch(f"/api/sources/{source_id}", json={
+            "base_url": base, "username": "someone-else", "password": "",
+        })
+        check("blank password with a changed account is refused",
+              response.status_code, 400)
+        response = client.patch(f"/api/sources/{source_id}", json={
+            "name": "Manager fixture renamed",
+        })
+        check("name-only edit accepted", response.status_code, 200)
+        check("name-only edit does not resync",
+              response.get_json()["catalog_changed"], False)
+        response = client.patch(f"/api/sources/{source_id}", json={
+            "kind": "m3u",
+        })
+        check("playlist type cannot be changed in place", response.status_code, 409)
+        response = client.patch(f"/api/sources/{source_id}", json={
+            "name": "Manager fixture",
+        })
+        check("fixture name restored", response.status_code, 200)
+
         conn = db.connect()
         matrix = conn.execute(
             "SELECT COUNT(*) AS n FROM items WHERE source_id = ? AND kind = 'vod' "
@@ -1190,7 +1222,10 @@ def main() -> int:
         # -------------------------------------------------------------- pages/api
         section("rendered pages and settings APIs")
         for path, needle in (
-            ("/", "Save limit"),
+            ("/", "IPTV"),
+            ("/", "Movies"),
+            ("/", "Series"),
+            ("/playlists", "Save limit"),
             ("/movies", "The Matrix"),
             (f"/movies/{movie['id']}", "The Matrix"),
             (f"/series/{series['id']}", "The Beginning"),

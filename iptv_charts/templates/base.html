@@ -8,7 +8,7 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="{{ url_for('sources_list') }}">
+    <a class="brand" href="{{ url_for('home') }}">
       <span class="brand-mark" aria-hidden="true"></span>
       <span class="brand-name">{{ app_name }}</span>
     </a>
@@ -16,6 +16,10 @@
     <nav class="topbar-nav">
       {% block nav %}
         {% set endpoint = request.endpoint or '' %}
+        <a href="{{ url_for('home') }}"
+           {% if endpoint == 'home' %}class="active"{% endif %}>Home</a>
+        <a href="{{ url_for('sources_list') }}"
+           {% if endpoint in ('sources_list', 'browse', 'edit_source') %}class="active"{% endif %}>Playlists</a>
         <a href="{{ url_for('manager.movies') }}"
            {% if endpoint in ('manager.movies', 'manager.movie_detail') %}class="active"{% endif %}>Movies</a>
         <a href="{{ url_for('manager.series') }}"

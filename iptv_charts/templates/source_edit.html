@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ source.name }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="crumb"><a href="{{ url_for('sources_list') }}">Playlists</a> / Edit</p>
+    <h1>Edit {{ source.name }}</h1>
+    <p class="subtitle">
+      Change the provider details, HTTP headers or connection limit. Saving
+      provider details queues a fresh sync.
+    </p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-ghost" href="{{ url_for('sources_list') }}">Back to playlists</a>
+  </div>
+</section>
+
+<div class="edit-layout">
+  <section class="settings-card edit-card">
+    <form id="source-edit-form" class="stack-form" autocomplete="off"
+          data-source-id="{{ source.id }}" data-kind="{{ source.kind }}">
+      <div class="edit-section">
+        <h2>Playlist</h2>
+        <div class="field-row">
+          <label class="field">
+            <span>Name</span>
+            <input type="text" id="source-name" maxlength="120"
+                   value="{{ source.name }}" required>
+          </label>
+          <div class="field">
+            <span>Type</span>
+            <div class="static-field">
+              <span class="tag">{{ source.kind }}</span>
+              <span class="muted small">
+                The type cannot be changed here. Remove and add a new playlist
+                to switch between M3U and Xtream.
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {% if source.kind == 'xtream' %}
+        <div class="edit-section">
+          <h2>Xtream account</h2>
+          <div class="field-row">
+            <label class="field">
+              <span>Server URL</span>
+              <input type="text" id="source-base-url" spellcheck="false"
+                     value="{{ source.base_url or '' }}"
+                     placeholder="http://example.com:8080" required>
+            </label>
+            <label class="field">
+              <span>Username</span>
+              <input type="text" id="source-username" spellcheck="false"
+                     value="{{ source.username or '' }}" required>
+            </label>
+          </div>
+          <label class="field">
+            <span>Password</span>
+            <input type="password" id="source-password" autocomplete="new-password"
+                   placeholder="Leave blank to keep the current password">
+            <p class="hint">
+              The current password is never sent to the page. Leave this blank
+              to keep it, unless you change the server URL or username — then
+              enter the password again so it cannot be sent to a different
+              server.
+            </p>
+          </label>
+        </div>
+      {% else %}
+        <div class="edit-section">
+          <h2>M3U playlist</h2>
+          <label class="field">
+            <span>Playlist URL</span>
+            <input type="text" id="source-m3u-url" spellcheck="false"
+                   value="{{ source.m3u_url or '' }}"
+                   placeholder="http://example.com/get.php?username=…&amp;type=m3u_plus"
+                   required>
+          </label>
+        </div>
+      {% endif %}
+
+      <div class="edit-section">
+        <h2>HTTP headers</h2>
+        <p class="hint">Only needed when the provider requires a specific player identity.</p>
+        <div class="field-row">
+          <label class="field">
+            <span>User-Agent</span>
+            <input type="text" id="source-user-agent" spellcheck="false"
+                   value="{{ headers.user_agent or '' }}"
+                   placeholder="Provider default">
+          </label>
+          <label class="field">
+            <span>Referrer</span>
+            <input type="text" id="source-referrer" spellcheck="false"
+                   value="{{ headers.referrer or '' }}"
+                   placeholder="Only if the provider requires one">
+          </label>
+        </div>
+      </div>
+
+      <div class="edit-section">
+        <h2>Connections</h2>
+        <div class="field-row">
+          <label class="field">
+            <span>Connection limit</span>
+            <input type="number" id="source-connection-limit" min="1" max="32"
+                   step="1" value="{{ source.connection_limit or '' }}"
+                   placeholder="{{ source.max_connections or 1 }}">
+            <p class="hint">
+              Empty means auto: the provider-reported limit, or 1 when none is
+              reported. This limit is enforced across syncs, probes and
+              downloads. The provider currently reports
+              {{ source.max_connections or 'no limit' }}.
+            </p>
+          </label>
+        </div>
+      </div>
+
+      <div class="edit-section">
+        <h2>Catalog</h2>
+        <dl class="stat-row compact">
+          <div><dt>Live</dt><dd>{{ '{:,}'.format(counts.live or 0) }}</dd></div>
+          <div><dt>VOD</dt><dd>{{ '{:,}'.format(counts.vod or 0) }}</dd></div>
+          <div><dt>Series</dt><dd>{{ '{:,}'.format(counts.series or 0) }}</dd></div>
+          <div><dt>Items</dt><dd>{{ '{:,}'.format(counts.all or 0) }}</dd></div>
+        </dl>
+        <p class="hint">
+          Last full sync: {{ format_age(source.last_synced_at) }}.
+          Changing the URL, credentials or headers queues a sync and marks the
+          existing catalog as stale until that sync completes.
+        </p>
+      </div>
+
+      <div class="edit-actions">
+        <button class="btn btn-primary" type="submit" id="source-save">Save changes</button>
+        <button class="btn" type="button" id="source-test">Test connection</button>
+        <a class="btn btn-ghost" href="{{ url_for('sources_list') }}">Cancel</a>
+        <span class="hint" id="source-edit-status" role="status"></span>
+      </div>
+    </form>
+    <div class="probe-result" id="source-test-result" hidden></div>
+  </section>
+
+  <aside class="edit-side">
+    <section class="settings-card">
+      <h2>Remove playlist</h2>
+      <p class="hint">
+        This deletes the playlist and its downloaded catalog from the app. The
+        media files already imported into Movies/ and Series/ are not deleted.
+      </p>
+      <button class="btn btn-danger" type="button" id="source-remove"
+              data-source-id="{{ source.id }}" data-source-name="{{ source.name }}">
+        Remove {{ source.name }}
+      </button>
+    </section>
+    <section class="settings-card">
+      <h2>Status</h2>
+      <dl class="meta-list">
+        <div><dt>Sync</dt><dd>{{ source.sync_status or 'never' }}</dd></div>
+        <div><dt>Last updated</dt><dd>{{ format_age(source.last_synced_at) }}</dd></div>
+        {% if source.kind == 'xtream' %}
+          <div><dt>Account</dt><dd>{{ source.account_status or 'unknown' }}</dd></div>
+          <div><dt>Expires</dt><dd>{{ format_expiry(source.exp_date, source.exp_unknown).label }}</dd></div>
+        {% endif %}
+        <div><dt>Connections in use</dt><dd>{{ connection_counts.get(source.id, 0) }}</dd></div>
+      </dl>
+    </section>
+  </aside>
+</div>
+
+<script>
+  window.SOURCE_ID = {{ source.id }};
+  window.SOURCE_KIND = {{ source.kind|tojson }};
+  window.SOURCE_NAME = {{ source.name|tojson }};
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/source_edit.js') }}"></script>
+{% endblock %}

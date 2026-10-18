@@ -30,10 +30,41 @@ class ProbeError(RuntimeError):
     """Raised when credentials or a URL cannot be used."""
 
 
-def probe_xtream(base_url: str, username: str, password: str) -> dict:
+def normalise_playlist_url(value: str, *, label: str = "Playlist URL") -> str:
+    """Require an http(s) URL and add http:// when the scheme was omitted."""
+    from urllib.parse import urlsplit
+
+    text = str(value or "").strip()
+    if not text:
+        raise ProbeError(f"{label} is required.")
+    if "://" not in text:
+        text = "http://" + text
+    parsed = urlsplit(text)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ProbeError(f"{label} must use http:// or https://.")
+    if not parsed.hostname:
+        raise ProbeError(f"{label} does not contain a server host.")
+    return text
+
+
+def _optional_header(value: str | None, label: str) -> str:
+    text = str(value or "").strip()
+    if len(text) > 4096 or any(char in text for char in "\r\n\x00"):
+        raise ProbeError(f"{label} contains characters that are not allowed in a header.")
+    return text
+
+
+def probe_xtream(base_url: str, username: str, password: str, *,
+                 user_agent: str | None = None, referrer: str | None = None,
+                 headers: dict | None = None) -> dict:
     """Sign in and report what the account looks like."""
     try:
-        client = xtream.XtreamClient(base_url, username, password)
+        client = xtream.XtreamClient(
+            base_url, username, password,
+            user_agent=user_agent,
+            referrer=referrer,
+            headers=headers,
+        )
     except xtream.XtreamError as exc:
         raise ProbeError(str(exc)) from exc
 
@@ -103,11 +134,7 @@ def _account_warnings(info: xtream.AccountInfo) -> list[str]:
 def probe_m3u(url: str, user_agent: str | None = None,
               referrer: str | None = None) -> dict:
     """Fetch the head of a playlist and report what it appears to be."""
-    url = (url or "").strip()
-    if not url:
-        raise ProbeError("Enter a playlist URL.")
-    if "://" not in url:
-        url = "http://" + url
+    url = normalise_playlist_url(url, label="Playlist URL")
 
     # Ask for the bytes as they are. With gzip in play, `iter_content` hands
     # back decompressed data while Content-Length counts compressed bytes, so
@@ -209,9 +236,14 @@ def probe_m3u(url: str, user_agent: str | None = None,
 
 def probe(kind: str, *, name: str = "", m3u_url: str = "", base_url: str = "",
           username: str = "", password: str = "", user_agent: str = "",
-          referrer: str = "") -> dict:
+          referrer: str = "", headers: dict | None = None) -> dict:
     if kind == "xtream":
-        result = probe_xtream(base_url, username, password)
+        result = probe_xtream(
+            base_url, username, password,
+            user_agent=user_agent or None,
+            referrer=referrer or None,
+            headers=headers if isinstance(headers, dict) else None,
+        )
     elif kind == "m3u":
         result = probe_m3u(m3u_url, user_agent or None, referrer or None)
     else:
@@ -246,23 +278,22 @@ def create(conn: sqlite3.Connection, kind: str, name: str, *, m3u_url: str = "",
 
     headers = {}
     if user_agent:
-        headers["user_agent"] = user_agent
+        headers["user_agent"] = _optional_header(user_agent, "User-Agent")
     if referrer:
-        headers["referrer"] = referrer
+        headers["referrer"] = _optional_header(referrer, "Referrer")
 
     normalised_base = None
     play_url = None
 
     if kind == "xtream":
-        normalised_base = xtream.normalise_base_url(base_url)
+        try:
+            normalised_base = xtream.normalise_base_url(base_url)
+        except xtream.XtreamError as exc:
+            raise ProbeError(str(exc)) from exc
         if not username.strip() or not password.strip():
             raise ProbeError("Username and password are required.")
     else:
-        play_url = (m3u_url or "").strip()
-        if not play_url:
-            raise ProbeError("A playlist URL is required.")
-        if "://" not in play_url:
-            play_url = "http://" + play_url
+        play_url = normalise_playlist_url(m3u_url)
 
     cursor = conn.execute(
         """
@@ -287,22 +318,108 @@ def create(conn: sqlite3.Connection, kind: str, name: str, *, m3u_url: str = "",
 
 
 def update(conn: sqlite3.Connection, source_id: int, *,
-           name: str | None = None, connection_limit: int | None | object = ...) -> dict:
-    """Update the settings that are safe to edit without re-probing.
+           name: str | None = None,
+           m3u_url: str | None = None,
+           base_url: str | None = None,
+           username: str | None = None,
+           password: str | None = None,
+           user_agent: str | None = None,
+           referrer: str | None = None,
+           connection_limit: int | None | object = ...) -> tuple[dict, bool]:
+    """Update a playlist in place.
 
-    Credentials are deliberately not changed here: editing them silently
-    would leave the stored catalog belonging to the old account until the next
-    sync. Removing and adding is clearer.
+    The playlist kind is immutable: M3U and Xtream have different identity
+    models, so changing between them is a remove-and-add operation rather than
+    an edit. Everything that identifies the provider account can change.
+
+    Blank ``password`` means "keep the stored password". The edit page never
+    renders the password, so sending an empty field must not wipe it.
+
+    Returns ``(row, catalog_changed)``. When identity/credentials changed, the
+    caller must queue a sync; existing catalog rows are left in place until
+    that sync finishes, because the sync replaces them transactionally.
     """
     row = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
     if row is None:
         raise ProbeError("That playlist no longer exists.")
+    kind = row["kind"]
     fields: list[str] = []
     params: list = []
+    catalog_changed = False
+
     if name is not None:
         cleaned = name.strip()[:120] or "Untitled playlist"
-        fields.append("name = ?")
-        params.append(cleaned)
+        if cleaned != row["name"]:
+            fields.append("name = ?")
+            params.append(cleaned)
+
+    if kind == "xtream":
+        new_base = row["base_url"]
+        new_username = row["username"] or ""
+        if base_url is not None:
+            try:
+                normalised = xtream.normalise_base_url(base_url)
+            except xtream.XtreamError as exc:
+                raise ProbeError(str(exc)) from exc
+            if normalised != row["base_url"]:
+                fields.append("base_url = ?")
+                params.append(normalised)
+                new_base = normalised
+                catalog_changed = True
+        if username is not None:
+            cleaned = username.strip()
+            if not cleaned:
+                raise ProbeError("Username is required.")
+            if cleaned != (row["username"] or ""):
+                fields.append("username = ?")
+                params.append(cleaned)
+                new_username = cleaned
+                catalog_changed = True
+
+        new_password = password.strip() if password is not None else ""
+        if new_password and new_password != (row["password"] or ""):
+            fields.append("password = ?")
+            params.append(new_password)
+            catalog_changed = True
+        if (
+            new_base != row["base_url"]
+            or new_username != (row["username"] or "")
+        ) and not new_password:
+            raise ProbeError(
+                "Enter the password again when changing the server URL or username."
+            )
+        if not new_username or not (new_password or row["password"]):
+            raise ProbeError("Username and password are required.")
+    else:
+        if m3u_url is not None:
+            play_url = normalise_playlist_url(m3u_url)
+            if play_url != (row["m3u_url"] or ""):
+                fields.append("m3u_url = ?")
+                params.append(play_url)
+                catalog_changed = True
+
+    headers = request_headers(row)
+    headers_changed = False
+    if user_agent is not None:
+        cleaned = _optional_header(user_agent, "User-Agent")
+        if cleaned != (headers.get("user_agent") or ""):
+            headers_changed = True
+        if cleaned:
+            headers["user_agent"] = cleaned
+        else:
+            headers.pop("user_agent", None)
+    if referrer is not None:
+        cleaned = _optional_header(referrer, "Referrer")
+        if cleaned != (headers.get("referrer") or ""):
+            headers_changed = True
+        if cleaned:
+            headers["referrer"] = cleaned
+        else:
+            headers.pop("referrer", None)
+    if headers_changed:
+        fields.append("request_headers = ?")
+        params.append(json.dumps(headers) if headers else None)
+
     if connection_limit is not ...:
         if connection_limit is None:
             fields.append("connection_limit = NULL")
@@ -315,11 +432,60 @@ def update(conn: sqlite3.Connection, source_id: int, *,
                 raise ProbeError("The connection limit must be at least 1.")
             fields.append("connection_limit = ?")
             params.append(min(limit, 32))
+
+    if catalog_changed:
+        active = conn.execute(
+            "SELECT COUNT(*) AS n FROM downloads WHERE source_id = ? "
+            "AND status IN ('downloading', 'importing')",
+            (int(source_id),),
+        ).fetchone()["n"]
+        if active:
+            raise ProbeError(
+                "A download from this playlist is running. Cancel it before "
+                "changing the server, username or password."
+            )
+        # Queued rows would resolve against the new account and fetch the
+        # wrong stream, so retire them with a clear reason.
+        conn.execute(
+            "UPDATE downloads SET status = 'cancelled', finished_at = ?, "
+            "error = 'Playlist credentials changed' "
+            "WHERE source_id = ? AND status = 'queued'",
+            (int(time.time()), int(source_id)),
+        )
+
     if fields:
         params.append(int(source_id))
         conn.execute(f"UPDATE sources SET {', '.join(fields)} WHERE id = ?", params)
+        if catalog_changed:
+            # The old catalog belongs to a different account/server. Stream
+            # URLs are rebuilt from the current credentials at play time, so
+            # keeping old remote ids under new credentials is worse than an
+            # empty catalog until the sync finishes.
+            conn.execute("DELETE FROM items WHERE source_id = ?", (int(source_id),))
+            conn.execute("DELETE FROM categories WHERE source_id = ?", (int(source_id),))
+            conn.execute(
+                "DELETE FROM provider_series_cache WHERE source_id = ?", (int(source_id),)
+            )
+            conn.execute(
+                "DELETE FROM stream_probes WHERE source_id = ?", (int(source_id),)
+            )
+            conn.execute(
+                "UPDATE sources SET user_info_json = NULL, server_info_json = NULL, "
+                "account_status = NULL, is_trial = NULL, exp_date = NULL, "
+                "exp_unknown = 0, active_connections = NULL, max_connections = NULL, "
+                "allowed_formats = NULL, server_timezone = NULL, "
+                "server_protocol = NULL, server_host = NULL, server_port = NULL, "
+                "last_synced_at = NULL, last_sync_seconds = NULL, "
+                "sync_status = 'never', "
+                "sync_message = 'Playlist details changed; sync queued.' "
+                "WHERE id = ?",
+                (int(source_id),),
+            )
         conn.commit()
-    return dict(conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone())
+    current = dict(conn.execute(
+        "SELECT * FROM sources WHERE id = ?", (source_id,)
+    ).fetchone())
+    return current, catalog_changed
 
 
 def delete(conn: sqlite3.Connection, source_id: int) -> bool:

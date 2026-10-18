@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+{% block title %}Overview · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="crumb">Overview</p>
+    <h1>Your library at a glance</h1>
+    <p class="subtitle">
+      {{ playlist_count }} playlist{{ '' if playlist_count == 1 else 's' }} ·
+      {{ '{:,}'.format(catalog_items) }} catalog items ·
+      {{ movie_counts.total }} movies · {{ series_counts.total }} series
+    </p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-ghost" href="{{ url_for('manager.activity') }}">Activity</a>
+    <a class="btn btn-ghost" href="{{ url_for('settings') }}">Settings</a>
+  </div>
+</section>
+
+<div class="home-grid">
+  <section class="home-card home-card-iptv">
+    <header class="home-card-head">
+      <div>
+        <span class="home-eyebrow">Source</span>
+        <h2>IPTV</h2>
+        <p class="muted">
+          {{ playlist_count }} playlist{{ '' if playlist_count == 1 else 's' }} ·
+          {{ '{:,}'.format(catalog_items) }} items
+        </p>
+      </div>
+      <span class="home-icon" aria-hidden="true">▤</span>
+    </header>
+
+    <div class="home-card-actions">
+      <button class="btn btn-primary btn-sm" type="button" id="add-open-btn">Add playlist</button>
+      {% if sources %}
+        <button class="btn btn-sm" type="button" id="sync-all-btn">Update all</button>
+        <a class="btn btn-sm btn-ghost" href="{{ url_for('sources_list') }}">Manage</a>
+      {% endif %}
+    </div>
+
+    <div class="batch-progress" id="batch-progress" hidden>
+      <div class="batch-head">
+        <span id="batch-label">Updating…</span>
+        <button class="btn btn-sm btn-ghost" id="cancel-all-btn">Cancel</button>
+      </div>
+      <div class="progress"><div class="progress-bar" id="batch-bar"></div></div>
+    </div>
+
+    {% if sources %}
+      <div class="home-playlist-list">
+        {% for source in sources %}
+          {% set job = sync_state.jobs.get(source.id) %}
+          {% set effective_limit = source.connection_limit or source.max_connections or 1 %}
+          <article class="home-playlist source-card" data-source-id="{{ source.id }}"
+                   data-source-name="{{ source.name }}" data-source-row>
+            <div class="home-playlist-main">
+              <div class="home-playlist-title">
+                <strong>{{ source.name }}</strong>
+                <span class="tag">{{ source.kind }}</span>
+                {% if job and job.state in ('queued', 'running') %}
+                  <span class="badge badge-downloading home-sync-badge">Updating</span>
+                {% endif %}
+              </div>
+              <span class="muted small">
+                {{ source.live_count }} live · {{ source.vod_count }} VOD ·
+                {{ source.series_count }} series ·
+                {{ connection_counts.get(source.id, 0) }}/{{ effective_limit }} connection{{ '' if effective_limit == 1 else 's' }}
+              </span>
+              <span class="muted small home-sync-state">
+                {% if job and job.state in ('queued', 'running') %}{{ job.message or 'Syncing…' }}
+                {% elif job and job.state == 'error' %}Last update failed
+                {% else %}Updated {{ format_age(source.last_synced_at) }}{% endif %}
+              </span>
+            </div>
+            <div class="sync-slot home-sync-slot" data-source-id="{{ source.id }}"
+                 {% if not job or job.state not in ('queued', 'running') %}hidden{% endif %}>
+              <div class="sync-line">
+                <span class="sync-phase js-sync-phase">{{ job.detail or job.message if job else '' }}</span>
+                <span class="sync-count js-sync-count"></span>
+              </div>
+              <div class="progress {% if job and job.fraction is none %}progress-indeterminate{% endif %}">
+                <div class="progress-bar js-sync-bar"
+                     style="width: {{ ((job.fraction or 0) * 100) | round(1) if job else 0 }}%"></div>
+              </div>
+            </div>
+            <p class="note note-bad js-error" hidden></p>
+            <div class="home-playlist-actions">
+              <a class="btn btn-sm btn-ghost" href="{{ url_for('browse', source_id=source.id) }}"
+                 {% if not (source.live_count + source.vod_count + source.series_count) %}
+                   aria-disabled="true" title="Nothing imported yet — run an update first"
+                 {% else %}title="Search and browse this playlist"{% endif %}>Browse</a>
+              <a class="btn btn-sm btn-ghost" href="{{ url_for('edit_source', source_id=source.id) }}">Edit</a>
+              <button class="btn btn-sm btn-ghost js-sync" data-source-id="{{ source.id }}"
+                      {% if job and job.state in ('queued', 'running') %}disabled{% endif %}>Update</button>
+              <button class="btn btn-sm btn-ghost js-cancel" data-source-id="{{ source.id }}"
+                      {% if not job or job.state not in ('queued', 'running') %}hidden{% endif %}>Cancel</button>
+              <button class="btn btn-sm btn-ghost btn-danger js-delete"
+                      data-source-id="{{ source.id }}" data-source-name="{{ source.name }}"
+                      title="Remove this playlist">Remove</button>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="home-empty">
+        <p><strong>No playlists yet</strong></p>
+        <p class="muted">Add an M3U URL or Xtream account to build your catalog.</p>
+        <button class="btn btn-primary btn-sm" type="button" id="add-open-btn-empty">Add your first playlist</button>
+      </div>
+    {% endif %}
+  </section>
+
+  <section class="home-card home-card-movies">
+    <header class="home-card-head">
+      <div>
+        <span class="home-eyebrow">Library</span>
+        <h2>Movies</h2>
+        <p class="muted">
+          {{ movie_counts.downloaded }} downloaded ·
+          {{ movie_counts.missing }} missing
+        </p>
+      </div>
+      <span class="home-icon" aria-hidden="true">▶</span>
+    </header>
+
+    <dl class="home-stats">
+      <div><dt>In library</dt><dd>{{ movie_counts.total }}</dd></div>
+      <div><dt>Monitored</dt><dd>{{ movie_counts.monitored }}</dd></div>
+      <div><dt>Downloaded</dt><dd>{{ movie_counts.downloaded }}</dd></div>
+    </dl>
+
+    <div class="home-card-actions">
+      <a class="btn btn-primary btn-sm" href="{{ url_for('manager.movies') }}">Open movies</a>
+      {% if tmdb_configured %}
+        <a class="btn btn-sm" href="{{ url_for('manager.movies') }}?add=1">Add movie</a>
+      {% else %}
+        <a class="btn btn-sm" href="{{ url_for('settings') }}#metadata-settings">Set up TMDB</a>
+      {% endif %}
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.calendar_view') }}">Calendar</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.wanted') }}">Wanted</a>
+      <button class="btn btn-sm btn-ghost" type="button" data-search-missing>Search missing</button>
+    </div>
+    {% if not tmdb_configured %}
+      <p class="hint">Add a TMDB key in Settings to search for movies.</p>
+    {% endif %}
+  </section>
+
+  <section class="home-card home-card-series">
+    <header class="home-card-head">
+      <div>
+        <span class="home-eyebrow">Library</span>
+        <h2>Series</h2>
+        <p class="muted">
+          {{ series_counts.downloaded_episodes }} episodes downloaded ·
+          {{ series_counts.missing_episodes }} missing
+        </p>
+      </div>
+      <span class="home-icon" aria-hidden="true">☰</span>
+    </header>
+
+    <dl class="home-stats">
+      <div><dt>Series</dt><dd>{{ series_counts.total }}</dd></div>
+      <div><dt>Episodes</dt><dd>{{ series_counts.episodes }}</dd></div>
+      <div><dt>Downloaded</dt><dd>{{ series_counts.downloaded_episodes }}</dd></div>
+    </dl>
+
+    <div class="home-card-actions">
+      <a class="btn btn-primary btn-sm" href="{{ url_for('manager.series') }}">Open series</a>
+      {% if tmdb_configured %}
+        <a class="btn btn-sm" href="{{ url_for('manager.series') }}?add=1">Add series</a>
+      {% else %}
+        <a class="btn btn-sm" href="{{ url_for('settings') }}#metadata-settings">Set up TMDB</a>
+      {% endif %}
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.calendar_view') }}">Calendar</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.wanted') }}">Wanted</a>
+      <button class="btn btn-sm btn-ghost" type="button" data-search-missing>Search missing</button>
+    </div>
+    {% if not tmdb_configured %}
+      <p class="hint">Add a TMDB key in Settings to search for series.</p>
+    {% endif %}
+  </section>
+</div>
+
+{% include "_add_playlist_dialog.html" %}
+{% endblock %}
+
+{% block footer_extra %}
+  <span class="dot" aria-hidden="true">·</span>
+  <span id="global-sync-status" class="muted"></span>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+{% endblock %}

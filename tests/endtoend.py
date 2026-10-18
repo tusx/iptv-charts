@@ -62,8 +62,15 @@ def main() -> int:
         section("initial pages")
         response = client.get("/")
         check("GET / returns 200", response.status_code, 200)
-        check_true("empty state rendered", b"No playlists yet" in response.data)
-        check_true("add button present", b'id="add-open-btn"' in response.data)
+        check_true("home shows the IPTV card", b'id="iptv-card"' in response.data
+                   or b"home-card-iptv" in response.data)
+        check_true("home shows the Movies card", b"home-card-movies" in response.data)
+        check_true("home shows the Series card", b"home-card-series" in response.data)
+
+        response = client.get("/playlists")
+        check("GET /playlists returns 200", response.status_code, 200)
+        check_true("playlist empty state rendered", b"No playlists yet" in response.data)
+        check_true("playlist add button present", b'id="add-open-btn"' in response.data)
 
         response = client.get("/api/health")
         check("health returns 200", response.status_code, 200)
@@ -112,8 +119,12 @@ def main() -> int:
         # A reload mid-sync must already show the card with its progress bar.
         response = client.get("/")
         check("home page renders with a source", response.status_code, 200)
-        check_true("source name shown", b"E2E playlist" in response.data)
-        check_true("progress slot present", b"sync-slot" in response.data)
+        check_true("source name shown on home", b"E2E playlist" in response.data)
+        check_true("home progress slot present", b"sync-slot" in response.data)
+
+        response = client.get("/playlists")
+        check("playlists page renders with a source", response.status_code, 200)
+        check_true("source name shown on playlists", b"E2E playlist" in response.data)
 
         # ---------------------------------------------------------------- sync
         section("sync completes")
@@ -131,8 +142,8 @@ def main() -> int:
 
         # ------------------------------------------------------- rendered page
         section("rendered page after sync")
-        response = client.get("/")
-        check("home page still 200", response.status_code, 200)
+        response = client.get("/playlists")
+        check("playlists page still 200", response.status_code, 200)
         body = response.data
         # Rendered with a thousands separator, so compare against the
         # formatted form rather than the raw integer.
@@ -141,6 +152,47 @@ def main() -> int:
         check_true("update button present", b'class="btn btn-ghost js-sync"' in body)
         check_true("remove button present", b"js-delete" in body)
         check_true("stale reminder markup present", b"js-stale" in body)
+
+        response = client.get("/")
+        home_body = response.data
+        check("home page after sync", response.status_code, 200)
+        check_true("home movie card renders", b"home-card-movies" in home_body)
+        check_true("home series card renders", b"home-card-series" in home_body)
+        check_true("home links to the movie library", b"/movies" in home_body)
+        check_true("home links to the series library", b"/series" in home_body)
+
+        # ----------------------------------------------------------- edit page
+        section("edit playlist page")
+        response = client.get(f"/playlists/{source_id}/edit")
+        check("edit page returns 200", response.status_code, 200)
+        edit_body = response.data
+        check_true("edit page shows the playlist name", b"E2E playlist" in edit_body)
+        check_true("edit page shows the M3U URL", b"playlist.m3u" in edit_body)
+        check_true("edit page has a save button", b'id="source-save"' in edit_body)
+        check_true("edit page never renders a password value", b'id="source-password"' not in edit_body)
+
+        response = client.patch(f"/api/sources/{source_id}", json={
+            "name": "E2E playlist renamed",
+            "connection_limit": 2,
+            "user_agent": "E2E-Agent",
+        })
+        check("playlist edit accepted", response.status_code, 200)
+        check("playlist name updated", response.get_json()["source"]["name"],
+              "E2E playlist renamed")
+        check("playlist limit updated", response.get_json()["source"]["connection_limit"], 2)
+        check("header-only edit does not re-sync", response.get_json()["catalog_changed"], False)
+
+        response = client.post(f"/api/sources/{source_id}/probe", json={
+            "m3u_url": f"{base_url}/playlist.m3u",
+            "user_agent": "E2E-Agent",
+        })
+        check("edit-page connection test accepted", response.status_code, 200)
+        check("edit-page connection test result", response.get_json()["ok"], True)
+
+        response = client.patch(f"/api/sources/{source_id}", json={
+            "connection_limit": None,
+        })
+        check("playlist limit restored to auto", response.status_code, 200)
 
         # --------------------------------------------------------------- browse
         section("browse page")
@@ -330,6 +382,67 @@ def main() -> int:
         })
         body = client.get("/settings").data
         check_true("the command was cleared", b'id="player-command"' in body)
+        check_true("one save button rendered", b'id="settings-save"' in body)
+        check_true("per-section save buttons removed", b'id="metadata-save"' not in body)
+
+        section("unified settings save")
+        response = client.post("/api/settings/save", json={
+            "player": {"preferred_player": "auto", "player_command": ""},
+            "metadata": {"language": "es-ES"},
+            "media": {
+                "movie_folder_template": "{title} ({year})",
+                "movie_file_template": "{title} ({year}) [{resolution}]",
+                "series_folder_template": "{title} ({year})",
+                "season_folder_template": "Season {season:00}",
+                "episode_file_template":
+                    "{series} - S{season:00}E{episode:00} - {episode_title} [{resolution}]",
+            },
+            "downloads": {
+                "concurrency": 1, "max_attempts": 3,
+                "probe_cache_hours": 24, "probe_timeout_seconds": 30,
+                "probe_max_candidates": 6, "probe_search_budget": 60,
+            },
+            "scheduler": {
+                "search_interval_hours": 6, "refresh_interval_hours": 168,
+                "catalog_refresh_hours": 24,
+            },
+        })
+        payload = response.get_json()
+        check("unified save succeeds", response.status_code, 200)
+        check("unified save returns the language", payload["metadata"]["language"], "es-ES")
+        check_true("unified save returns a media preview",
+                   "movie_file" in payload["media"]["preview"])
+        check_true("unified save returns the resolved player",
+                   "player" in payload)
+
+        response = client.post("/api/settings/save", json={
+            "metadata": {"language": "fr-FR"},
+            "media": {"movie_file_template": "{title}/{year}"},
+        })
+        check("invalid section rejects the whole save", response.status_code, 400)
+        check("error names the failing section", response.get_json()["section"], "media")
+        body = client.get("/settings").data
+        check_true("an earlier section was not partially saved",
+                   b'value="es-ES"' in body and b'value="fr-FR"' not in body)
+
+        response = client.post("/api/settings/save", json={
+            "metadata": {"language": "es-ES", "tmdb_api_key": "secret-e2e-key"},
+        })
+        check("metadata key save accepted", response.status_code, 200)
+        check("metadata key reported configured",
+              response.get_json()["metadata"]["tmdb"], True)
+        check_true("saved key is not echoed", b"secret-e2e-key" not in client.get("/settings").data)
+        response = client.post("/api/settings/save", json={
+            "metadata": {"tmdb_clear": True},
+        })
+        check("metadata key cleared", response.status_code, 200)
+        check("metadata clear reported", response.get_json()["metadata"]["tmdb"], False)
+
+        response = client.post("/api/settings/save", data={"language": "fr-FR"})
+        check("unified settings is JSON-only", response.status_code, 400)
+        response = client.post("/api/settings/save", json={"metadata": {"language": "fr-FR"}},
+                               headers={"Origin": "http://evil.example.com"})
+        check("unified settings rejects cross-site writes", response.status_code, 403)
 
         # ------------------------------------------------- bridge compatibility
         # A bridge older than the players.json protocol can still play, so
@@ -384,6 +497,12 @@ def main() -> int:
 
         # -------------------------------------------------------------- guards
         section("request guards")
+        response = client.get("/")
+        check("framing is denied", response.headers.get("X-Frame-Options"), "DENY")
+        check("CSP frame ancestors is denied",
+              "frame-ancestors 'none'" in (response.headers.get("Content-Security-Policy") or ""),
+              True)
+
         response = client.get("/", base_url="http://evil.example.com")
         check("non-loopback Host rejected", response.status_code, 403)
 

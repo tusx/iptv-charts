@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from iptv_charts import (config, connections, db, items, languages,  # noqa: E402
-                         matching, naming, player, probe, quality, streams)
+                         matching, naming, player, probe, quality, sources,
+                         streams)
 from iptv_charts.clients import m3u, xtream  # noqa: E402
 from iptv_charts.errors import SyncCancelled  # noqa: E402
 
@@ -852,6 +853,84 @@ def test_manager_foundations() -> None:
         with connections.acquire(conn, 1, purpose="test", timeout=0.5):
             check("context manager holds the slot", connections.active(1), 1)
         check("context manager releases", connections.active(1), 0)
+        conn.close()
+
+    section("playlist credential changes")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "edit.db"
+        db.init_db(path)
+        conn = db.connect(path)
+        source_id = sources.create(
+            conn, "xtream", "Edit test", base_url="http://old.example",
+            username="user", password="pass", connection_limit=2,
+        )
+        conn.execute(
+            "INSERT INTO categories (source_id, kind, remote_id, name) "
+            "VALUES (?, 'vod', '1', 'Movies')", (source_id,)
+        )
+        category_id = conn.execute("SELECT id FROM categories").fetchone()["id"]
+        conn.execute(
+            "INSERT INTO items (source_id, kind, remote_id, name, category_id) "
+            "VALUES (?, 'vod', '100', 'Old Movie', ?)", (source_id, category_id)
+        )
+        conn.execute(
+            "INSERT INTO provider_series_cache (source_id, remote_id, payload, fetched_at) "
+            "VALUES (?, '900', '[]', 1)", (source_id,)
+        )
+        conn.execute(
+            "INSERT INTO stream_probes (source_id, provider_kind, provider_remote_id, "
+            "episode_stream_id, ok, payload, probed_at) "
+            "VALUES (?, 'vod', '100', '', 1, '{}', 1)", (source_id,)
+        )
+        conn.execute(
+            "INSERT INTO downloads (kind, source_id, provider_kind, provider_remote_id, "
+            "title, status, requested_at) "
+            "VALUES ('movie', ?, 'vod', '100', 'Old Movie', 'queued', 1)",
+            (source_id,)
+        )
+        conn.execute(
+            "UPDATE sources SET account_status = 'Active', max_connections = 4, "
+            "user_info_json = '{}', last_synced_at = 1, sync_status = 'done' "
+            "WHERE id = ?", (source_id,)
+        )
+        conn.commit()
+        check("blank password with changed account is refused",
+              raises(sources.update, conn, source_id,
+                     base_url="http://new.example", username="user",
+                     password="", exc=sources.ProbeError), "raised")
+        row, changed = sources.update(
+            conn, source_id, base_url="http://new.example",
+            username="user2", password="newpass",
+        )
+        check("credential change is flagged", changed, True)
+        check("credential change stores the new base", row["base_url"],
+              "http://new.example")
+        check("credential change clears items",
+              conn.execute("SELECT COUNT(*) AS n FROM items").fetchone()["n"], 0)
+        check("credential change clears categories",
+              conn.execute("SELECT COUNT(*) AS n FROM categories").fetchone()["n"], 0)
+        check("credential change clears provider caches",
+              conn.execute("SELECT COUNT(*) AS n FROM provider_series_cache").fetchone()["n"], 0)
+        check("credential change clears probes",
+              conn.execute("SELECT COUNT(*) AS n FROM stream_probes").fetchone()["n"], 0)
+        check("credential change resets the account snapshot", row["max_connections"], None)
+        check("credential change queues sync state", row["sync_status"], "never")
+        check("credential change cancels queued downloads",
+              conn.execute("SELECT status FROM downloads").fetchone()["status"], "cancelled")
+        conn.execute(
+            "INSERT INTO items (source_id, kind, remote_id, name) "
+            "VALUES (?, 'vod', '101', 'Header Movie')", (source_id,)
+        )
+        conn.commit()
+        row, changed = sources.update(conn, source_id, user_agent="NewAgent")
+        check("header-only change does not clear the catalog", changed, False)
+        check("header-only change keeps items",
+              conn.execute("SELECT COUNT(*) AS n FROM items").fetchone()["n"], 1)
+        check("header-only change stores the header",
+              json.loads(row["request_headers"])["user_agent"], "NewAgent")
+        check("non-http playlist URLs are refused",
+              raises(sources.normalise_playlist_url, "ftp://example/x.m3u",
+                     exc=sources.ProbeError), "raised")
         conn.close()
 
     section("naming and path safety")
