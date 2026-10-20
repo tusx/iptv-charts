@@ -12,6 +12,7 @@ import re
 from typing import Any, Mapping
 
 from . import db, downloader, metadata, naming, player
+from .clients import tmdb as tmdb_client
 
 LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$")
 
@@ -108,10 +109,17 @@ def _collect(conn, payload: Mapping[str, Any]) -> tuple[dict[str, str], dict]:
     tvdb_clear = bool(section.get("tvdb_clear"))
     if tmdb_clear:
         values[metadata.TMDB_KEY] = ""
-    elif "tmdb_api_key" in section:
-        values[metadata.TMDB_KEY] = _secret(
-            section.get("tmdb_api_key"), "TMDB API key", "metadata"
-        )
+        values[metadata.TMDB_LEGACY_KEY] = ""
+    elif "tmdb_read_token" in section or "tmdb_api_key" in section:
+        raw_token = section.get("tmdb_read_token", section.get("tmdb_api_key"))
+        try:
+            token = tmdb_client.validate_read_token(raw_token)
+        except tmdb_client.TMDBKeyError as exc:
+            raise SettingsError(str(exc), "metadata") from exc
+        values[metadata.TMDB_KEY] = token
+        # Do not let an old saved key resurface through the compatibility
+        # fallback after a new token was saved.
+        values[metadata.TMDB_LEGACY_KEY] = ""
     if tvdb_clear:
         values[metadata.TVDB_KEY] = ""
         values[metadata.TVDB_PIN] = ""

@@ -25,7 +25,11 @@ from .clients import tmdb, tvdb
 
 logger = logging.getLogger("iptv_charts.metadata")
 
-TMDB_KEY = "tmdb_api_key"
+#: The current setting name. The old name is still read so an existing JWT
+#: saved by an earlier version keeps working; a v3 API key is rejected by the
+#: TMDB client because the app now uses bearer-token authentication.
+TMDB_KEY = "tmdb_read_token"
+TMDB_LEGACY_KEY = "tmdb_api_key"
 TVDB_KEY = "tvdb_api_key"
 TVDB_PIN = "tvdb_pin"
 LANGUAGE = "metadata_language"
@@ -55,8 +59,20 @@ def language(conn) -> str:
     return _setting(conn, LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE
 
 
+def tmdb_token(conn) -> str:
+    """Return the current token, falling back to the pre-0.5 setting name."""
+    token = _setting(conn, TMDB_KEY)
+    if token:
+        return token
+    return _setting(conn, TMDB_LEGACY_KEY)
+
+
 def has_tmdb(conn) -> bool:
-    return bool(_setting(conn, TMDB_KEY))
+    try:
+        tmdb.validate_read_token(tmdb_token(conn))
+    except tmdb.TMDBKeyError:
+        return False
+    return True
 
 
 def has_tvdb(conn) -> bool:
@@ -64,12 +80,13 @@ def has_tvdb(conn) -> bool:
 
 
 def tmdb_client(conn) -> tmdb.TMDBClient:
-    key = _setting(conn, TMDB_KEY)
-    if not key:
+    token = tmdb_token(conn)
+    if not token:
         raise tmdb.TMDBKeyError(
-            "Add a TMDB API key in Settings to use the movie and series library."
+            "Add a TMDB API Read Access Token in Settings to use the movie "
+            "and series library."
         )
-    return tmdb.TMDBClient(key, language(conn))
+    return tmdb.TMDBClient(token, language(conn))
 
 
 def tvdb_client(conn) -> tvdb.TVDBClient:
@@ -196,7 +213,9 @@ def find_tvdb_id(conn, series_row) -> int | None:
     year = series_row["year"] if "year" in series_row.keys() else None
     try:
         with tvdb_client(conn) as client:
-            results = client.search_series(str(series_row["title"]))
+            results = client.search_series(
+                str(series_row["title"]), year=int(year) if year else None
+            )
     except tvdb.TVDBError as exc:
         logger.warning("TVDB search failed: %s", exc)
         return None
@@ -345,6 +364,7 @@ __all__ = [
     "LANGUAGE",
     "MetadataError",
     "TMDB_KEY",
+    "TMDB_LEGACY_KEY",
     "TVDB_KEY",
     "TVDB_PIN",
     "cache_get",
@@ -362,5 +382,6 @@ __all__ = [
     "search_series",
     "series_details",
     "tmdb_client",
+    "tmdb_token",
     "tvdb_client",
 ]

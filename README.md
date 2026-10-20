@@ -170,7 +170,7 @@ To inspect or back up the container's database:
 podman volume inspect iptv-charts-data --format '{{.Mountpoint}}'
 ```
 
-The database holds provider credentials and metadata API keys in plain text,
+The database holds provider credentials and metadata tokens in plain text,
 like any local media manager's config. Files are owned by your user and
 readable only by you.
 
@@ -201,20 +201,23 @@ unaffected if the bridge is not running.
 
 ## Movies and series
 
-### TMDB and TVDB keys
+### TMDB and TVDB credentials
 
-Open **Settings → Metadata providers** and paste a TMDB API key. A v3 API key
-or a v4 read access token both work. TMDB provides movie and series search,
-posters, overviews, ratings and alternative titles.
+Open **Settings → Metadata providers** and paste the **TMDB API Read Access
+Token** from TMDB's API settings. It is the JWT token that starts with `eyJ`,
+not the older 32-character v3 API key. The app sends it as
+`Authorization: Bearer <token>` on every TMDB request and never puts a
+credential in the query string. TMDB provides movie and series search, posters,
+overviews, ratings and alternative titles.
 
 A **TVDB v4 API key** is optional. When present, episode names, numbers and air
 dates come from TVDB; if the key is missing or TVDB is unreachable, the app
 falls back to TMDB season data. A subscriber PIN can be supplied if your TVDB
 key needs one.
 
-Keys are stored in the app database and are included in backups. They are
-shown as "configured / not configured" and are never echoed back into the page.
-Tests can run fully offline with `IPTV_CHARTS_TMDB_BASE` and
+Tokens/keys are stored in the app database and are included in backups. They
+are shown as "configured / not configured" and are never echoed back into the
+page. Tests can run fully offline with `IPTV_CHARTS_TMDB_BASE` and
 `IPTV_CHARTS_TVDB_BASE` pointed at a fixture server.
 
 ### Adding, monitoring and searching
@@ -411,7 +414,7 @@ library entry is not silently deleted.
 ```
 manifest.json
 tables/sources.json          playlist credentials and account snapshots
-tables/settings.json         including metadata API keys and player choice
+tables/settings.json         including metadata tokens and player choice
 tables/quality_profiles.json
 tables/movies.json
 tables/series.json
@@ -431,7 +434,7 @@ paths and naming templates are re-validated; paths outside the current media
 root are cleared. Playlist syncs are queued after the restore, because the
 catalog is not in the ZIP.
 
-**The ZIP contains provider credentials and API keys in plain text.** Keep it
+**The ZIP contains provider credentials and metadata tokens in plain text.** Keep it
 private.
 
 ## Settings
@@ -445,8 +448,8 @@ leave the other sections half-saved.
   `{user_agent}` and `{referrer}` placeholders. A custom command runs on the
   host with your privileges, exactly as written; nothing is passed through a
   shell.
-- **Metadata providers**: TMDB and TVDB keys, optional PIN, language, and
-  connection tests that use the stored keys.
+- **Metadata providers**: TMDB API Read Access Token, TVDB key, optional PIN,
+  language, and connection tests that use the stored credentials.
 - **Media management**: media paths and the five naming templates with a
   preview.
 - **Downloads and probing**: worker count, attempts, probe
@@ -544,6 +547,8 @@ library matcher uses the same shape without the source filter.
   and monitoring rules work.
 - [`docs/PLAYLISTS_AND_SETTINGS.md`](docs/PLAYLISTS_AND_SETTINGS.md) — home
   dashboard, playlist editing/catalog identity, and the atomic settings save.
+- [`docs/METADATA_PROVIDERS.md`](docs/METADATA_PROVIDERS.md) — TMDB read-token
+  authentication and the TVDB v4 login/search/episode/pagination contract.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow and invariants.
 - [`LICENSE`](LICENSE) — MIT.
@@ -554,7 +559,7 @@ library matcher uses the same shape without the source filter.
 ./setup.test.sh --check
 ```
 
-Runs five suites, 613 checks, none of which touch the internet:
+Runs five suites, 632 checks, none of which touch the internet:
 
 | Suite | Covers |
 |---|---|
@@ -628,7 +633,7 @@ tests/
 ## Security notes
 
 The server binds **loopback only**. It stores provider credentials and metadata
-API keys, so it must never be reachable from the network. In the container case
+tokens, so it must never be reachable from the network. In the container case
 the published port is likewise bound to `127.0.0.1` on the host.
 
 There is deliberately **no authentication** — it is a single-user local app,
@@ -665,7 +670,7 @@ file is only deleted if its path is the one recorded in the database and is
 inside the media library.
 
 **Backups contain secrets.** They are loopback-only downloads, but the ZIP
-itself contains provider credentials and API keys. Store it accordingly.
+itself contains provider credentials and metadata tokens. Store it accordingly.
 
 Worth knowing: because there is no token, any web page you have open can still
 *read* from `http://127.0.0.1:<port>/`, and can issue writes that browsers
@@ -681,7 +686,7 @@ come back.
 - `ffmpeg` for HLS remuxing and `ffprobe` for pre-download stream inspection;
   the container image installs both. In dev mode, direct files still download
   without them, but probe-required profiles and HLS need them.
-- A TMDB API key for Movies and Series; a TVDB API key is optional
+- A TMDB API Read Access Token for Movies and Series; a TVDB v4 API key is optional
 
 On Debian/Ubuntu, if `python3 -m venv` fails with `No module named 'ensurepip'`:
 

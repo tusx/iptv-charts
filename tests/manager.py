@@ -31,6 +31,7 @@ sys.path.insert(0, str(HERE.parent))
 
 import integration  # noqa: E402  (sets its own temp paths; we override below)
 from iptv_charts import db, downloader, metadata, scheduler, sources, sync  # noqa: E402
+from iptv_charts.clients import tvdb as tvdb_client  # noqa: E402
 
 _TMP = Path(tempfile.mkdtemp(prefix="iptv-manager-test-"))
 _FAKE_BIN = _TMP / "bin"
@@ -214,6 +215,8 @@ SERIES_INFO = {
     }},
 }
 
+TMDB_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.manager-test-token"
+
 TMDB_MOVIES = {
     603: {"title": "The Matrix", "original_title": "The Matrix",
           "release_date": "1999-03-31", "overview": "A hacker learns the truth.",
@@ -357,6 +360,9 @@ class ManagerHandler(integration.Handler):
     #: connection-limit test asserts these intervals never overlap.
     throttle_intervals: list[tuple[float, float]] = []
     throttle_lock = threading.Lock()
+    tmdb_auth: list[tuple[str | None, str | None]] = []
+    tvdb_auth: list[str | None] = []
+    tvdb_search_params: list[dict] = []
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -475,6 +481,10 @@ class ManagerHandler(integration.Handler):
 
     # ------------------------------------------------------------------- tmdb
     def _tmdb(self, path: str, params: dict) -> None:
+        self.tmdb_auth.append((
+            self.headers.get("Authorization"),
+            (params.get("api_key") or [None])[0],
+        ))
         sub = path[len("/tmdb/3"):]
         query = (params.get("query") or [""])[0].lower()
         if sub == "/search/movie":
@@ -566,7 +576,11 @@ class ManagerHandler(integration.Handler):
 
     # ------------------------------------------------------------------- tvdb
     def _tvdb(self, path: str, params: dict) -> None:
+        self.tvdb_auth.append(self.headers.get("Authorization"))
         if path == "/tvdb/v4/search":
+            self.tvdb_search_params.append({
+                key: values[0] if values else "" for key, values in params.items()
+            })
             query = (params.get("query") or [""])[0].lower()
             results = []
             for tvdb_id, name, year in ((9101, "Dark Hearts", "2023"),
@@ -576,13 +590,34 @@ class ManagerHandler(integration.Handler):
                                     "year": year, "overview": ""})
             self._json({"status": "success", "data": results})
             return
-        match = re.match(r"^/tvdb/v4/series/(\d+)/episodes/default/eng$", path)
+        match = re.match(r"^/tvdb/v4/series/(\d+)/episodes/default(?:/eng)?$", path)
         if match:
             page = int((params.get("page") or ["0"])[0])
-            episodes = TVDB_EPISODES.get(int(match.group(1)), []) if page == 0 else []
+            series_id = int(match.group(1))
+            if series_id == 9104 and path.endswith("/eng"):
+                # The translated OpenAPI schema omits episodes for some
+                # responses; the client must retry the untranslated endpoint.
+                self._json({
+                    "status": "success",
+                    "data": {"series": {"id": series_id}},
+                    "links": {"next": None, "prev": None},
+                })
+                return
+            all_episodes = TVDB_EPISODES.get(series_id, [])
+            links = {"next": None, "prev": None, "total_items": len(all_episodes)}
+            if series_id == 9103:
+                # Exercise the documented links.next page-number pagination.
+                episodes = all_episodes[:1] if page == 0 else (
+                    all_episodes[1:] if page == 1 else []
+                )
+                if page == 0 and len(all_episodes) > 1:
+                    links["next"] = 1
+            else:
+                episodes = all_episodes if page == 0 else []
             self._json({
                 "status": "success",
-                "data": {"episodes": episodes, "links": {"next": None, "prev": None}},
+                "data": {"episodes": episodes},
+                "links": links,
             })
             return
         self.send_error(404)
@@ -676,9 +711,19 @@ def main() -> int:
         conn = db.connect()
         source_id = sources.create(conn, "xtream", "Manager fixture",
                                    base_url=base, username="gooduser", password="pass")
-        db.set_setting(conn, metadata.TMDB_KEY, "test-tmdb-key")
+        db.set_setting(conn, metadata.TMDB_KEY, TMDB_TOKEN)
         db.set_setting(conn, metadata.TVDB_KEY, "test-tvdb-key")
         conn.close()
+
+        with tvdb_client.TVDBClient("test-tvdb-key", token="fake-token") as tvdb_api:
+            tvdb_results = tvdb_api.search_series("Dark Hearts", year=2023)
+        check("TVDB search returns a result", len(tvdb_results), 1)
+        search_params = ManagerHandler.tvdb_search_params[-1]
+        check("TVDB search sends the documented year filter",
+              search_params.get("year"), "2023")
+        check("TVDB search sends the series type",
+              search_params.get("type"), "series")
+
         sync.enqueue([source_id])
         result = integration.wait_for_sync()
         check("catalog synced without error", result["jobs"][source_id]["state"], "done")
@@ -781,6 +826,13 @@ def main() -> int:
         conn.close()
         check_true("upgrade recorded in history", any(row["event"] == "upgraded" for row in history))
 
+        check_true("TMDB requests use bearer auth",
+                   any(auth == f"Bearer {TMDB_TOKEN}"
+                       for auth, _api_key in ManagerHandler.tmdb_auth))
+        check("TMDB requests never use api_key",
+              all(api_key is None for _auth, api_key in ManagerHandler.tmdb_auth),
+              True)
+
         section("localised title matches through TMDB aliases")
         response = client.post("/api/movies", json={
             "tmdb_id": 604, "quality_profile_id": four_k["id"],
@@ -870,6 +922,10 @@ def main() -> int:
                   paths[1].name, "Dark Hearts - S01E02 - The Middle [1080p].mp4")
             check("season 2 filename",
                   paths[2].name, "Dark Hearts - S02E01 - The Return [1080p].mp4")
+
+        check_true("TVDB requests use bearer auth",
+                   any(auth and auth.startswith("Bearer ")
+                       for auth in ManagerHandler.tvdb_auth))
 
         section("TMDB episode fallback when TVDB is not configured")
         conn = db.connect()
@@ -1241,6 +1297,15 @@ def main() -> int:
 
         settings_page = page_text(client, "/settings")
         check_true("settings shows ffprobe", "ffprobe" in settings_page)
+        check_true("settings asks for the read access token",
+                   "API Read Access Token" in settings_page)
+
+        response = client.post("/api/settings/save", json={
+            "metadata": {"tmdb_read_token": "a" * 32},
+        })
+        check("v3 API key is refused", response.status_code, 400)
+        check("v3 key error names the metadata section",
+              response.get_json()["section"], "metadata")
         profiles_page = page_text(client, "/settings/profiles")
         check_true("profiles page shows the custom tier",
                    "2160p WEB-DL" in profiles_page)

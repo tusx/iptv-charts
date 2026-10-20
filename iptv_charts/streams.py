@@ -71,7 +71,7 @@ def effective_headers(source_row, item_row=None) -> dict[str, str]:
     """
     source = _json_headers(source_row)
     item = _json_headers(item_row)
-    user_agent = item.get("user_agent") or source.get("user_agent") or "IPTVCharts/0.4"
+    user_agent = item.get("user_agent") or source.get("user_agent") or "IPTVCharts/0.5"
     referrer = item.get("referrer") or source.get("referrer")
     headers: dict[str, str] = {}
     if user_agent:

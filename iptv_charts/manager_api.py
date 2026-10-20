@@ -109,7 +109,7 @@ def test_metadata():
         if service == "tmdb":
             with metadata.tmdb_client(conn) as client:
                 client.search_movies("test")
-            return jsonify({"ok": True, "message": "TMDB accepted the API key."})
+            return jsonify({"ok": True, "message": "TMDB accepted the API Read Access Token."})
         if service == "tvdb":
             with metadata.tvdb_client(conn) as client:
                 client.search_series("test")
@@ -743,8 +743,25 @@ def save_metadata_settings():
     conn = _conn()
     try:
         payload = _payload()
+        if _bool(payload.get("tmdb_clear")):
+            _save_setting(conn, metadata.TMDB_KEY, "")
+            _save_setting(conn, metadata.TMDB_LEGACY_KEY, "")
+            logger.info("settings: tmdb read token cleared")
+        elif "tmdb_read_token" in payload or "tmdb_api_key" in payload:
+            raw_token = payload.get("tmdb_read_token", payload.get("tmdb_api_key"))
+            if not str(raw_token or "").strip():
+                _save_setting(conn, metadata.TMDB_KEY, "")
+                _save_setting(conn, metadata.TMDB_LEGACY_KEY, "")
+                logger.info("settings: tmdb read token cleared")
+            else:
+                try:
+                    token = tmdb_client.validate_read_token(raw_token)
+                except tmdb_client.TMDBKeyError as exc:
+                    return _fail(str(exc))
+                _save_setting(conn, metadata.TMDB_KEY, token)
+                _save_setting(conn, metadata.TMDB_LEGACY_KEY, "")
+                logger.info("settings: tmdb read token set")
         for field, setting in (
-            ("tmdb_api_key", metadata.TMDB_KEY),
             ("tvdb_api_key", metadata.TVDB_KEY),
             ("tvdb_pin", metadata.TVDB_PIN),
         ):

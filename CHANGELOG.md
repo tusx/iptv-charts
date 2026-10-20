@@ -4,6 +4,28 @@ All notable changes to IPTV Charts are recorded here. The project follows
 semantic-ish versioning while the app is pre-1.0: the minor version changes
 when the library schema or user-visible workflow changes.
 
+## 0.5.0 — 2026-10-20
+
+### Changed
+
+- **TMDB now uses only the API Read Access Token**, sent as
+  `Authorization: Bearer <token>` on every request. The legacy 32-character v3
+  API key query parameter is no longer supported; saving one is rejected with
+  a clear message. The Settings field, API validation and docs now ask for the
+  read token.
+- A JWT saved under the old `tmdb_api_key` setting is still read for
+  compatibility. Saving a new token or clearing the credential clears the old
+  key so the fallback cannot resurface it.
+- **TVDB v4 client aligned with the official OpenAPI spec and official Python
+  client**: series search accepts the documented `year` filter; episode
+  pagination reads top-level `links.next` page numbers (with string/URL
+  tolerance and loop protection); the translated episode endpoint falls back
+  to the untranslated endpoint whose schema explicitly includes
+  `data.episodes`; bearer auth and login caching remain unchanged.
+- Tests assert TMDB bearer auth and no `api_key` query, TVDB bearer auth,
+  TVDB page-number pagination, v3 key rejection and legacy JWT fallback.
+- Test coverage updated to 632 checks.
+
 ## 0.4.0 — 2026-10-18
 
 ### Added

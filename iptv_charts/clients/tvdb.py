@@ -18,7 +18,7 @@ import requests
 DEFAULT_BASE = "https://api4.thetvdb.com/v4"
 CONNECT_TIMEOUT = 12
 READ_TIMEOUT = 30
-DEFAULT_USER_AGENT = "IPTVCharts/0.4"
+DEFAULT_USER_AGENT = "IPTVCharts/0.5"
 
 _YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 
@@ -194,8 +194,14 @@ class TVDBClient:
 
         raise TVDBError("TVDB request failed after a retry.")
 
-    def search_series(self, query: str, limit: int = 20) -> list[dict]:
-        payload = self._get("/search", {"query": query, "type": "series", "limit": limit})
+    def search_series(self, query: str, limit: int = 20,
+                      year: int | None = None) -> list[dict]:
+        params: dict[str, Any] = {
+            "query": query, "type": "series", "limit": limit,
+        }
+        if year:
+            params["year"] = int(year)
+        payload = self._get("/search", params)
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list):
             return []
@@ -207,21 +213,73 @@ class TVDBClient:
                     results.append(normalised)
         return results
 
+    @staticmethod
+    def _next_page(links: Any, current: int) -> int | None:
+        """TVDB's links.next is a page number; tolerate a URL/string form."""
+        if not isinstance(links, dict):
+            return None
+        nxt = links.get("next")
+        if nxt is None or nxt is False:
+            return None
+        if isinstance(nxt, int):
+            return nxt if nxt > current else None
+        text = str(nxt).strip()
+        if text.isdigit():
+            value = int(text)
+            return value if value > current else None
+        # A URL is not documented, but following its page query is safer than
+        # assuming sequence if a future API version changes the shape.
+        match = re.search(r"[?&]page=(\d+)", text)
+        if match:
+            value = int(match.group(1))
+            return value if value > current else None
+        return current + 1
+
     def series_episodes(self, tvdb_id: int, language: str = "eng") -> list[dict]:
-        """Every episode, following pagination, with a hard page cap."""
+        """Every episode, following pagination, with a hard page cap.
+
+        The translated endpoint is the preferred source for episode names. The
+        OpenAPI schema for it is incomplete and has historically omitted the
+        episodes array, so if the first translated page has no episodes this
+        falls back to the untranslated endpoint, which the spec explicitly
+        documents as returning ``data.episodes``.
+        """
         episodes: list[dict] = []
         seen: set[tuple[int, int]] = set()
-        for page in range(100):
-            payload = self._get(
-                f"/series/{int(tvdb_id)}/episodes/default/{language}",
-                {"page": page},
+        # Keyed by (endpoint, page), not just page: the first translated page
+        # may be retried against the untranslated endpoint.
+        attempted: set[tuple[bool, int]] = set()
+        translated = True
+        page = 0
+        while page < 100:
+            attempt_key = (translated, page)
+            if attempt_key in attempted:
+                break
+            attempted.add(attempt_key)
+            path = (
+                f"/series/{int(tvdb_id)}/episodes/default/{language}"
+                if translated
+                else f"/series/{int(tvdb_id)}/episodes/default"
             )
+            payload = self._get(path, {"page": page})
             data = payload.get("data") if isinstance(payload, dict) else None
-            if not isinstance(data, dict):
-                break
-            page_episodes = data.get("episodes") or []
+            if isinstance(data, dict):
+                page_episodes = data.get("episodes")
+            elif isinstance(data, list):
+                # Older/spec-incomplete responses have occasionally used a
+                # bare list here.
+                page_episodes = data
+            else:
+                page_episodes = None
+
             if not isinstance(page_episodes, list):
+                if page == 0 and translated:
+                    translated = False
+                    continue
                 break
+            if not page_episodes and page == 0 and translated:
+                translated = False
+                continue
 
             for raw in page_episodes:
                 if not isinstance(raw, dict):
@@ -234,9 +292,13 @@ class TVDBClient:
                     seen.add(key)
                     episodes.append(episode)
 
-            links = data.get("links") or payload.get("links") or {}
-            if not isinstance(links, dict) or not links.get("next"):
+            links = payload.get("links")
+            if links is None and isinstance(data, dict):
+                links = data.get("links")
+            next_page = self._next_page(links, page)
+            if next_page is None:
                 break
+            page = next_page
 
         episodes.sort(key=lambda entry: (entry["season"], entry["episode"]))
         return episodes

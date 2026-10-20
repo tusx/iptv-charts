@@ -22,9 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from iptv_charts import (config, connections, db, items, languages,  # noqa: E402
-                         matching, naming, player, probe, quality, sources,
-                         streams)
-from iptv_charts.clients import m3u, xtream  # noqa: E402
+                         matching, metadata, naming, player, probe, quality,
+                         sources, streams)
+from iptv_charts.clients import m3u, tmdb, xtream  # noqa: E402
 from iptv_charts.errors import SyncCancelled  # noqa: E402
 
 _results: list[tuple[bool, str, str]] = []
@@ -853,6 +853,27 @@ def test_manager_foundations() -> None:
         with connections.acquire(conn, 1, purpose="test", timeout=0.5):
             check("context manager holds the slot", connections.active(1), 1)
         check("context manager releases", connections.active(1), 0)
+        conn.close()
+
+    section("TMDB read access token")
+    valid_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.smoke-test-token"
+    check("read token accepted", tmdb.validate_read_token(valid_token), valid_token)
+    check("Bearer prefix is tolerated",
+          tmdb.validate_read_token(f"Bearer {valid_token}"), valid_token)
+    check("v3 API key rejected",
+          raises(tmdb.validate_read_token, "a" * 32, exc=tmdb.TMDBKeyError), "raised")
+    check("non-JWT token rejected",
+          raises(tmdb.validate_read_token, "not-a-token", exc=tmdb.TMDBKeyError), "raised")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "metadata.db"
+        db.init_db(path)
+        conn = db.connect(path)
+        db.set_setting(conn, metadata.TMDB_LEGACY_KEY, valid_token)
+        check("legacy JWT setting is still read", metadata.has_tmdb(conn), True)
+        db.set_setting(conn, metadata.TMDB_LEGACY_KEY, "a" * 32)
+        check("legacy v3 key is not accepted", metadata.has_tmdb(conn), False)
+        db.set_setting(conn, metadata.TMDB_KEY, valid_token)
+        check("new read-token setting is accepted", metadata.has_tmdb(conn), True)
         conn.close()
 
     section("playlist credential changes")

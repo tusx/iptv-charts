@@ -122,23 +122,26 @@
   <section class="settings-card" id="metadata-settings">
     <h2>Metadata providers</h2>
     <p class="hint">
-      TMDB supplies movie and series search, posters and overviews. TVDB is
-      optional: when a key is present it supplies episode names, numbers and air
-      dates; without it, TMDB episode data is used instead. Keys are stored in
-      the app database, included in backups, and never displayed again.
+      TMDB supplies movie and series search, posters and overviews. Use the
+      <strong>API Read Access Token</strong> from
+      <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">TMDB's API settings</a>,
+      not the older 32-character v3 API key. TVDB is optional: when a key is
+      present it supplies episode names, numbers and air dates; without it,
+      TMDB episode data is used instead. Tokens are stored in the app database,
+      included in backups, and never displayed again.
     </p>
     <div class="field-row">
       <label class="field">
-        <span>TMDB API key</span>
-        <input type="password" id="tmdb-key" spellcheck="false"
-               placeholder="{% if tmdb_configured %}Configured — leave blank to keep it{% else %}Paste a TMDB API key{% endif %}">
+        <span>TMDB API Read Access Token</span>
+        <input type="password" id="tmdb-token" spellcheck="false"
+               placeholder="{% if tmdb_configured %}Configured — leave blank to keep it{% else %}eyJ…{% endif %}">
       </label>
       <label class="field">
         <span>Metadata language</span>
         <input type="text" id="metadata-language" value="{{ metadata_language }}" placeholder="en-US">
       </label>
     </div>
-    <label class="check"><input type="checkbox" id="tmdb-clear"> Remove the stored TMDB key</label>
+    <label class="check"><input type="checkbox" id="tmdb-clear"> Remove the stored TMDB read token</label>
 
     <div class="field-row">
       <label class="field">
@@ -317,7 +320,7 @@
 <section class="settings-card" id="backup-settings">
   <h2>Backup and restore</h2>
   <p class="hint">
-    The ZIP contains playlists, credentials, API keys, the movie/series
+    The ZIP contains playlists, credentials, metadata tokens, the movie/series
     libraries, quality profiles, queue and history — but not the IPTV catalog,
     which is rebuilt by a sync. <strong>Keep the file private: it contains
     secrets in plain text.</strong>

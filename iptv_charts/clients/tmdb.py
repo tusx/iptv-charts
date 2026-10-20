@@ -1,4 +1,8 @@
-"""A small TMDB v3/v4 client.
+"""A small TMDB API client authenticated with the API Read Access Token.
+
+The v3 endpoints under /3 are used, but authentication is the current
+application method: ``Authorization: Bearer <API Read Access Token>``. The
+older 32-character v3 API key query parameter is deliberately not supported.
 
 Only the endpoints the library needs are implemented. Responses are normalised
 here so the rest of the app never has to know TMDB's field names or that a TV
@@ -8,6 +12,7 @@ show's title is called ``name`` rather than ``title``.
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Any
 
@@ -17,11 +22,15 @@ DEFAULT_BASE = "https://api.themoviedb.org/3"
 DEFAULT_IMAGE_BASE = "https://image.tmdb.org/t/p"
 CONNECT_TIMEOUT = 12
 READ_TIMEOUT = 30
-DEFAULT_USER_AGENT = "IPTVCharts/0.4"
+DEFAULT_USER_AGENT = "IPTVCharts/0.5"
 
 #: Sizes accepted by the local image proxy. Deliberately a whitelist rather
 #: than "whatever is in the URL": the proxy must not become an SSRF gadget.
 IMAGE_SIZES = frozenset({"w92", "w154", "w185", "w342", "w500", "w780", "original"})
+
+#: A v3 API key is 32 hex characters. It is a different credential from the
+#: API Read Access Token, which is a JWT and is sent as a bearer token.
+_V3_KEY_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
 class TMDBError(RuntimeError):
@@ -29,7 +38,40 @@ class TMDBError(RuntimeError):
 
 
 class TMDBKeyError(TMDBError):
-    """No key, or TMDB rejected the configured one."""
+    """No token, or TMDB rejected the configured read access token."""
+
+
+def validate_read_token(value: Any) -> str:
+    """Validate and return the TMDB API Read Access Token.
+
+    TMDB's current application authentication uses the token from the account's
+    API settings as ``Authorization: Bearer <token>``. It is a JWT (it starts
+    with ``eyJ``), not the older 32-character v3 API key. Rejecting the v3 key
+    here gives the user a precise error instead of a generic 401 from TMDB.
+    """
+    token = str(value or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if not token:
+        raise TMDBKeyError(
+            "Add a TMDB API Read Access Token in Settings to use the movie "
+            "and series library."
+        )
+    if _V3_KEY_RE.fullmatch(token):
+        raise TMDBKeyError(
+            "That is a TMDB v3 API key. Copy the API Read Access Token from "
+            "TMDB's API settings instead (it starts with 'eyJ')."
+        )
+    if not token.startswith("eyJ"):
+        raise TMDBKeyError(
+            "The TMDB API Read Access Token should start with 'eyJ'. Copy it "
+            "from TMDB's API settings."
+        )
+    if len(token) < 40:
+        raise TMDBKeyError("The TMDB API Read Access Token looks too short.")
+    if len(token) > 4096:
+        raise TMDBKeyError("The TMDB API Read Access Token is too long.")
+    return token
 
 
 def base_url() -> str:
@@ -148,19 +190,22 @@ def normalise_episode(raw: dict, season_number: int | None = None) -> dict | Non
 
 
 class TMDBClient:
-    """One session, with the small amount of retry TMDB needs in practice."""
+    """One session, with the small amount of retry TMDB needs in practice.
 
-    def __init__(self, api_key: str, language: str = "en-US") -> None:
-        key = (api_key or "").strip()
-        if not key:
-            raise TMDBKeyError("No TMDB API key is configured.")
-        self.api_key = key
+    Only the API Read Access Token is supported. It is a bearer credential and
+    is sent on every request; there is no ``api_key`` query parameter.
+    """
+
+    def __init__(self, read_token: str, language: str = "en-US") -> None:
+        token = validate_read_token(read_token)
+        self.read_token = token
         self.language = (language or "en-US").strip() or "en-US"
-        self._bearer = key.startswith("eyJ")  # v4 read access token (JWT)
         self._session = requests.Session()
-        self._session.headers["User-Agent"] = DEFAULT_USER_AGENT
-        if self._bearer:
-            self._session.headers["Authorization"] = f"Bearer {key}"
+        self._session.headers.update({
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+        })
 
     def close(self) -> None:
         self._session.close()
@@ -173,8 +218,6 @@ class TMDBClient:
 
     def _get(self, path: str, **params: Any) -> dict:
         query = {"language": self.language, **params}
-        if not self._bearer:
-            query["api_key"] = self.api_key
         url = f"{base_url()}{path}"
 
         for attempt in range(2):
@@ -184,8 +227,7 @@ class TMDBClient:
                 )
             except requests.RequestException as exc:
                 # Do not put the exception text in the user-facing error: a
-                # requests error string can contain the full URL, and the v3
-                # key is a query parameter.
+                # requests error string can contain the full URL.
                 if attempt == 0:
                     time.sleep(1.0)
                     continue
@@ -204,7 +246,9 @@ class TMDBClient:
 
             if response.status_code in (401, 403):
                 response.close()
-                raise TMDBKeyError("TMDB rejected the API key. Check it in Settings.")
+                raise TMDBKeyError(
+                    "TMDB rejected the API Read Access Token. Check it in Settings."
+                )
             if response.status_code == 404:
                 response.close()
                 raise TMDBError("TMDB has no record with that id.")
@@ -284,4 +328,5 @@ __all__ = [
     "normalise_movie",
     "normalise_series",
     "normalise_summary",
+    "validate_read_token",
 ]

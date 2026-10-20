@@ -336,6 +336,8 @@ def main() -> int:
         check_true("custom command offered", b'value="custom"' in settings_body)
         check_true("command field rendered", b'id="player-command"' in settings_body)
         check_true("settings script linked", b"js/settings.js" in settings_body)
+        check_true("settings asks for the read access token",
+                   b"API Read Access Token" in settings_body)
 
         response = client.post("/api/settings", json={
             "preferred_player": "custom",
@@ -426,17 +428,28 @@ def main() -> int:
                    b'value="es-ES"' in body and b'value="fr-FR"' not in body)
 
         response = client.post("/api/settings/save", json={
-            "metadata": {"language": "es-ES", "tmdb_api_key": "secret-e2e-key"},
+            "metadata": {
+                "language": "es-ES",
+                "tmdb_read_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e2e-secret-token",
+            },
         })
         check("metadata key save accepted", response.status_code, 200)
         check("metadata key reported configured",
               response.get_json()["metadata"]["tmdb"], True)
-        check_true("saved key is not echoed", b"secret-e2e-key" not in client.get("/settings").data)
+        check_true("saved key is not echoed",
+                   b"e2e-secret-token" not in client.get("/settings").data)
         response = client.post("/api/settings/save", json={
             "metadata": {"tmdb_clear": True},
         })
         check("metadata key cleared", response.status_code, 200)
         check("metadata clear reported", response.get_json()["metadata"]["tmdb"], False)
+
+        response = client.post("/api/settings/save", json={
+            "metadata": {"tmdb_read_token": "a" * 32},
+        })
+        check("v3 API key is refused", response.status_code, 400)
+        check("v3 key error names the metadata section",
+              response.get_json()["section"], "metadata")
 
         response = client.post("/api/settings/save", data={"language": "fr-FR"})
         check("unified settings is JSON-only", response.status_code, 400)

@@ -78,10 +78,10 @@
       tmdb_clear: $('#tmdb-clear').checked,
       tvdb_clear: $('#tvdb-clear').checked,
     };
-    const tmdb = $('#tmdb-key').value.trim();
+    const tmdb = $('#tmdb-token').value.trim();
     const tvdb = $('#tvdb-key').value.trim();
     const pin = $('#tvdb-pin').value.trim();
-    if (tmdb) metadata.tmdb_api_key = tmdb;
+    if (tmdb) metadata.tmdb_read_token = tmdb;
     if (tvdb) metadata.tvdb_api_key = tvdb;
     if (pin) metadata.tvdb_pin = pin;
 
@@ -147,7 +147,7 @@
       setStatus(status, `${bits.join(' — ')}.`, 'ok');
       showCommand(result.command);
       showMediaPreview(result.media?.preview);
-      $('#tmdb-key').value = '';
+      $('#tmdb-token').value = '';
       $('#tvdb-key').value = '';
       $('#tvdb-pin').value = '';
       $('#tmdb-clear').checked = false;

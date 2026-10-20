@@ -73,7 +73,7 @@ def export_zip(conn) -> bytes:
         "tables": counts,
         "excluded": list(EXCLUDED),
         "contains_secrets": True,
-        "note": ("This backup contains provider credentials and metadata API keys "
+        "note": ("This backup contains provider credentials and metadata tokens "
                  "in plain text. Keep it private."),
     }
     buffer = io.BytesIO()
