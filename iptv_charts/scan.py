@@ -396,7 +396,7 @@ def import_result(conn, result_id: int) -> dict:
             existing = db.get_one(conn, "SELECT * FROM movies WHERE tmdb_id = ?",
                                   (int(result["tmdb_id"]),))
             movie = dict(existing) if existing else library.add_movie(
-                conn, result["tmdb_id"], search_now=False
+                conn, result["tmdb_id"],
             )
         if movie is None:
             raise ValueError("There is no confirmed movie for this file.")
@@ -423,7 +423,7 @@ def import_result(conn, result_id: int) -> dict:
             existing = db.get_one(conn, "SELECT * FROM series WHERE tmdb_id = ?",
                                   (int(result["tmdb_id"]),))
             series = dict(existing) if existing else library.add_series(
-                conn, result["tmdb_id"], search_now=False
+                conn, result["tmdb_id"],
             )
         if series is None:
             raise ValueError("There is no confirmed series for this file.")

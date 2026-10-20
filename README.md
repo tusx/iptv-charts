@@ -76,8 +76,9 @@ API for other software. Provider catalogs and metadata keys stay local.
   **priority**, and a durable SQLite queue that survives restarts. Direct HTTP
   downloads resume; HLS playlists are remuxed with ffmpeg without transcoding.
 - **Per-playlist connection limits** enforced across playlist syncs, metadata
-  calls, probes and downloads. A season downloads one episode at a time when
-  the playlist allows one connection.
+  calls, probes and downloads. The background worker runs one job at a time,
+  so a season downloads one episode after another regardless of playlist
+  count.
 - **Import and rename** completed files into the media folders. The default
   names are Radarr/Sonarr-style and fully editable.
 - **Quality upgrades** replace an existing file when a better allowed tier
@@ -443,10 +444,11 @@ It deliberately **excludes** `items`, `categories` and the search index (the
 IPTV catalog, which is large and rebuilt by a sync), plus metadata/provider
 caches and images. Restore validates the manifest, schema version, table names,
 row counts, JSON shapes and size limits, then replaces the app tables in one
-transaction. It refuses while a sync, task or download is active. Restored file
-paths and naming templates are re-validated; paths outside the current media
-root are cleared. Playlist syncs are queued after the restore, because the
-catalog is not in the ZIP.
+transaction. It refuses while any worker job (sync, search, download, task or
+scan import) is queued or running. Restored file paths and naming templates are
+re-validated; paths outside the current media root are cleared. Restored queued
+downloads get fresh worker jobs, and playlist syncs are queued after the
+restore, because the catalog is not in the ZIP.
 
 **The ZIP contains provider credentials and metadata tokens in plain text.** Keep it
 private.

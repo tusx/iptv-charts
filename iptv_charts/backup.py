@@ -235,6 +235,23 @@ def restore(conn, data: bytes) -> dict:
     counts: dict[str, int] = {}
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # Re-check inside the write transaction. The worker claims jobs with
+        # its own BEGIN IMMEDIATE, so it cannot start between this check and
+        # the table replacement.
+        if jobs.active_count(conn):
+            raise RestoreBusy(
+                "The background worker still has a queued or running job. "
+                "Wait for it to finish first."
+            )
+        active = db.get_one(
+            conn,
+            "SELECT COUNT(*) AS n FROM downloads WHERE status IN (?, ?, ?)",
+            downloader.ACTIVE,
+        )
+        if active and active["n"]:
+            raise RestoreBusy(
+                "There are active downloads. Wait for them to finish first."
+            )
         # A probe result is only meaningful for the provider identity it came
         # from. The catalog is re-synced after a restore, so discard probes
         # rather than letting a stale resolution/audio decision survive.
@@ -258,6 +275,12 @@ def restore(conn, data: bytes) -> dict:
 
     source_ids = [int(row["id"]) for row in tables["sources"] if row.get("id") is not None]
     queued = sync.enqueue(source_ids) if source_ids else []
+    # Restored queued downloads are rows without jobs (the job table is not in
+    # the archive). Recreate their queue entries now that the transaction is
+    # committed; otherwise they would sit queued forever and block new
+    # searches for the same title. Sync jobs were queued first and outrank
+    # downloads, so the catalog is rebuilt before old grabs resume.
+    downloader.ensure_started()
     logger.info("backup: restored %s (sync queued: %s)",
                 {key: value for key, value in counts.items() if value}, queued)
     return {

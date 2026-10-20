@@ -28,8 +28,8 @@
     try {
       const data = await get('/api/tasks');
       const task = (data.tasks || []).find((entry) => entry.name === 'scan_library');
-      if (task && task.status === 'running') {
-        setStatus(status, 'Scanning…');
+      if (task && (task.status === 'queued' || task.status === 'running')) {
+        setStatus(status, task.status === 'queued' ? 'Queued for the worker…' : 'Scanning…');
         polling = window.setTimeout(poll, 1500);
         return;
       }
@@ -87,7 +87,8 @@
   });
 
   // A page reload during a scan should pick the scan back up.
-  if (document.querySelector('#scan-status')?.textContent.includes('Scanning')) {
+  const initial = document.querySelector('#scan-status')?.textContent || '';
+  if (initial.includes('Scanning') || initial.includes('Queued')) {
     poll();
   }
 })();

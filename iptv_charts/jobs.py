@@ -15,11 +15,13 @@ sync phases) stays in the existing ``downloads`` / ``sources`` tables; the
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any, Mapping
 
-from . import db
+from . import config, db
 
 TERMINAL = ("done", "error", "cancelled")
 ACTIVE = ("queued", "running")
@@ -100,25 +102,35 @@ def enqueue(conn, kind: str, payload: Mapping[str, Any] | None = None, *,
             return item
 
     now = _now()
-    try:
+    values = (
+        str(kind), _encode(dict(payload or {})) or "{}",
+        max(-1000, min(1000, int(priority or 0))),
+        int(available_at or now), now, dedupe_key,
+    )
+
+    def insert() -> int:
         cursor = conn.execute(
             """
             INSERT INTO worker_jobs
                 (kind, payload, status, priority, available_at, created_at, dedupe_key)
             VALUES (?, ?, 'queued', ?, ?, ?, ?)
             """,
-            (
-                str(kind), _encode(dict(payload or {})) or "{}",
-                max(-1000, min(1000, int(priority or 0))),
-                int(available_at or now), now, dedupe_key,
-            ),
+            values,
         )
         conn.commit()
-    except sqlite3.IntegrityError:
-        # Another enqueue won the race for the dedupe key. Its row is the
-        # correct one to observe.
+        return int(cursor.lastrowid)
+
+    try:
+        row_id = insert()
+    except sqlite3.IntegrityError as first_error:
+        # Another enqueue may have won the race for the dedupe key. Its row is
+        # the correct one to observe. If it finished between our SELECT and
+        # INSERT, retry the insert once rather than losing the request.
         conn.rollback()
-        if dedupe_key:
+        if not dedupe_key:
+            raise
+        row_id = None
+        for _ in range(3):
             existing = conn.execute(
                 "SELECT * FROM worker_jobs WHERE dedupe_key = ? "
                 "AND status IN ('queued', 'running') ORDER BY id LIMIT 1",
@@ -128,9 +140,16 @@ def enqueue(conn, kind: str, payload: Mapping[str, Any] | None = None, *,
                 item = normalise(existing)
                 item["_created"] = False
                 return item
-        raise
+            try:
+                row_id = insert()
+                break
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                continue
+        if row_id is None:
+            raise first_error
 
-    item = get(conn, int(cursor.lastrowid))
+    item = get(conn, int(row_id))
     assert item is not None
     item["_created"] = True
     return item
@@ -268,15 +287,26 @@ def reschedule(conn, job_id: int, *, available_at: int,
 
 
 def cancel(conn, job_id: int) -> bool:
-    """Ask a running job to stop, or mark a queued one for cancellation.
+    """Cancel a queued job immediately, or ask a running handler to stop.
 
-    Handlers poll ``cancel_requested`` at safe points; a queued job is claimed
-    normally and its handler sees the flag before doing any work.
+    A queued job is marked terminal right away. That frees its dedupe key so a
+    user can press Update again without the cancelled row swallowing the new
+    request. A running job sets the flag its handler polls at safe points.
     """
+    job_id = int(job_id)
+    cursor = conn.execute(
+        "UPDATE worker_jobs SET status = 'cancelled', finished_at = ?, "
+        "cancel_requested = 1, message = 'Cancelled' "
+        "WHERE id = ? AND status = 'queued'",
+        (_now(), job_id),
+    )
+    if cursor.rowcount == 1:
+        conn.commit()
+        return True
     cursor = conn.execute(
         "UPDATE worker_jobs SET cancel_requested = 1, message = 'Cancelling…' "
-        "WHERE id = ? AND status IN ('queued', 'running')",
-        (int(job_id),),
+        "WHERE id = ? AND status = 'running'",
+        (job_id,),
     )
     conn.commit()
     return cursor.rowcount == 1
@@ -300,6 +330,16 @@ def recover(conn) -> int:
     )
     conn.commit()
     return int(cursor.rowcount or 0)
+
+
+def recover_running(conn) -> int:
+    """Requeue orphaned running rows.
+
+    The worker calls this at the top of its loop, when no handler can be
+    executing. It closes the gap left by a failed ``finish`` call: the job no
+    longer runs, so it must not stay 'running' forever.
+    """
+    return recover(conn)
 
 
 def cleanup(conn, *, older_than_days: int = 7) -> int:
@@ -351,7 +391,44 @@ def worker_started(conn, pid: int) -> None:
     conn.commit()
 
 
-def worker_status(conn=None, *, max_age: int = 20) -> dict:
+def _heartbeat_path() -> Path:
+    return config.data_dir() / "worker.heartbeat.json"
+
+
+def write_heartbeat_file(job_id: int | None, status: str) -> None:
+    """A liveness signal that does not need the database write lock.
+
+    A large restore can hold SQLite's writer for longer than the heartbeat
+    timeout while the worker is perfectly alive. This small file lets
+    /api/health distinguish that from a dead worker.
+    """
+    path = _heartbeat_path()
+    tmp = path.with_suffix(".tmp")
+    payload = {"at": time.time(), "current_job_id": job_id, "status": status}
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _read_heartbeat_file() -> dict | None:
+    try:
+        with open(_heartbeat_path(), encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            return None
+        return {
+            "at": float(payload.get("at") or 0),
+            "status": str(payload.get("status") or "unknown"),
+            "current_job_id": payload.get("current_job_id"),
+        }
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def worker_status(conn=None, *, max_age: int = 30) -> dict:
     own = conn is None
     if own:
         conn = db.connect()
@@ -360,13 +437,30 @@ def worker_status(conn=None, *, max_age: int = 20) -> dict:
     finally:
         if own:
             conn.close()
+    db_at = int(row["heartbeat_at"] or 0) if row is not None else 0
+    db_status = str(row["status"]) if row is not None else "missing"
+    db_age = max(0, _now() - db_at)
+    file_status = _read_heartbeat_file()
+    # Use the lock-free file only when the database heartbeat has actually
+    # gone stale (normally a large restore holding the writer). Otherwise a
+    # stale file from another test/process could override a fresh row.
+    if (row is not None and file_status is not None
+            and db_age > 5 and file_status["at"] >= db_at):
+        age = max(0, int(time.time() - file_status["at"]))
+        return {
+            "alive": age <= int(max_age) and file_status["status"] != "stopped",
+            "status": file_status["status"],
+            "heartbeat_age": age,
+            "current_job_id": file_status["current_job_id"],
+            "pid": row["pid"],
+        }
     if row is None:
         return {"alive": False, "status": "missing", "heartbeat_age": None,
                 "current_job_id": None, "pid": None}
-    age = max(0, _now() - int(row["heartbeat_at"] or 0))
+    age = max(0, _now() - db_at)
     return {
-        "alive": age <= int(max_age) and row["status"] != "stopped",
-        "status": row["status"],
+        "alive": age <= int(max_age) and db_status != "stopped",
+        "status": db_status,
         "heartbeat_age": age,
         "current_job_id": row["current_job_id"],
         "pid": row["pid"],
@@ -386,6 +480,16 @@ def submit_and_wait(kind: str, payload: Mapping[str, Any] | None = None, *,
     existing synchronous API semantics without moving any heavy work into the
     web server.
     """
+    conn = db.connect()
+    try:
+        job = enqueue(conn, kind, payload, priority=priority, dedupe_key=dedupe_key)
+        job_id = int(job["id"])
+    finally:
+        conn.close()
+
+    # Enqueue before checking liveness: if the worker is down, the user's
+    # request is not lost -- it runs when the worker starts. The HTTP caller
+    # still gets a clear 503 now instead of waiting for a timeout.
     if require_worker:
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
@@ -395,18 +499,12 @@ def submit_and_wait(kind: str, payload: Mapping[str, Any] | None = None, *,
             time.sleep(0.1)
         else:
             raise WorkerUnavailable(
-                "The background worker is not running. Start it with the web "
-                "app (the container does this automatically)."
+                "The background worker is not running. The job is queued and "
+                "will start when the worker does."
             )
 
-    conn = db.connect()
-    try:
-        job = enqueue(conn, kind, payload, priority=priority, dedupe_key=dedupe_key)
-        job_id = int(job["id"])
-    finally:
-        conn.close()
-
     deadline = time.monotonic() + max(1.0, float(timeout))
+    next_liveness = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         conn = db.connect()
         try:
@@ -422,6 +520,14 @@ def submit_and_wait(kind: str, payload: Mapping[str, Any] | None = None, *,
                             row.get("error_type"))
         if row["status"] == "cancelled":
             raise JobCancelled(row.get("message") or "The background job was cancelled.")
+        if time.monotonic() >= next_liveness:
+            status = worker_status()
+            if not status["alive"]:
+                raise WorkerUnavailable(
+                    "The background worker stopped while this job was queued. "
+                    "Start it again; the job will resume."
+                )
+            next_liveness = time.monotonic() + 2.0
         time.sleep(0.05)
 
     raise JobTimeout(
@@ -431,10 +537,24 @@ def submit_and_wait(kind: str, payload: Mapping[str, Any] | None = None, *,
 
 
 def snapshot(conn, limit: int = 30) -> list[dict]:
-    rows = conn.execute(
-        "SELECT * FROM worker_jobs ORDER BY id DESC LIMIT ?", (max(1, int(limit)),)
+    """Active jobs first, then recent terminal history.
+
+    A series search can queue dozens of downloads; ordering purely by id
+    would push the one job actually running out of the Activity list.
+    """
+    limit = max(1, int(limit))
+    active = conn.execute(
+        "SELECT * FROM worker_jobs WHERE status IN ('queued', 'running') "
+        "ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id DESC LIMIT ?",
+        (limit,),
     ).fetchall()
-    return [normalise(row) for row in rows]
+    remaining = max(0, limit - len(active))
+    recent = conn.execute(
+        "SELECT * FROM worker_jobs WHERE status IN ('done', 'error', 'cancelled') "
+        "ORDER BY id DESC LIMIT ?",
+        (remaining,),
+    ).fetchall() if remaining else []
+    return [normalise(row) for row in [*active, *recent]]
 
 
 def active_count(conn) -> int:
@@ -474,10 +594,12 @@ __all__ = [
     "heartbeat",
     "normalise",
     "recover",
+    "recover_running",
     "reschedule",
     "snapshot",
     "submit_and_wait",
     "update_progress",
     "worker_started",
     "worker_status",
+    "write_heartbeat_file",
 ]

@@ -285,6 +285,7 @@ def run_forever(stop_event: threading.Event | None = None) -> None:
             logger.info("worker: requeued %d interrupted job(s)", recovered)
         jobs.worker_started(conn, os.getpid())
         jobs.heartbeat(conn, status="idle")
+        jobs.write_heartbeat_file(None, "idle")
     finally:
         conn.close()
 
@@ -302,6 +303,9 @@ def run_forever(stop_event: threading.Event | None = None) -> None:
                 with _state_lock:
                     job_id = _state["job_id"]
                     status = _state["status"]
+                # Write the lock-free file first: a large restore may hold
+                # SQLite's writer, but the worker is still alive.
+                jobs.write_heartbeat_file(job_id, status)
                 try:
                     jobs.heartbeat(hb, current_job_id=job_id, status=status)
                 except Exception:
@@ -321,6 +325,15 @@ def run_forever(stop_event: threading.Event | None = None) -> None:
     try:
         while not stop.is_set():
             _set_worker_state(None, "idle")
+            try:
+                # No handler can be running at the top of the loop. A row
+                # still marked running is an orphan from a failed outcome
+                # write, not a live job.
+                orphans = jobs.recover_running(claimed_conn)
+                if orphans:
+                    logger.warning("worker: requeued %d orphaned job(s)", orphans)
+            except Exception:
+                pass
             try:
                 jobs.heartbeat(claimed_conn, status="idle")
             except Exception:
@@ -350,6 +363,7 @@ def run_forever(stop_event: threading.Event | None = None) -> None:
             kind = str(job.get("kind") or "")
             handler = HANDLERS.get(kind)
             _set_worker_state(job_id, "running")
+            jobs.write_heartbeat_file(job_id, "running")
             try:
                 jobs.heartbeat(claimed_conn, current_job_id=job_id, status="running")
             except Exception:
@@ -368,6 +382,10 @@ def run_forever(stop_event: threading.Event | None = None) -> None:
             except Exception as exc:
                 logger.exception("worker: job #%d %s failed: %s", job_id, kind, exc)
                 try:
+                    claimed_conn.rollback()
+                except Exception:
+                    pass
+                try:
                     if stop.is_set():
                         jobs.reschedule(
                             claimed_conn, job_id, available_at=int(time.time()),
@@ -381,9 +399,14 @@ def run_forever(stop_event: threading.Event | None = None) -> None:
                             error_type=type(exc).__name__,
                         )
                 except Exception:
+                    try:
+                        claimed_conn.rollback()
+                    except Exception:
+                        pass
                     logger.exception("worker: could not record job failure")
             finally:
                 _set_worker_state(None, "idle")
+                jobs.write_heartbeat_file(None, "idle")
     finally:
         hb_stop.set()
         hb.join(timeout=3.0)
@@ -393,6 +416,7 @@ def run_forever(stop_event: threading.Event | None = None) -> None:
                 jobs.heartbeat(conn, status="stopped")
             finally:
                 conn.close()
+            jobs.write_heartbeat_file(None, "stopped")
         except Exception:
             pass
         claimed_conn.close()

@@ -170,10 +170,18 @@ def cancel(source_id: int) -> bool:
             return False
         if not jobs.cancel(conn, int(job["id"])):
             return False
-        conn.execute(
-            "UPDATE sources SET sync_message = 'Cancelling…' WHERE id = ?",
-            (int(source_id),),
-        )
+        current = jobs.get(conn, int(job["id"]))
+        if current is not None and current["status"] == "cancelled":
+            conn.execute(
+                "UPDATE sources SET sync_status = 'cancelled', sync_message = 'Cancelled' "
+                "WHERE id = ?",
+                (int(source_id),),
+            )
+        else:
+            conn.execute(
+                "UPDATE sources SET sync_message = 'Cancelling…' WHERE id = ?",
+                (int(source_id),),
+            )
         conn.commit()
         return True
     finally:
@@ -193,10 +201,18 @@ def cancel_all() -> int:
                 cancelled += 1
                 source_id = _source_id_for_job(jobs.normalise(row) or {})
                 if source_id is not None:
-                    conn.execute(
-                        "UPDATE sources SET sync_message = 'Cancelling…' WHERE id = ?",
-                        (source_id,),
-                    )
+                    current = jobs.get(conn, int(row["id"]))
+                    if current is not None and current["status"] == "cancelled":
+                        conn.execute(
+                            "UPDATE sources SET sync_status = 'cancelled', "
+                            "sync_message = 'Cancelled' WHERE id = ?",
+                            (source_id,),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE sources SET sync_message = 'Cancelling…' WHERE id = ?",
+                            (source_id,),
+                        )
         conn.commit()
         return cancelled
     finally:
@@ -353,9 +369,10 @@ def run_job(source_id: int, job_id: int, *, stop_event: threading.Event | None =
         if source is None:
             raise RuntimeError("This playlist no longer exists.")
         job.name = source["name"]
-        job.had_catalog = db.get_one(
-            conn, "SELECT 1 FROM items WHERE source_id = ? LIMIT 1", (source_id,)
-        ) is not None
+        # A previous *successful* sync is what makes the old catalog safe to
+        # keep. Rows from an interrupted first attempt are not a catalog; they
+        # must be cleaned up if this retry is cancelled too.
+        job.had_catalog = bool(source["last_synced_at"])
 
         # A cancel can arrive while the job waits in the queue. Do not open a
         # provider connection just to discover that.
@@ -366,6 +383,8 @@ def run_job(source_id: int, job_id: int, *, stop_event: threading.Event | None =
             job.state = "cancelled"
             job.message = "Cancelled"
             _record_failure(conn, source_id, "cancelled", job.message)
+            if not job.had_catalog:
+                _discard_partial_catalog(conn, source_id)
             return {
                 "status": "cancelled", "message": job.message,
                 "data": _progress_data(job),
@@ -420,8 +439,11 @@ def run_job(source_id: int, job_id: int, *, stop_event: threading.Event | None =
         )
         conn.commit()
 
+        if job.cancel.is_set():
+            raise SyncCancelled()
         with connections.acquire(
-            conn, source_id, purpose="Playlist sync", timeout=3600.0
+            conn, source_id, purpose="Playlist sync", timeout=3600.0,
+            cancel=job.cancel,
         ):
             if source["kind"] == "xtream":
                 _sync_xtream(conn, source, job)
@@ -442,7 +464,7 @@ def run_job(source_id: int, job_id: int, *, stop_event: threading.Event | None =
             "result": {"items_done": int(job.items_done)},
             "data": _progress_data(job),
         }
-    except SyncCancelled:
+    except (SyncCancelled, connections.ConnectionCancelled):
         stop_reporter()
         job.phase = ""
         if job.interrupted:
@@ -464,6 +486,14 @@ def run_job(source_id: int, job_id: int, *, stop_event: threading.Event | None =
         }
     except Exception as exc:  # surfaced to the user, not swallowed
         stop_reporter()
+        if job.interrupted or (stop_event is not None and stop_event.is_set()):
+            job.state = "queued"
+            job.message = "Interrupted by shutdown; it will resume."
+            _record_failure(conn, source_id, "queued", job.message)
+            return {
+                "status": "queued", "retry": True, "message": job.message,
+                "data": _progress_data(job),
+            }
         job.state = "error"
         job.phase = ""
         job.error = str(exc)

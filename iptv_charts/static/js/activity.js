@@ -35,6 +35,8 @@
     grab_episode: 'Grab episode',
     refresh_movie: 'Refresh movie',
     refresh_series: 'Refresh series',
+    scan_import: 'Import scan result',
+    scan_import_all: 'Import scan results',
   };
 
   function schedule(delay) {

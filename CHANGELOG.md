@@ -39,6 +39,15 @@ when the library schema or user-visible workflow changes.
 - Manual search/release/grab/refresh endpoints keep their synchronous
   responses, but the request thread now waits on a worker job instead of
   running ffprobe itself.
+- Cancellation is durable across the split: a queued job becomes terminal
+  immediately (freeing its dedupe key), a download re-checks its row after
+  waiting for a provider slot, and a sync observes cancel while waiting too.
+  Restored queued downloads get fresh jobs, and restore re-checks for active
+  jobs inside its write transaction.
+- The worker writes a lock-free heartbeat file in addition to SQLite, so a
+  large restore holding the database writer cannot make `/api/health` call a
+  live worker dead. Interactive requests recheck liveness while waiting, and
+  waitress has eight threads so health/cancel remain reachable.
 - Schema version 3 adds `worker_jobs`, `worker_state` and
   `downloads.cancel_requested`; the web and worker serialise first-run
   migrations with a file lock.

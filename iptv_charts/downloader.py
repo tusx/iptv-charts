@@ -189,12 +189,13 @@ class DownloadManager:
                 wconn = None
                 try:
                     wconn = db.connect()
-                    while not watcher_stop.wait(0.75):
+                    while not watcher_stop.wait(0.5):
                         current = wconn.execute(
-                            "SELECT cancel_requested FROM downloads WHERE id = ?",
+                            "SELECT status, cancel_requested FROM downloads WHERE id = ?",
                             (download_id,),
                         ).fetchone()
-                        if current is not None and current["cancel_requested"]:
+                        if current is None or current["status"] == "cancelled" \
+                                or current["cancel_requested"]:
                             cancel.set()
                             return
                 except Exception:
@@ -203,39 +204,54 @@ class DownloadManager:
                     if wconn is not None:
                         wconn.close()
 
-            if connection_source is not None:
-                with connections.acquire(
-                    conn, int(connection_source), purpose="Download", timeout=3600.0
-                ):
-                    conn.execute(
-                        "UPDATE downloads SET status = 'downloading', "
-                        "started_at = COALESCE(started_at, ?), attempts = ?, "
-                        "next_attempt_at = NULL, error = NULL WHERE id = ?",
-                        (_now(), job["attempts"], download_id),
-                    )
-                    conn.commit()
-                    job["_connection_source"] = None
-                    watcher = threading.Thread(
-                        target=watch_cancel, name=f"iptv-download-cancel-{download_id}",
-                        daemon=True,
-                    )
-                    watcher.start()
-                    self._process(conn, job, cancel)
-            else:
-                conn.execute(
+            def mark_downloading() -> bool:
+                # The status guard matters: Cancel (or a credential change)
+                # can retire a row while this job was waiting for a slot.
+                cursor = conn.execute(
                     "UPDATE downloads SET status = 'downloading', "
                     "started_at = COALESCE(started_at, ?), attempts = ?, "
-                    "next_attempt_at = NULL, error = NULL WHERE id = ?",
+                    "next_attempt_at = NULL, error = NULL "
+                    "WHERE id = ? AND status = 'queued'",
                     (_now(), job["attempts"], download_id),
                 )
                 conn.commit()
-                job["_connection_source"] = None
-                watcher = threading.Thread(
-                    target=watch_cancel, name=f"iptv-download-cancel-{download_id}",
-                    daemon=True,
+                return cursor.rowcount == 1
+
+            def unstarted_outcome() -> dict:
+                current = db.get_one(
+                    conn, "SELECT status FROM downloads WHERE id = ?", (download_id,)
                 )
-                watcher.start()
-                self._process(conn, job, cancel)
+                if current is not None and current["status"] == "queued":
+                    return {"status": "queued", "retry": True,
+                            "available_at": _now(),
+                            "message": "Could not claim the download row; retrying."}
+                if current is not None and current["status"] in ("imported", "failed"):
+                    return {"status": "done", "message": current["status"]}
+                return {"status": "cancelled", "message": "Cancelled"}
+
+            watcher = threading.Thread(
+                target=watch_cancel, name=f"iptv-download-cancel-{download_id}",
+                daemon=True,
+            )
+            watcher.start()
+
+            try:
+                if connection_source is not None:
+                    with connections.acquire(
+                        conn, int(connection_source), purpose="Download",
+                        timeout=3600.0, cancel=cancel,
+                    ):
+                        if not mark_downloading():
+                            return unstarted_outcome()
+                        job["_connection_source"] = None
+                        self._process(conn, job, cancel)
+                else:
+                    if not mark_downloading():
+                        return unstarted_outcome()
+                    job["_connection_source"] = None
+                    self._process(conn, job, cancel)
+            except connections.ConnectionCancelled:
+                return {"status": "cancelled", "message": "Cancelled"}
 
             result = db.get_one(
                 conn,
@@ -413,10 +429,12 @@ class DownloadManager:
             raise LookupError("That download no longer exists.")
         if row["status"] in TERMINAL:
             raise ValueError("That download has already finished.")
+        if row["status"] == "importing":
+            raise ValueError("That download is already importing and can no longer be cancelled.")
         if row["status"] == "queued":
-            # Nothing has started yet, so this is final immediately. The
-            # worker will claim the job later, see a non-queued row and mark
-            # the job cancelled.
+            # Nothing has started yet, so this is final immediately. Retire
+            # the queue row too; otherwise it would keep the dedupe key active
+            # and a later Retry could attach to a job that is about to vanish.
             conn.execute(
                 "UPDATE downloads SET status = 'cancelled', finished_at = ?, "
                 "error = 'Cancelled', cancel_requested = 0 WHERE id = ?",
@@ -427,6 +445,7 @@ class DownloadManager:
                 movie_id=row["movie_id"], series_id=row["series_id"],
                 episode_id=row["episode_id"], download_id=row["id"],
             )
+            jobs.cancel_by_key(conn, f"download:{int(download_id)}")
         else:
             # The worker owns the transfer. The flag is its only channel.
             conn.execute(
@@ -462,6 +481,7 @@ class DownloadManager:
                     movie_id=row["movie_id"], series_id=row["series_id"],
                     episode_id=row["episode_id"], download_id=row["id"],
                 )
+                jobs.cancel_by_key(conn, f"download:{int(row['id'])}")
             else:
                 conn.execute(
                     "UPDATE downloads SET cancel_requested = 1, error = 'Cancelling…' "

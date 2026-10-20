@@ -50,6 +50,10 @@ class ConnectionBusy(RuntimeError):
     """No connection slot became free before the caller's deadline."""
 
 
+class ConnectionCancelled(RuntimeError):
+    """The caller's cancel event fired while it was waiting for a slot."""
+
+
 def _lock_dir() -> Path:
     path = config.data_dir() / "locks"
     path.mkdir(parents=True, exist_ok=True)
@@ -181,7 +185,8 @@ def release(source_id: int) -> None:
 
 @contextmanager
 def acquire(conn, source_id: int, *, purpose: str = "",
-            timeout: float | None = None) -> Iterator[None]:
+            timeout: float | None = None,
+            cancel: threading.Event | None = None) -> Iterator[None]:
     """Wait for a connection slot for one source.
 
     ``timeout`` is in seconds; ``None`` waits indefinitely. A download can
@@ -191,8 +196,16 @@ def acquire(conn, source_id: int, *, purpose: str = "",
     """
     source_id = int(source_id)
     limit = effective_limit(conn, source_id)
+    if cancel is not None and cancel.is_set():
+        raise ConnectionCancelled(
+            f"Cancelled before waiting for a provider connection ({purpose})."
+        )
     deadline = time.monotonic() + timeout if timeout is not None else None
     while not try_acquire(source_id, limit=limit):
+        if cancel is not None and cancel.is_set():
+            raise ConnectionCancelled(
+                f"Cancelled while waiting for a provider connection ({purpose})."
+            )
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -227,6 +240,7 @@ def wait_for_free(conn, source_id: int, *, purpose: str = "",
 
 __all__ = [
     "ConnectionBusy",
+    "ConnectionCancelled",
     "acquire",
     "active",
     "available",

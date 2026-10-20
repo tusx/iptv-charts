@@ -15,6 +15,7 @@ import re
 
 import requests
 
+from . import jobs
 from .clients import m3u, xtream
 
 #: How much of an M3U to read when probing. Enough to confirm the header and
@@ -433,6 +434,7 @@ def update(conn: sqlite3.Connection, source_id: int, *,
             fields.append("connection_limit = ?")
             params.append(min(limit, 32))
 
+    retired: list[int] = []
     if catalog_changed:
         active = conn.execute(
             "SELECT COUNT(*) AS n FROM downloads WHERE source_id = ? "
@@ -446,6 +448,12 @@ def update(conn: sqlite3.Connection, source_id: int, *,
             )
         # Queued rows would resolve against the new account and fetch the
         # wrong stream, so retire them with a clear reason.
+        retired = [
+            int(row["id"]) for row in conn.execute(
+                "SELECT id FROM downloads WHERE source_id = ? AND status = 'queued'",
+                (int(source_id),),
+            )
+        ]
         conn.execute(
             "UPDATE downloads SET status = 'cancelled', finished_at = ?, "
             "error = 'Playlist credentials changed' "
@@ -482,6 +490,10 @@ def update(conn: sqlite3.Connection, source_id: int, *,
                 (int(source_id),),
             )
         conn.commit()
+        # Retire the worker jobs only after the download rows are committed;
+        # otherwise a worker could start one against the old identity.
+        for download_id in retired:
+            jobs.cancel_by_key(conn, f"download:{download_id}")
     current = dict(conn.execute(
         "SELECT * FROM sources WHERE id = ?", (source_id,)
     ).fetchone())

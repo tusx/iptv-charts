@@ -97,9 +97,11 @@ def main(argv: list[str] | None = None) -> int:
         # adjustment, so silence the logger instead.
         logging.getLogger("waitress").setLevel(logging.WARNING)
 
-        # 4 threads is ample for a single-user local app and keeps the
-        # process small; waitress is pure Python so there is no C runtime cost.
-        server = create_server(app, host=args.host, port=port, threads=4)
+        # Most requests are fast, but interactive search/release/grab calls
+        # wait for a worker job. Eight threads leave room for those to wait
+        # without starving /api/health and the cancel endpoints; waitress is
+        # pure Python and the app is single-user.
+        server = create_server(app, host=args.host, port=port, threads=8)
 
         # Waitress does not install signal handlers of its own, so without
         # this a SIGTERM is simply ignored: `podman stop`, systemd and Ctrl+C

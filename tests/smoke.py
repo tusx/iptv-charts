@@ -661,15 +661,14 @@ def test_worker_queue() -> None:
         check("restart requeues a running job", recovered["status"], "queued")
 
         jobs.cancel(conn, first["id"])
-        claimed = jobs.claim(conn)
-        check("a cancelled queued job is still claimable", claimed["id"], first["id"])
-        check("its handler sees the cancel flag", claimed["cancel_requested"], 1)
-        jobs.finish(conn, first["id"], "cancelled", message="Cancelled")
+        cancelled = jobs.get(conn, first["id"])
+        check("a cancelled queued job becomes terminal immediately",
+              cancelled["status"], "cancelled")
+        check("a cancelled job is not claimable", jobs.claim(conn), None)
 
         replacement = jobs.enqueue(conn, "sync", {"source_id": 7},
                                    dedupe_key="sync:7")
-        check("terminal job releases its dedupe key",
-              replacement["_created"], True)
+        check("cancel releases the dedupe key", replacement["_created"], True)
         jobs.finish(conn, replacement["id"], "done", result={"items_done": 1})
 
         jobs.worker_started(conn, 1234)

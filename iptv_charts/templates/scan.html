@@ -17,7 +17,8 @@
 </section>
 
 <p class="hint" id="scan-status" role="status">
-  {% if scan_task and scan_task.status == 'running' %}Scanning…{% endif %}
+  {% if scan_task and scan_task.status == 'queued' %}Queued for the worker…
+  {% elif scan_task and scan_task.status == 'running' %}Scanning…{% endif %}
 </p>
 
 <div class="scan-summary">

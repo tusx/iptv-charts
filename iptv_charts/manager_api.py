@@ -58,7 +58,12 @@ def _error(exc: Exception):
             "TVDBError": 502,
             "MetadataError": 502,
         }.get(exc.error_type, 500)
-        return _fail(str(exc), status)
+        message = str(exc)
+        if exc.error_type and message.startswith(f"{exc.error_type}: "):
+            # The worker stores "ValueError: <sentence>" for diagnostics; the
+            # old synchronous API showed the sentence to the user.
+            message = message[len(exc.error_type) + 2:]
+        return _fail(message, status)
     if isinstance(exc, (jobs.WorkerUnavailable, jobs.JobTimeout)):
         return _fail(str(exc), 503)
     if isinstance(exc, jobs.JobCancelled):
@@ -166,7 +171,6 @@ def add_movie():
             conn, tmdb_id,
             profile_id=_int(payload.get("quality_profile_id")),
             monitored=_bool(payload.get("monitored"), True),
-            search_now=False,
             minimum_availability=str(
                 payload.get("minimum_availability") or "released"
             ),
@@ -327,7 +331,6 @@ def add_series():
             conn, tmdb_id,
             profile_id=_int(payload.get("quality_profile_id")),
             monitored=_bool(payload.get("monitored"), True),
-            search_now=False,
             monitor_mode=str(payload.get("monitor_mode") or "all"),
             monitor_new_seasons=str(payload.get("monitor_new_seasons") or "all"),
             priority=_int(payload.get("priority")) or 0,

@@ -277,7 +277,7 @@ def list_movies(conn, *, text: str = "", status: str = "") -> list[dict]:
 
 
 def add_movie(conn, tmdb_id: int, *, profile_id: int | None = None,
-              monitored: bool = True, search_now: bool = True,
+              monitored: bool = True,
               minimum_availability: str = "released", priority: int = 0) -> dict:
     if db.get_one(conn, "SELECT id FROM movies WHERE tmdb_id = ?", (int(tmdb_id),)):
         raise ValueError("That movie is already in your library.")
@@ -652,7 +652,7 @@ def _sync_episodes(conn, series_id: int, episodes: list[dict], *,
 
 
 def add_series(conn, tmdb_id: int, *, profile_id: int | None = None,
-               monitored: bool = True, search_now: bool = True,
+               monitored: bool = True,
                monitor_mode: str = "all", monitor_new_seasons: str = "all",
                priority: int = 0) -> dict:
     if db.get_one(conn, "SELECT id FROM series WHERE tmdb_id = ?", (int(tmdb_id),)):

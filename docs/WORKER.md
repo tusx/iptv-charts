@@ -37,7 +37,9 @@ worker is killed, the next start requeues every row left in `running`;
 download rows interrupted mid-transfer are reset to `queued` and their temp
 files are resumed.
 
-`current_job_id` and a heartbeat live in `worker_state`. `/api/health` and
+`current_job_id` and a heartbeat live in `worker_state`; a lock-free
+`worker.heartbeat.json` is written alongside it so a large restore holding
+SQLite's writer does not make a live worker look dead. `/api/health` and
 Activity expose whether a worker is actually alive, rather than showing a
 healthy UI over a queue that nothing is draining. A `worker.lock` file taken
 with `flock` at startup makes the one-worker rule explicit: a second worker
@@ -56,12 +58,14 @@ exits instead of racing recovery and claiming a different job.
 | `episode_releases` | manual episode release list |
 | `grab_movie` / `grab_episode` | re-probe the selected release, then enqueue the download |
 | `refresh_movie` / `refresh_series` | metadata refresh from TMDB/TVDB |
+| `scan_import` / `scan_import_all` | import reviewed scan results (may add metadata and probe files) |
 
 Automatic search, scheduled tasks and downloads enqueue and return
 immediately. Interactive endpoints (manual search, release lists, grabs and
 metadata refresh) enqueue a job and poll its row while the request is open.
 The HTTP thread is waiting, not doing ffprobe; the heavy work is still in the
-worker process.
+worker process. If the worker is down, the request is still queued and the
+endpoint returns a clear 503; restarting the worker runs it.
 
 ## Periodic tasks
 
@@ -115,9 +119,11 @@ report that the worker is unavailable.
   type, which the API maps back to 404/400/409/502 where appropriate.
 - A download's transient failure remains in the existing retry schedule
   (60 s, then 2 min, …); the worker job is rescheduled for `next_attempt_at`.
-- A user cancel writes `downloads.cancel_requested` (or
-  `worker_jobs.cancel_requested` for a sync). The worker notices from its
-  progress loop and stops at a safe point.
+- A queued job is marked cancelled immediately, which frees its dedupe key.
+  A running download writes `downloads.cancel_requested` and a sync writes
+  `worker_jobs.cancel_requested`; the worker notices from its progress loop
+  and stops at a safe point. A download re-checks its row after waiting for a
+  provider slot and will not start if it was retired in the meantime.
 - SIGTERM stops the loop; an in-flight download is left resumable and a sync is
   interrupted, its job requeued on the next start.
 - Finished jobs older than seven days are pruned when the worker is idle.

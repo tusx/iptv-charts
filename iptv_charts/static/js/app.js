@@ -458,8 +458,10 @@
             snapshot.overall === null ? '35%' : `${(snapshot.overall * 100).toFixed(1)}%`;
         }
         if (label) {
+          // The queue no longer has a durable batch counter; do not invent
+          // "0 of N" while the worker is serialising the syncs.
           label.textContent =
-            `Updating ${snapshot.batch_done} of ${snapshot.batch_total} playlists`;
+            `Updating ${snapshot.batch_total} playlist${snapshot.batch_total === 1 ? '' : 's'}`;
         }
         if (snapshot.overall === null) {
           banner.querySelector('.progress')?.classList.add('progress-indeterminate');
