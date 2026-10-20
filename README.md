@@ -123,14 +123,18 @@ Edit a file, save, refresh the browser. This is the fast loop.
 ```
 
 It creates the virtualenv and installs dependencies on first run, and only
-reinstalls when `requirements.txt` actually changes. In dev mode the media
-library defaults to `~/Media/IPTV Charts`; override it with
-`IPTV_CHARTS_MEDIA_DIR=/some/path`.
+reinstalls when `requirements.txt` actually changes. It starts `worker.py`
+beside the reloading web process; Ctrl+C stops both. Running `python run.py`
+by hand starts HTTP only, so start `python worker.py` in another terminal if
+you do that. In dev mode the media library defaults to
+`~/Media/IPTV Charts`; override it with `IPTV_CHARTS_MEDIA_DIR=/some/path`.
 
 ### Running it for real — `setup.deploy.sh`
 
 Builds a container image and runs it under Podman with a persistent volume and
-a bind-mounted media folder.
+a bind-mounted media folder. Supervisor starts the web process (`run.py`) and
+the background worker (`worker.py`); both write to the same volume and either
+can restart independently.
 
 ```bash
 ./setup.deploy.sh              # build, deploy, open the browser
@@ -316,24 +320,33 @@ reassigned, and at least one profile always remains.
 
 ### Downloads, connection limits and naming
 
-The built-in queue lives in SQLite and is processed by 1–3 worker threads. The
-**playlist's own connection limit** is the hard limit, not a global pause: a
-sync, a metadata call, a probe and a download all take a slot from the same
-per-source registry. The effective limit is, in order:
+The built-in queue lives in SQLite. A separate background worker process
+(`worker.py`, supervised beside the web server) runs **one job at a time**:
+playlist syncs, probe/search passes, downloads/imports, scheduled tasks,
+metadata refreshes and scans. The web process only writes queue rows and reads
+their progress, so a slow provider cannot tie up an HTTP thread. The
+**playlist's own connection limit** is still the hard limit: a sync, a
+metadata call, a probe and a download all take a slot from the same per-source
+registry, now shared across both processes with `flock` lock files. The
+effective limit is, in order:
 
 1. the **connection limit** set on the playlist (add dialog or the card on the
    Playlists page);
 2. the provider's reported `max_connections`;
 3. **1** when neither is known.
 
-When a season is queued against a playlist that allows one connection, its
-episodes are claimed and downloaded one at a time. The download workers stand
-aside while a sync or probe is waiting for a slot, so a busy queue cannot
-starve a sync. Different playlists can download in parallel.
+The worker serialises everything, so a queued season downloads one episode
+after another and a playlist sync cannot overlap a download. Interactive
+searches are queued ahead of downloads, but they still wait for any job already
+running; that is the deliberate price of the single-worker design. Browser
+episode requests and playback take short-lived slots from the same limit while
+the worker is busy.
 
 Queue rows carry a **priority** (-100 to 100, default 0); higher priorities are
 claimed first. A download can be cancelled, retried after failure, and
-inspected in **Activity**, where the priority can be edited.
+inspected in **Activity**, where the priority can be edited. The same page
+shows the worker heartbeat and recent queue jobs. Interrupted jobs and
+downloads are requeued on restart.
 
 - **Direct files** are streamed to `media/.incomplete/` with Range resume,
   Content-Length checks, progress persisted to the database, and a disk-space
@@ -373,8 +386,9 @@ overwritten; a ` (2)` suffix is used instead.
 
 ### Automation, calendar and wanted
 
-The scheduler runs inside the app process (started by `run.py`; disabled with
-`IPTV_CHARTS_SCHEDULER=0`), with one task at a time:
+The worker loop enqueues due tasks and runs them as jobs, one at a time.
+`IPTV_CHARTS_SCHEDULER=0` disables the automatic enqueue (manual task runs
+still work):
 
 - **Search missing** — every 6 hours by default. Monitored missing movies and
   aired, monitored episodes are matched again; files below cutoff are upgraded
@@ -452,9 +466,9 @@ leave the other sections half-saved.
   language, and connection tests that use the stored credentials.
 - **Media management**: media paths and the five naming templates with a
   preview.
-- **Downloads and probing**: worker count, attempts, probe
-  cache/timeout/candidate/budget controls, a probe-cache clear action, and
-  ffmpeg/ffprobe availability.
+- **Downloads and probing**: attempts, probe cache/timeout/candidate/budget
+  controls, a probe-cache clear action, and ffmpeg/ffprobe availability. The
+  worker is deliberately single-job; there is no concurrency setting.
 - **Automation**: search, metadata and playlist-refresh intervals.
 
 Quality profiles, library scan, and backup/restore are action cards on the
@@ -509,21 +523,23 @@ a cancelled re-sync can leave a partial catalog until the next successful sync.
 **Provider connections are a shared, enforced limit.** A playlist's
 connection limit is not advisory: playlist syncs, `get_series_info` metadata
 calls, ffprobe stream probes and downloads all acquire a slot from one
-per-source registry. The download workers use a non-blocking acquire and skip a
-source whose slots are full, while syncs/probes wait; a waiting caller blocks
-new claims so it cannot be starved. When the limit is 1, a queued season is
-downloaded one episode at a time, and a sync starts only when the current
-download releases its slot. Playback launched outside the app (Jellyfin, an
-external player) cannot be accounted for; the app can only enforce what it
-opens itself.
+per-source registry. The registry is a set of `flock` files under the data
+directory, so it spans the web and worker processes and the kernel releases a
+crashed process's slots automatically. The worker runs one job at a time, and
+a browser episode request briefly takes a slot too. When the limit is 1, a
+queued season is downloaded one episode at a time. Playback launched outside
+the app (Jellyfin, an external player) cannot be accounted for; the app can
+only enforce what it opens itself.
 
 **Schema changes need a migration.** `schema.sql` is all `IF NOT EXISTS`, which
 adds new tables but cannot add a column to an existing table. `db.migrate`
 uses `PRAGMA user_version` for that; version 1 adds per-stream M3U headers and
-seeds quality profiles/task state, and version 2 adds stream probes, the
+seeds quality profiles/task state, version 2 adds stream probes, the
 quality-tier/source/audio/subtitle fields, per-playlist connection limits,
-queue priority, movie availability and new-season monitoring. Existing
-databases are upgraded at startup.
+queue priority, movie availability and new-season monitoring, and version 3
+adds the durable worker queue/state plus the cross-process download cancel
+flag. Existing databases are upgraded at startup; web and worker serialise the
+first-run migration with a file lock.
 
 **Search has to be written carefully.** The natural way to search an FTS index
 with a filter —
@@ -549,6 +565,8 @@ library matcher uses the same shape without the source filter.
   dashboard, playlist editing/catalog identity, and the atomic settings save.
 - [`docs/METADATA_PROVIDERS.md`](docs/METADATA_PROVIDERS.md) — TMDB read-token
   authentication and the TVDB v4 login/search/episode/pagination contract.
+- [`docs/WORKER.md`](docs/WORKER.md) — the durable one-job-at-a-time worker,
+  its queue, connection locks, recovery and deployment.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow and invariants.
 - [`LICENSE`](LICENSE) — MIT.
@@ -559,11 +577,11 @@ library matcher uses the same shape without the source filter.
 ./setup.test.sh --check
 ```
 
-Runs five suites, 632 checks, none of which touch the internet:
+Runs five suites, 654 checks, none of which touch the internet:
 
 | Suite | Covers |
 |---|---|
-| `tests/smoke.py` | Parsers, schema, migrations, FTS, streaming, player commands, quality/naming/matching, languages, probes, connection limits, request guards |
+| `tests/smoke.py` | Parsers, schema, migrations, worker queue claim/dedupe/recovery, FTS, streaming, player commands, quality/naming/matching, languages, probes, connection limits, request guards |
 | `tests/integration.py` | Real ingest against a local fixture provider |
 | `tests/bridge.py` | The queue protocol, against the real host bridge and a fake player |
 | `tests/endtoend.py` | The HTTP API and rendered pages, via Flask's test client |
@@ -582,8 +600,10 @@ container is exercised end to end.
 ## Project layout
 
 ```
-run.py               entry point (waitress; --dev for the Flask reloader)
-setup.test.sh        live dev build
+run.py               web entry point (waitress; --dev for the Flask reloader)
+worker.py            background worker entry point (one job at a time)
+supervisord.conf     container process supervision (web + worker)
+setup.test.sh        live dev build (starts both processes)
 setup.deploy.sh      container build and deploy
 Containerfile        image definition (includes ffmpeg for downloads)
 iptv_charts/
@@ -594,7 +614,9 @@ iptv_charts/
   settings_service.py atomic validation/save for the unified settings form
   config.py          path resolution, port selection, media folders
   db.py              SQLite connections, schema, migrations, bulk-load tuning
-  sync.py            the ingest engine, progress state, cancellation
+  jobs.py            durable worker queue: enqueue, claim, progress, recovery
+  worker.py          worker loop, handlers and heartbeat
+  sync.py            the ingest engine, durable progress, cancellation
   sources.py         source CRUD and credential probing
   items.py           catalog search and stream URL construction
   player.py          which player to use, how to run it, host bridge client
@@ -602,13 +624,13 @@ iptv_charts/
   matching.py        provider name normalisation, source and release scoring
   quality.py         quality tiers, source/audio/subtitle checks, cutoff decisions
   languages.py       ISO 639-1/2B folding for metadata and stream tags
-  connections.py     per-playlist connection registry and fairness
+  connections.py     cross-process per-playlist slots (flock files)
   streams.py         provider identity -> URL, headers, container, HLS
   probe.py           ffprobe on the URL, normalised stream facts and cache
   naming.py          templates, sanitisation, path confinement
   library.py         movies/series CRUD, episode sync, search/grab, import
-  downloader.py      durable priority queue, HTTP/HLS downloads, recovery
-  scheduler.py       periodic tasks and manual task runs
+  downloader.py      durable download rows, HTTP/HLS transfers, recovery
+  scheduler.py       periodic task scheduling and task handlers
   scan.py            library scan/review/import
   backup.py          logical ZIP export and restore
   clients/
@@ -619,6 +641,8 @@ iptv_charts/
     streaming.py     shared spool/progress primitives
   templates/         Jinja templates (home, playlist edit, unified settings, library)
   static/            CSS, JS, vendored hls.js
+docs/
+  WORKER.md          queue, worker loop, durability and deployment
 scripts/
   player-bridge.sh   host-side watcher that plays streams for the container
 tests/

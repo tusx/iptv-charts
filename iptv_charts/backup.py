@@ -16,7 +16,7 @@ import time
 import zipfile
 from typing import Any
 
-from . import config, db, downloader, naming, scheduler, sync
+from . import config, db, downloader, jobs, naming, scheduler, sync
 
 logger = logging.getLogger("iptv_charts.backup")
 
@@ -217,6 +217,11 @@ def restore(conn, data: bytes) -> dict:
         raise RestoreBusy("A playlist sync is running. Wait for it to finish first.")
     if scheduler.is_running():
         raise RestoreBusy("A library task is running. Wait for it to finish first.")
+    if jobs.active_count(conn):
+        raise RestoreBusy(
+            "The background worker still has a queued or running job. "
+            "Wait for it to finish first."
+        )
     active = db.get_one(
         conn,
         "SELECT COUNT(*) AS n FROM downloads WHERE status IN (?, ?, ?)",
@@ -233,6 +238,12 @@ def restore(conn, data: bytes) -> dict:
         # from. The catalog is re-synced after a restore, so discard probes
         # rather than letting a stale resolution/audio decision survive.
         conn.execute("DELETE FROM stream_probes")
+        # Active queue rows would point at the library being replaced. The
+        # check above guarantees there are none; terminal history is harmless
+        # and stays for the Activity page.
+        conn.execute(
+            "DELETE FROM worker_jobs WHERE status IN ('queued', 'running')"
+        )
         for table in ("scan_results", "history", "downloads", "series_episodes",
                       "movies", "series", "quality_profiles", "task_state",
                       "settings", "sources"):

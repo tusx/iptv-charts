@@ -217,19 +217,13 @@
     <h2>Downloads and probing</h2>
     <p class="hint">
       Every candidate is inspected with ffprobe before it is downloaded. The
-      playlist's own connection limit is enforced across probes, syncs and
-      downloads; a season therefore downloads one episode at a time when the
-      limit is 1. Downloads for different playlists may run in parallel.
+      background worker processes exactly one job at a time — a playlist sync,
+      a probe/search pass or a download — so a season downloads one episode
+      after another and nothing competes for the provider's connection limit.
+      Playlists can still play in a browser while the worker is busy; those
+      short calls share the same per-playlist slot limit.
     </p>
     <div class="field-row">
-      <label class="field">
-        <span>Download workers</span>
-        <select id="download-concurrency">
-          <option value="1" {% if download_concurrency == '1' %}selected{% endif %}>1</option>
-          <option value="2" {% if download_concurrency == '2' %}selected{% endif %}>2</option>
-          <option value="3" {% if download_concurrency == '3' %}selected{% endif %}>3</option>
-        </select>
-      </label>
       <label class="field">
         <span>Attempts per download</span>
         <input type="number" id="download-attempts" min="1" max="10" value="{{ download_max_attempts }}">

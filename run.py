@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Entry point for IPTV Charts.
+"""Web server entry point for IPTV Charts.
 
-Serves the app on loopback with waitress and opens the user's browser.
+This process serves HTTP only. Playlist syncs, probing, downloads and scheduled
+tasks run in the separate ``worker.py`` process; in the container both are
+supervised together. Use ``setup.test.sh`` for the local loop, which starts
+both.
 
 Usage:
     python run.py                 # pick a free port and open a browser
@@ -12,13 +15,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import signal
 import sys
 import threading
 import webbrowser
 
-from iptv_charts import config, downloader, scheduler
+from iptv_charts import config
 from iptv_charts.app import create_app
 
 
@@ -78,19 +80,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_browser:
         _open_browser_later(url)
 
-    def start_background_services() -> None:
-        # The downloader recovers rows interrupted by a restart; the scheduler
-        # then sets its persisted next-run times. Both are daemon threads.
-        downloader.start()
-        scheduler.start()
-
     if args.dev:
         # Reloader is convenient for editing but must never be the default:
         # it is single-threaded by default and not intended to be left running.
-        # The reloader runs this file twice; only the serving child (the one
-        # Flask re-executes with WERKZEUG_RUN_MAIN) may run the workers/tasks.
-        if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-            start_background_services()
+        # It reloads this web process only; restart worker.py after editing
+        # worker code.
         app.run(host=args.host, port=port, debug=True, threaded=True)
     else:
         import logging
@@ -120,12 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signal.SIGTERM, _shutdown)
         signal.signal(signal.SIGINT, _shutdown)
 
-        start_background_services()
-        try:
-            server.run()
-        finally:
-            scheduler.stop()
-            downloader.shutdown()
+        server.run()
 
     return 0
 

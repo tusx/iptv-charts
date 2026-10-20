@@ -72,7 +72,7 @@ else
 fi
 
 # Catch syntax errors before the server does.
-if ! "$venv/bin/python" -m compileall -q "$root/iptv_charts" "$root/run.py"; then
+if ! "$venv/bin/python" -m compileall -q "$root/iptv_charts" "$root/run.py" "$root/worker.py"; then
     echo "error: syntax errors above" >&2
     exit 1
 fi
@@ -113,4 +113,19 @@ if ! $open_browser; then
     run_args+=(--no-browser)
 fi
 
-exec "$venv/bin/python" "$root/run.py" "${run_args[@]}"
+# The worker is a separate process, just as it is in the container. It does not
+# use the reloader: after editing worker-side code, restart this script.
+worker_pid=""
+cleanup() {
+    if [[ -n "$worker_pid" ]] && kill -0 "$worker_pid" 2>/dev/null; then
+        kill "$worker_pid" 2>/dev/null || true
+        wait "$worker_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+echo "==> starting background worker"
+"$venv/bin/python" "$root/worker.py" &
+worker_pid=$!
+
+"$venv/bin/python" "$root/run.py" "${run_args[@]}"

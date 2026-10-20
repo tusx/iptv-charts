@@ -8,6 +8,7 @@ its own. Connections are never shared across threads.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import sqlite3
 import time
@@ -22,7 +23,7 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 #: Bumped whenever schema.sql starts relying on a column that existing
 #: databases do not have. New tables appear through CREATE IF NOT EXISTS;
 #: columns need an explicit step below.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _TASKS = ("search_missing", "refresh_metadata", "refresh_catalog", "scan_library")
 
@@ -211,17 +212,40 @@ def migrate(conn: sqlite3.Connection) -> None:
                 (json.dumps(tiers), row["id"]),
             )
 
+    if version < 3:
+        # The web process sets this flag; the worker owns the transfer and
+        # checks the flag while it runs. A column rather than an in-memory
+        # event because the two are separate processes.
+        if "cancel_requested" not in _columns(conn, "downloads"):
+            conn.execute(
+                "ALTER TABLE downloads ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+            )
+
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
 
 def init_db(path: Path | None = None) -> None:
-    conn = connect(path)
-    try:
-        apply_schema(conn)
-        migrate(conn)
-    finally:
-        conn.close()
+    """Create or migrate the database, serialising concurrent startups.
+
+    The web server and the background worker start together in the container
+    and both call this. ``CREATE TABLE IF NOT EXISTS`` is safe to race, but an
+    ``ALTER TABLE`` in a migration is not: the second process would see the
+    column appear between its check and its own ALTER. An advisory file lock
+    around the whole operation makes first-run startup deterministic.
+    """
+    target = path or config.db_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.parent / ".iptv-charts-init.lock"
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        conn = connect(target)
+        try:
+            apply_schema(conn)
+            migrate(conn)
+        finally:
+            conn.close()
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 @contextmanager

@@ -369,6 +369,10 @@ CREATE TABLE IF NOT EXISTS downloads (
     error             TEXT,
     temp_path         TEXT,
     final_path        TEXT,
+    -- Set by the web process when the user presses Cancel. The worker owns the
+    -- actual download and notices this flag, either before it starts or from
+    -- its progress loop. SQLite is the only channel between the two processes.
+    cancel_requested  INTEGER NOT NULL DEFAULT 0,
     requested_at      INTEGER NOT NULL,
     started_at        INTEGER,
     finished_at       INTEGER,
@@ -457,4 +461,62 @@ CREATE TABLE IF NOT EXISTS task_state (
     status        TEXT    NOT NULL DEFAULT 'idle',
     message       TEXT,
     next_run      INTEGER
+);
+
+-- --------------------------------------------------------------------------
+-- Background worker queue
+--
+-- The web process only inserts rows here and reads their status. A separate
+-- worker process claims exactly one row at a time and runs its handler; that
+-- worker is the only process that talks to providers, runs ffprobe/ffmpeg or
+-- writes media files. Keeping the queue in SQLite means a restart cannot lose
+-- a requested sync, search or download, and both processes see the same
+-- progress without IPC.
+-- --------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS worker_jobs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind            TEXT    NOT NULL,
+    payload         TEXT    NOT NULL DEFAULT '{}',
+    -- queued | running | done | error | cancelled
+    status          TEXT    NOT NULL DEFAULT 'queued'
+        CHECK (status IN ('queued', 'running', 'done', 'error', 'cancelled')),
+    priority        INTEGER NOT NULL DEFAULT 0,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    -- Progress for the UI. `message` is the short human line; `progress_data`
+    -- is a JSON object with job-specific fields (phase, detail, byte counts).
+    message         TEXT,
+    progress_data   TEXT,
+    result          TEXT,
+    error           TEXT,
+    error_type      TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    -- Unix seconds. A retry can be scheduled for the future without holding
+    -- the worker open.
+    available_at    INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL,
+    started_at      INTEGER,
+    finished_at     INTEGER,
+    -- Active jobs only. The partial unique index below makes concurrent
+    -- enqueues of the same sync/download/search collapse to one row.
+    dedupe_key      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_jobs_queue
+    ON worker_jobs (status, priority DESC, available_at, id);
+
+-- SQLite supports partial indexes, and they express the dedupe rule exactly:
+-- a key may repeat after the previous job reached a terminal state.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_jobs_dedupe
+    ON worker_jobs (dedupe_key)
+    WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'running');
+
+-- One row. The web health check uses heartbeat_at to tell whether a worker is
+-- actually running, rather than presenting a healthy UI over a dead queue.
+CREATE TABLE IF NOT EXISTS worker_state (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    pid           INTEGER,
+    started_at    INTEGER,
+    heartbeat_at  INTEGER,
+    current_job_id INTEGER,
+    status        TEXT NOT NULL DEFAULT 'starting'
 );

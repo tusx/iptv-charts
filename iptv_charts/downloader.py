@@ -2,9 +2,10 @@
 
 Downloads are durable rows in SQLite, not in-memory jobs: a container restart
 must not lose a queue, and progress must survive long enough to be inspected.
-Workers claim rows atomically, write to ``media/.incomplete`` (same filesystem
-as the library), and hand the finished file to ``library.import_download`` for
-an atomic rename and the naming templates.
+The background worker claims one download job at a time, writes to
+``media/.incomplete`` (same filesystem as the library), and hands the finished
+file to ``library.import_download`` for an atomic rename and the naming
+templates. The web process only inserts rows and reads progress.
 
 The provider is the download source; there is no external download client.
 Direct HTTP is used for normal files, and ffmpeg for HLS playlists.
@@ -27,7 +28,7 @@ from typing import Any, Mapping
 
 import requests
 
-from . import config, connections, db, library, naming, player, quality, streams
+from . import config, connections, db, jobs, library, naming, player, quality, streams
 
 logger = logging.getLogger("iptv_charts.downloads")
 
@@ -75,10 +76,17 @@ def _resolve(conn, download: Mapping[str, Any]) -> streams.StreamRef:
 
 
 class DownloadManager:
+    """One durable download, executed by the background worker.
+
+    There are deliberately no worker threads here any more. The worker loop
+    claims a ``worker_jobs`` row, calls ``process`` for its download id, and
+    gets back an outcome. That is how a sync, a probe search and a download
+    can never overlap -- the worker runs one at a time.
+    """
+
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._workers: dict[int, threading.Thread] = {}
-        self._cancels: dict[int, threading.Event] = {}
+        # Set by a graceful worker shutdown. Unlike a user cancel, an
+        # interruption keeps the row and temp file for a resume.
         self._stop = threading.Event()
 
     # ------------------------------------------------------------- lifecycle
@@ -91,143 +99,203 @@ class DownloadManager:
 
     @staticmethod
     def concurrency(conn) -> int:
+        # Retained for the settings API and old databases. The worker processes
+        # one download at a time by design; this value is informational now.
         try:
             return max(1, min(3, int(db.get_setting(conn, "download_concurrency", "1") or 1)))
         except (TypeError, ValueError):
             return 1
 
+    def _queue_job(self, conn, download_id: int, priority: int | None = None) -> None:
+        row = db.get_one(
+            conn, "SELECT priority FROM downloads WHERE id = ?", (int(download_id),)
+        )
+        value = int(row["priority"]) if row is not None else 0
+        jobs.enqueue(
+            conn, "download", {"download_id": int(download_id)},
+            priority=self._priority(priority if priority is not None else value),
+            dedupe_key=f"download:{int(download_id)}",
+        )
+
+    def _queue_queued(self, conn) -> int:
+        rows = conn.execute(
+            "SELECT id, priority FROM downloads WHERE status = 'queued' ORDER BY id"
+        ).fetchall()
+        for row in rows:
+            self._queue_job(conn, int(row["id"]), int(row["priority"] or 0))
+        return len(rows)
+
     def recover(self) -> None:
-        """Requeue rows interrupted by a restart, then start the workers."""
+        """Requeue rows interrupted by a restart and recreate their queue jobs."""
+        self._stop.clear()
         conn = db.connect()
         try:
             conn.execute(
                 "UPDATE downloads SET status = 'queued', error = NULL, "
-                "next_attempt_at = NULL WHERE status IN ('downloading', 'importing')"
+                "cancel_requested = 0, next_attempt_at = NULL "
+                "WHERE status IN ('downloading', 'importing')"
             )
             conn.commit()
+            self._queue_queued(conn)
         finally:
             conn.close()
-        self.ensure_started()
 
     def ensure_started(self) -> None:
+        """Queue any durable download rows that do not have an active job.
+
+        Kept as a compatibility facade for older callers. It never starts a
+        thread: the worker is a separate process in production and a test
+        harness may run one in-process.
+        """
         conn = db.connect()
         try:
-            allowed = self.concurrency(conn)
+            self._queue_queued(conn)
         finally:
             conn.close()
-        with self._lock:
-            for index in range(allowed):
-                thread = self._workers.get(index)
-                if thread is not None and thread.is_alive():
-                    continue
-                thread = threading.Thread(
-                    target=self._worker, args=(index,), name=f"iptv-download-{index + 1}",
-                    daemon=True,
-                )
-                self._workers[index] = thread
-                thread.start()
-
-    def _worker_exit(self, index: int) -> None:
-        with self._lock:
-            if self._workers.get(index) is threading.current_thread():
-                self._workers.pop(index, None)
 
     def shutdown(self, timeout: float = 3.0) -> None:
-        # Deliberately not setting the cancel events: a clean stop should leave
-        # the row and its temp file in place so the next start can resume,
-        # unlike a user cancel, which is final.
+        # Deliberately not cancelling rows: a clean stop leaves the row and its
+        # temp file in place for the next start to resume.
         self._stop.set()
-        with self._lock:
-            threads = list(self._workers.values())
-        for thread in threads:
-            thread.join(timeout=timeout)
 
-    def _worker(self, index: int) -> None:
-        conn = None
-        try:
-            conn = db.connect()
-            while not self._stop.is_set():
-                allowed = self.concurrency(conn)
-                if index >= allowed:
-                    break
-                job = self._claim(conn)
-                if job is None:
-                    time.sleep(1.0)
-                    continue
-                self._process(conn, job)
-        except Exception as exc:  # never let one worker take the queue down
-            logger.exception("download worker stopped: %s", exc)
-        finally:
-            if conn is not None:
-                conn.close()
-            self._worker_exit(index)
+    # ------------------------------------------------------------- one download
+    def process(self, download_id: int) -> dict:
+        """Run one queued download to a terminal state (or a retry).
 
-    def _claim(self, conn) -> dict | None:
-        """Claim the highest-priority row whose playlist has a free slot.
-
-        The connection slot is acquired before the row is marked downloading
-        and held until ``_process`` finishes. When the playlist's limit is
-        reached, a lower-priority row from another playlist may run; that is
-        deliberate, because waiting for one full download would leave a
-        second provider idle.
+        The worker has already claimed the surrounding job. This method owns
+        the provider connection slot for the duration and returns an outcome
+        the worker runner can translate into a job status.
         """
-        acquired_source: int | None = None
+        conn = db.connect()
+        download_id = int(download_id)
+        cancel = threading.Event()
+        watcher_stop = threading.Event()
+        watcher: threading.Thread | None = None
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                "SELECT * FROM downloads WHERE status = 'queued' "
-                "AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
-                "ORDER BY priority DESC, requested_at, id LIMIT 50",
-                (_now(),),
-            ).fetchall()
-            row = None
-            limits: dict[int, int] = {}
-            for candidate in rows:
-                source_id = candidate["source_id"]
-                if source_id is None:
-                    # Let it fail with a clear permanent error; no provider
-                    # call is made for it, so no slot is needed.
-                    row = candidate
-                    break
-                source_id = int(source_id)
-                limit = limits.get(source_id)
-                if limit is None:
-                    limit = connections.effective_limit(conn, source_id)
-                    limits[source_id] = limit
-                if connections.try_acquire(source_id, limit=limit):
-                    acquired_source = source_id
-                    row = candidate
-                    break
+            row = db.get_one(conn, "SELECT * FROM downloads WHERE id = ?", (download_id,))
             if row is None:
+                return {"status": "cancelled", "message": "The download no longer exists."}
+            if row["status"] != "queued":
+                if row["status"] == "cancelled":
+                    return {"status": "cancelled", "message": "Cancelled"}
+                return {"status": "done", "message": row["status"]}
+
+            job = dict(row)
+            connection_source = job.get("source_id")
+            job["attempts"] = int(job.get("attempts") or 0) + 1
+            job["status"] = "downloading"
+
+            def watch_cancel() -> None:
+                wconn = None
+                try:
+                    wconn = db.connect()
+                    while not watcher_stop.wait(0.75):
+                        current = wconn.execute(
+                            "SELECT cancel_requested FROM downloads WHERE id = ?",
+                            (download_id,),
+                        ).fetchone()
+                        if current is not None and current["cancel_requested"]:
+                            cancel.set()
+                            return
+                except Exception:
+                    pass
+                finally:
+                    if wconn is not None:
+                        wconn.close()
+
+            if connection_source is not None:
+                with connections.acquire(
+                    conn, int(connection_source), purpose="Download", timeout=3600.0
+                ):
+                    conn.execute(
+                        "UPDATE downloads SET status = 'downloading', "
+                        "started_at = COALESCE(started_at, ?), attempts = ?, "
+                        "next_attempt_at = NULL, error = NULL WHERE id = ?",
+                        (_now(), job["attempts"], download_id),
+                    )
+                    conn.commit()
+                    job["_connection_source"] = None
+                    watcher = threading.Thread(
+                        target=watch_cancel, name=f"iptv-download-cancel-{download_id}",
+                        daemon=True,
+                    )
+                    watcher.start()
+                    self._process(conn, job, cancel)
+            else:
+                conn.execute(
+                    "UPDATE downloads SET status = 'downloading', "
+                    "started_at = COALESCE(started_at, ?), attempts = ?, "
+                    "next_attempt_at = NULL, error = NULL WHERE id = ?",
+                    (_now(), job["attempts"], download_id),
+                )
                 conn.commit()
-                return None
-            attempts = int(row["attempts"]) + 1
-            cursor = conn.execute(
-                "UPDATE downloads SET status = 'downloading', "
-                "started_at = COALESCE(started_at, ?), attempts = ?, "
-                "next_attempt_at = NULL, error = NULL "
-                "WHERE id = ? AND status = 'queued'",
-                (_now(), attempts, row["id"]),
+                job["_connection_source"] = None
+                watcher = threading.Thread(
+                    target=watch_cancel, name=f"iptv-download-cancel-{download_id}",
+                    daemon=True,
+                )
+                watcher.start()
+                self._process(conn, job, cancel)
+
+            result = db.get_one(
+                conn,
+                "SELECT status, error, next_attempt_at FROM downloads WHERE id = ?",
+                (download_id,),
             )
-            if cursor.rowcount != 1:
-                conn.rollback()
-                if acquired_source is not None:
-                    connections.release(acquired_source)
-                return None
+            if result is None:
+                return {"status": "done", "message": "Download row removed."}
+            status = str(result["status"])
+            if status == "queued":
+                return {
+                    "status": "queued", "retry": True,
+                    "available_at": int(result["next_attempt_at"] or _now()),
+                    "message": result["error"] or "Retrying download.",
+                }
+            if status == "cancelled":
+                conn.execute(
+                    "UPDATE downloads SET cancel_requested = 0 WHERE id = ?", (download_id,)
+                )
+                conn.commit()
+                return {"status": "cancelled", "message": "Cancelled"}
+            if status == "failed":
+                conn.execute(
+                    "UPDATE downloads SET cancel_requested = 0 WHERE id = ?", (download_id,)
+                )
+                conn.commit()
+                return {
+                    "status": "done",
+                    "message": f"Download failed: {result['error'] or 'unknown error'}",
+                    "result": {"status": "failed"},
+                }
+            conn.execute(
+                "UPDATE downloads SET cancel_requested = 0 WHERE id = ?", (download_id,)
+            )
             conn.commit()
-        except Exception:
+            return {"status": "done", "message": "Imported", "result": {"status": "imported"}}
+        except connections.ConnectionBusy as exc:
+            return {"status": "queued", "retry": True, "available_at": _now(),
+                    "message": str(exc)}
+        except Exception as exc:
+            logger.exception("downloads: #%d could not be processed: %s", download_id, exc)
             try:
-                conn.rollback()
+                conn.execute(
+                    "UPDATE downloads SET status = 'queued', error = ?, "
+                    "next_attempt_at = ? WHERE id = ? AND status IN "
+                    "('queued', 'downloading', 'importing')",
+                    (_redact(str(exc)), _now() + 60, download_id),
+                )
+                conn.commit()
             except Exception:
                 pass
-            if acquired_source is not None:
-                connections.release(acquired_source)
-            return None
-        job = dict(row)
-        job["attempts"] = attempts
-        job["status"] = "downloading"
-        job["_connection_source"] = acquired_source
-        return job
+            return {
+                "status": "queued", "retry": True, "available_at": _now() + 60,
+                "message": _redact(str(exc)),
+            }
+        finally:
+            watcher_stop.set()
+            if watcher is not None:
+                watcher.join(timeout=2.0)
+            conn.close()
 
     # ------------------------------------------------------------------ queue
     @staticmethod
@@ -287,7 +355,7 @@ class DownloadManager:
         conn.commit()
         logger.info("downloads: queued movie %s (#%d, %s)", movie["title"],
                     download_id, release.get("resolution"))
-        self.ensure_started()
+        self._queue_job(conn, download_id, priority_value)
         return dict(db.get_one(conn, "SELECT * FROM downloads WHERE id = ?", (download_id,)))
 
     def enqueue_episode(self, conn, series: Mapping[str, Any], episode: Mapping[str, Any],
@@ -336,7 +404,7 @@ class DownloadManager:
         conn.commit()
         logger.info("downloads: queued episode %s (#%d, %s)", label, download_id,
                     candidate.get("resolution"))
-        self.ensure_started()
+        self._queue_job(conn, download_id, priority_value)
         return dict(db.get_one(conn, "SELECT * FROM downloads WHERE id = ?", (download_id,)))
 
     def cancel_download(self, conn, download_id: int) -> dict:
@@ -345,22 +413,26 @@ class DownloadManager:
             raise LookupError("That download no longer exists.")
         if row["status"] in TERMINAL:
             raise ValueError("That download has already finished.")
-        with self._lock:
-            event = self._cancels.get(int(download_id))
-        if event is not None:
-            event.set()
-            conn.execute(
-                "UPDATE downloads SET error = 'Cancelling…' WHERE id = ?", (int(download_id),)
-            )
-        else:
+        if row["status"] == "queued":
+            # Nothing has started yet, so this is final immediately. The
+            # worker will claim the job later, see a non-queued row and mark
+            # the job cancelled.
             conn.execute(
                 "UPDATE downloads SET status = 'cancelled', finished_at = ?, "
-                "error = 'Cancelled' WHERE id = ?", (_now(), int(download_id))
+                "error = 'Cancelled', cancel_requested = 0 WHERE id = ?",
+                (_now(), int(download_id)),
             )
             library.add_history(
                 conn, "cancelled", row["title"], kind=row["kind"],
                 movie_id=row["movie_id"], series_id=row["series_id"],
                 episode_id=row["episode_id"], download_id=row["id"],
+            )
+        else:
+            # The worker owns the transfer. The flag is its only channel.
+            conn.execute(
+                "UPDATE downloads SET cancel_requested = 1, error = 'Cancelling…' "
+                "WHERE id = ?",
+                (int(download_id),),
             )
         conn.commit()
         return dict(db.get_one(conn, "SELECT * FROM downloads WHERE id = ?", (int(download_id),)))
@@ -379,14 +451,22 @@ class DownloadManager:
             f"SELECT * FROM downloads WHERE {' AND '.join(clauses)}", params
         ).fetchall()
         for row in rows:
-            with self._lock:
-                event = self._cancels.get(int(row["id"]))
-            if event is not None:
-                event.set()
-            else:
+            if row["status"] == "queued":
                 conn.execute(
                     "UPDATE downloads SET status = 'cancelled', finished_at = ?, "
-                    "error = 'Cancelled' WHERE id = ?", (_now(), row["id"])
+                    "error = 'Cancelled', cancel_requested = 0 WHERE id = ?",
+                    (_now(), row["id"]),
+                )
+                library.add_history(
+                    conn, "cancelled", row["title"], kind=row["kind"],
+                    movie_id=row["movie_id"], series_id=row["series_id"],
+                    episode_id=row["episode_id"], download_id=row["id"],
+                )
+            else:
+                conn.execute(
+                    "UPDATE downloads SET cancel_requested = 1, error = 'Cancelling…' "
+                    "WHERE id = ?",
+                    (row["id"],),
                 )
         conn.commit()
 
@@ -401,12 +481,12 @@ class DownloadManager:
             temp_path = None
         conn.execute(
             "UPDATE downloads SET status = 'queued', attempts = 0, error = NULL, "
-            "finished_at = NULL, next_attempt_at = NULL, temp_path = ?, bytes_done = 0 "
-            "WHERE id = ?",
+            "finished_at = NULL, next_attempt_at = NULL, temp_path = ?, "
+            "bytes_done = 0, cancel_requested = 0 WHERE id = ?",
             (temp_path, int(download_id)),
         )
         conn.commit()
-        self.ensure_started()
+        self._queue_job(conn, int(download_id), int(row["priority"] or 0))
         return dict(db.get_one(conn, "SELECT * FROM downloads WHERE id = ?", (int(download_id),)))
 
     def remove_download(self, conn, download_id: int) -> None:
@@ -419,12 +499,9 @@ class DownloadManager:
         conn.commit()
 
     # -------------------------------------------------------------- processing
-    def _process(self, conn, job: dict) -> None:
+    def _process(self, conn, job: dict, cancel: threading.Event) -> None:
         download_id = int(job["id"])
         connection_source = job.pop("_connection_source", None)
-        cancel = threading.Event()
-        with self._lock:
-            self._cancels[download_id] = cancel
         temp_path: Path | None = None
         try:
             resolved = _resolve(conn, job)
@@ -524,8 +601,6 @@ class DownloadManager:
         finally:
             if connection_source is not None:
                 connections.release(int(connection_source))
-            with self._lock:
-                self._cancels.pop(download_id, None)
 
     @staticmethod
     def _mark_interrupted(conn, job: Mapping[str, Any], download_id: int) -> None:
@@ -827,8 +902,18 @@ def start() -> None:
     _manager.recover()
 
 
+def recover() -> None:
+    """Requeue interrupted rows and recreate their queue jobs (worker startup)."""
+    _manager.recover()
+
+
 def ensure_started() -> None:
     _manager.ensure_started()
+
+
+def process_download(download_id: int) -> dict:
+    """Execute one queued download. Used by the background worker only."""
+    return _manager.process(int(download_id))
 
 
 def shutdown(timeout: float = 3.0) -> None:
@@ -897,6 +982,8 @@ __all__ = [
     "ensure_started",
     "enqueue_episode",
     "enqueue_movie",
+    "process_download",
+    "recover",
     "remove_download",
     "retry_download",
     "shutdown",

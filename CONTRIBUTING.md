@@ -9,7 +9,7 @@ provider and metadata APIs the user configures.
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-./setup.test.sh              # live dev server with auto-reload
+./setup.test.sh              # live dev server + worker, auto-reload
 ./setup.test.sh --check      # all five test suites, no network
 ```
 
@@ -38,6 +38,12 @@ package:
   and backup contents are untrusted. Paths go through `naming`, headers through
   `streams.clean_header`, URLs are rebuilt server-side, and every process is
   started without a shell.
+- **Web requests do not do background work.** New slow or provider-facing
+  operation belongs in a `worker_jobs` handler in `iptv_charts/worker.py`;
+  the HTTP route enqueues and, if it needs a result, polls. Do not start a
+  thread in the web process or call ffprobe/ffmpeg from a request handler.
+  The worker runs one job at a time, so handlers must be self-contained and
+  leave durable progress/state in SQLite.
 - **Library identity.** Never store an `items.id`: a playlist sync replaces
   catalog rows. Store `(source_id, kind, remote_id)` and an episode stream id.
 - **No transcoding.** HLS is remuxed with `-c copy`. The app files media for
@@ -56,7 +62,7 @@ package:
 
 | Suite | What it protects |
 |---|---|
-| `tests/smoke.py` | Parsers, migrations, FTS, quality/language/probe/connection units |
+| `tests/smoke.py` | Parsers, migrations, worker queue, FTS, quality/language/probe/connection units |
 | `tests/integration.py` | Ingest against the local fixture provider |
 | `tests/bridge.py` | The host player queue contract |
 | `tests/endtoend.py` | HTTP routes and rendered pages |

@@ -30,7 +30,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 
 import integration  # noqa: E402  (sets its own temp paths; we override below)
-from iptv_charts import db, downloader, metadata, scheduler, sources, sync  # noqa: E402
+from iptv_charts import db, downloader, metadata, scheduler, sources, sync, worker  # noqa: E402
 from iptv_charts.clients import tvdb as tvdb_client  # noqa: E402
 
 _TMP = Path(tempfile.mkdtemp(prefix="iptv-manager-test-"))
@@ -704,6 +704,7 @@ def main() -> int:
 
     app = create_app()
     client = app.test_client()
+    worker.start_background()
 
     try:
         # ------------------------------------------------------------- catalog
@@ -1313,6 +1314,25 @@ def main() -> int:
         activity_payload = client.get("/api/activity").get_json()
         check("activity API has a queue", isinstance(activity_payload.get("active"), list), True)
         check_true("activity API includes task state", activity_payload.get("tasks"))
+        check_true("activity API includes worker jobs", activity_payload.get("worker"))
+        check("activity API sees the worker", activity_payload["worker_status"]["alive"], True)
+
+        health_payload = client.get("/api/health").get_json()
+        check("health sees the worker", health_payload["worker"]["alive"], True)
+        conn = db.connect()
+        kinds = {
+            row["kind"] for row in conn.execute(
+                "SELECT DISTINCT kind FROM worker_jobs"
+            )
+        }
+        stuck = conn.execute(
+            "SELECT COUNT(*) AS n FROM worker_jobs "
+            "WHERE status IN ('queued', 'running')"
+        ).fetchone()["n"]
+        conn.close()
+        check_true("syncs, searches and downloads all ran through the worker",
+                   {"sync", "download", "search_movie", "search_series", "task"} <= kinds)
+        check("worker queue is idle after the suite", stuck, 0)
         tasks_payload = client.get("/api/tasks").get_json()
         check("tasks API lists all four tasks", len(tasks_payload.get("tasks", [])), 4)
 
@@ -1371,6 +1391,7 @@ def main() -> int:
         traceback.print_exc()
         check("manager suite completed without an exception", False, True)
     finally:
+        worker.stop_background()
         downloader.shutdown()
         scheduler.stop()
         server.shutdown()

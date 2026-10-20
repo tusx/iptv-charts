@@ -4,6 +4,46 @@ All notable changes to IPTV Charts are recorded here. The project follows
 semantic-ish versioning while the app is pre-1.0: the minor version changes
 when the library schema or user-visible workflow changes.
 
+## 0.6.0 — 2026-10-20
+
+### Added
+
+- **A separate background worker and durable job queue.** The container now
+  runs `run.py` (HTTP only) and `worker.py` (one infinite loop) under
+  supervisor. Playlist syncs, candidate searches/ffprobe, downloads/imports,
+  scheduled tasks, metadata refreshes and scans are `worker_jobs` rows in
+  SQLite. The web process only enqueues and polls; it no longer starts sync,
+  download or scheduler threads.
+- Job priority and dedupe: a sync/download/search already queued or running is
+  not duplicated; interactive searches run ahead of scheduled work. The
+  Activity page shows the worker heartbeat and recent jobs.
+- Progress survives a reload and is visible across processes: sync phase,
+  bytes, items and messages are written to `worker_jobs` and `sources`, and a
+  download keeps using its existing row.
+- Interrupted jobs are requeued on startup; interrupted downloads resume from
+  their temp file. The worker can be stopped at any time without losing the
+  queue.
+
+### Changed
+
+- **Per-playlist connection slots are enforced across the two processes with
+  `flock` lock files** under the data directory, not an in-memory dict. The
+  provider limit now covers a browser episode request while the worker is
+  downloading, and a crashed process cannot leave a stale slot.
+- **One job at a time** replaces the previous 1–3 download threads. A season
+  downloads one episode after another regardless of playlist count; the
+  concurrency selector was removed from Settings. Queue priority, retry,
+  cancellation and per-playlist limits remain.
+- Manual search/release/grab/refresh endpoints keep their synchronous
+  responses, but the request thread now waits on a worker job instead of
+  running ffprobe itself.
+- Schema version 3 adds `worker_jobs`, `worker_state` and
+  `downloads.cancel_requested`; the web and worker serialise first-run
+  migrations with a file lock.
+- `setup.test.sh` starts the worker beside the development server. The
+  container uses `supervisord.conf`; `run.py` serves HTTP only.
+- Test coverage updated to 654 checks, including queue dedupe/claim/recovery.
+
 ## 0.5.0 — 2026-10-20
 
 ### Changed

@@ -39,6 +39,19 @@
   </div>
   <div id="tasks-body"><p class="muted">Loading…</p></div>
 </section>
+
+<section class="activity-section">
+  <div class="panel-head">
+    <h2>Worker</h2>
+    <span class="muted" id="worker-state"></span>
+  </div>
+  <p class="hint">
+    The single background queue. Playlist syncs, probe searches, downloads,
+    metadata refreshes and scans run here one job at a time; the web server
+    only queues them.
+  </p>
+  <div id="worker-body"><p class="muted">Loading…</p></div>
+</section>
 {% endblock %}
 
 {% block scripts %}

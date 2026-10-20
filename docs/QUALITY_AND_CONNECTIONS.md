@@ -119,8 +119,11 @@ Properties:
 
 ## 4. Connection limits
 
-`connections.py` is an in-process registry of active provider operations per
-playlist. A source's effective limit is:
+`connections.py` enforces active provider operations per playlist with one
+`flock` file per source and slot under `<data>/locks`. The kernel lock is
+atomic across the web and worker processes and is released if either process
+dies, so the limit applies to a browser episode request and a worker download
+at the same time. A source's effective limit is:
 
 1. `sources.connection_limit` if set,
 2. `sources.max_connections` (provider-reported) if positive,
@@ -134,29 +137,25 @@ Operations that acquire a slot:
 - downloads (the slot is held from claim through import);
 - the series-episode browser API.
 
-Download workers use `try_acquire`; syncs/probes use a blocking `acquire`.
-Waiting callers are counted, and `try_acquire` refuses to jump ahead of them.
-When a sync waits for a playlist whose only slot is held by a download, the
-download workers stop claiming further jobs for that playlist; when the current
-download finishes, the sync acquires the slot. Other playlists are unaffected.
+All operations use the same blocking `acquire`; the background worker runs one
+job at a time, so a sync, a probe/search and a download can never overlap. The
+waiting case is therefore short: a browser episode call may hold a slot while
+the worker waits, and the worker resumes when it is released. A source whose
+slots are full is retried after the current browser request finishes.
 
-The registry is in-memory. That matches the single-process, single-container
-design. It cannot see playback started by Jellyfin or an external player; those
-connections are outside the app's control. The UI shows the app's active count
-next to the effective limit on each playlist card.
+The kernel cannot see playback started by Jellyfin or an external player;
+those connections are outside the app's control. The UI counts the app's
+active slots next to the effective limit on each playlist card.
 
 ## 5. Queue priority and ordering
 
 `downloads.priority` defaults to 0, is validated to -100..100, and is inherited
-from the movie/series when a grab is queued. Workers claim rows with:
-
-```sql
-ORDER BY priority DESC, requested_at, id
-```
-
-A row whose playlist has no free slot is skipped so another playlist can use
-its own slots. Priority edits are available in Activity and the API; the
-scheduler does not override them.
+from the movie/series when a grab is queued. The worker's queue is ordered by
+job priority, then id; a download job's priority mirrors its `downloads` row.
+Interactive searches use 55–60, playlist syncs 20, scheduled tasks 15, and
+downloads their own -100..100 value, so a queued sync/search is not starved by
+an endless download queue. Priority edits are available in Activity and the
+API; the scheduler does not override them.
 
 ## 6. Monitoring and availability
 
@@ -187,5 +186,5 @@ Stored in `settings` and editable in the UI:
 | `probe_timeout_seconds` | 30 | ffprobe wall-clock timeout. |
 | `probe_max_candidates` | 6 | Candidates probed per search. |
 | `probe_search_budget` | 60 | Probe budget per automatic/series search run. |
-| `download_concurrency` | 1 | Download worker threads (1–3). |
+| `download_concurrency` | 1 | Legacy value; the worker is single-job by design. |
 | `download_max_attempts` | 3 | Transient download attempts. |

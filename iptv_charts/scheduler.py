@@ -1,19 +1,23 @@
 """Periodic library tasks and manual task runs.
 
-The scheduler is one daemon thread with a single task lock: two metadata
-refreshes or two search passes at once would multiply provider API calls and
-could enqueue the same episodes twice. Tasks are persisted in task_state, so a
-restart does not lose the last run time or the next due time.
+The scheduler no longer owns a thread. It has two small jobs:
+
+* ``enqueue_due`` reads ``task_state`` and inserts a ``worker_jobs`` row when a
+  periodic task is due; and
+* ``run_task`` is the handler the single background worker calls.
+
+Because the worker runs one job at a time, two metadata refreshes or two search
+passes cannot overlap by construction. Task state is still persisted in
+``task_state`` so the Activity page can show the last and next run.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import threading
 import time
 
-from . import db, library, sync
+from . import db, jobs, library, sync
 
 logger = logging.getLogger("iptv_charts.scheduler")
 
@@ -24,9 +28,7 @@ PERIODIC = {
     "refresh_catalog": ("catalog_refresh_hours", 24, 300),
 }
 
-_lock = threading.Lock()
-_stop = threading.Event()
-_thread: threading.Thread | None = None
+_TASK_PRIORITY = 15
 
 
 def _setting(conn, key: str, default: str) -> str:
@@ -52,9 +54,8 @@ def _ensure_state(conn) -> None:
         conn.execute("INSERT OR IGNORE INTO task_state (name) VALUES (?)", (name,))
     now = int(time.time())
     for name, (_setting_name, _default, first_delay) in PERIODIC.items():
-        # A null next_run means either "never scheduled" or "disabled with 0".
-        # Re-check the interval here so re-enabling a task (or a fresh
-        # database) starts it again instead of waiting for a manual run.
+        # A null next_run means "never scheduled" or "disabled with 0".
+        # Re-check the interval so re-enabling a task starts it again.
         if _interval_seconds(conn, name) is None:
             continue
         conn.execute(
@@ -64,7 +65,6 @@ def _ensure_state(conn) -> None:
     conn.commit()
 
 
-# --------------------------------------------------------------------- worker
 def _set_state(conn, name: str, *, status: str | None = None,
                message: str | None = None, started: int | None = None,
                finished: int | None = None, next_run: int | None | object = ...) -> None:
@@ -91,95 +91,53 @@ def _set_state(conn, name: str, *, status: str | None = None,
         conn.commit()
 
 
-def _execute(name: str, *, conn=None, force: bool = False, locked: bool = False,
-             release_lock: bool = False) -> bool:
-    if name not in TASK_NAMES:
-        raise ValueError("Unknown task.")
-    if not locked and not _lock.acquire(blocking=False):
-        return False
-    own_conn = conn is None
-    try:
-        if conn is None:
-            conn = db.connect()
-        row = db.get_one(conn, "SELECT * FROM task_state WHERE name = ?", (name,))
-        if row is None:
-            _ensure_state(conn)
-            row = db.get_one(conn, "SELECT * FROM task_state WHERE name = ?", (name,))
-        now = int(time.time())
-        if not force and row["next_run"] is not None and int(row["next_run"]) > now:
-            return False
-
-        # A metadata search during a catalog sync would use a half-replaced
-        # catalog and compete for the provider's connection limit.
-        if sync.is_busy():
-            _set_state(conn, name, status="idle", message="Deferred while a playlist sync runs.",
-                       next_run=now + 300)
-            logger.info("tasks: %s deferred while syncing", name)
-            return True
-
-        # Catalog refresh deliberately does not defer on active downloads: the
-        # connection registry makes the sync wait for its slot, and a waiting
-        # sync stops the download workers from claiming new jobs for that
-        # playlist. That is fairer than postponing the refresh indefinitely
-        # while a queue is busy.
-
-        _set_state(conn, name, status="running", message="Running", started=now)
-        logger.info("tasks: %s started", name)
-        try:
-            message = TASK_FUNCS[name](conn)
-            status = "idle"
-        except Exception as exc:
-            status = "error"
-            message = f"{type(exc).__name__}: {exc}"
-            logger.exception("tasks: %s failed: %s", name, exc)
-        finished = int(time.time())
-        next_run = None
-        if name in PERIODIC:
-            interval = _interval_seconds(conn, name)
-            next_run = finished + interval if interval else None
-        _set_state(conn, name, status=status, message=str(message), finished=finished,
-                   next_run=next_run)
-        logger.info("tasks: %s finished (%s): %s", name, status, message)
-        return True
-    finally:
-        if own_conn and conn is not None:
-            conn.close()
-        if not locked or release_lock:
-            _lock.release()
+def _active(conn, name: str) -> dict | None:
+    return jobs.active_for(conn, "task", f"task:{name}")
 
 
-def _loop() -> None:
-    while not _stop.is_set():
-        if _lock.acquire(blocking=False):
-            try:
-                _run_due()
-            except Exception as exc:
-                logger.exception("scheduler loop failed: %s", exc)
-            finally:
-                _lock.release()
-        _stop.wait(30.0)
+def enqueue_due() -> int:
+    """Queue periodic tasks that are due. Pure database work, no provider I/O.
 
-
-def _run_due() -> None:
+    The worker calls this before claiming a job. Deferring a search while a
+    sync is queued is deliberate: the task must not search a half-replaced
+    catalog. The worker's single-job rule means the sync (priority 20) runs
+    before the deferred task's next attempt.
+    """
+    if os.environ.get("IPTV_CHARTS_SCHEDULER", "").lower() in {"0", "false", "no", "off"}:
+        return 0
     conn = db.connect()
+    queued = 0
     try:
         _ensure_state(conn)
         now = int(time.time())
-        rows = {
-            row["name"]: row for row in conn.execute("SELECT * FROM task_state")
-        }
-        # Catalog refresh first: if it queues a sync, the search below sees
-        # sync.is_busy() and defers rather than using the old catalog.
+        rows = {row["name"]: row for row in conn.execute("SELECT * FROM task_state")}
+        # Catalog refresh first: if it queues syncs, the search below is
+        # deferred to the next pass rather than reading the old catalog.
         for name in ("refresh_catalog", "search_missing", "refresh_metadata"):
             row = rows.get(name)
-            if row is None or row["next_run"] is None:
+            if row is None or row["next_run"] is None or int(row["next_run"]) > now:
                 continue
-            if int(row["next_run"]) > now:
+            if name in ("search_missing", "refresh_metadata") and sync.is_busy():
+                _set_state(
+                    conn, name, status="idle",
+                    message="Deferred while a playlist sync is queued or running.",
+                    next_run=now + 300,
+                )
+                logger.info("tasks: %s deferred while syncing", name)
                 continue
-            _execute(name, conn=conn, force=True, locked=True)
+            if _active(conn, name) is not None:
+                continue
+            job = jobs.enqueue(
+                conn, "task", {"name": name},
+                priority=_TASK_PRIORITY, dedupe_key=f"task:{name}",
+            )
+            if job.get("_created"):
+                queued += 1
+                _set_state(conn, name, status="queued", message="Queued")
+                logger.info("tasks: %s queued", name)
+        return queued
     finally:
         conn.close()
-
 
 # ---------------------------------------------------------------------- tasks
 def _task_search_missing(conn) -> str:
@@ -282,62 +240,73 @@ TASK_FUNCS = {
 }
 
 
-# --------------------------------------------------------------------- facade
-def start() -> None:
-    if os.environ.get("IPTV_CHARTS_SCHEDULER", "").lower() in {"0", "false", "no", "off"}:
-        logger.info("scheduler: disabled by IPTV_CHARTS_SCHEDULER")
-        return
+# --------------------------------------------------------------------- runner
+def run_task(name: str) -> dict:
+    """Execute one task. The worker calls this exactly once per job."""
+    if name not in TASK_NAMES:
+        raise ValueError("Unknown task.")
     conn = db.connect()
+    started = int(time.time())
     try:
-        _ensure_state(conn)
+        row = db.get_one(conn, "SELECT * FROM task_state WHERE name = ?", (name,))
+        if row is None:
+            _ensure_state(conn)
+        _set_state(conn, name, status="running", message="Running", started=started)
+        logger.info("tasks: %s started", name)
+        try:
+            message = TASK_FUNCS[name](conn)
+            status = "idle"
+        except Exception as exc:
+            status = "error"
+            message = f"{type(exc).__name__}: {exc}"
+            logger.exception("tasks: %s failed: %s", name, exc)
+        finished = int(time.time())
+        next_run = None
+        if name in PERIODIC:
+            interval = _interval_seconds(conn, name)
+            next_run = finished + interval if interval else None
+        _set_state(conn, name, status=status, message=str(message),
+                   finished=finished, next_run=next_run)
+        logger.info("tasks: %s finished (%s): %s", name, status, message)
+        return {
+            "status": "done",
+            "message": str(message),
+            "result": {"task": name, "state": status},
+        }
     finally:
         conn.close()
-    global _thread
-    if _thread is not None and _thread.is_alive():
-        return
-    _stop.clear()
-    _thread = threading.Thread(target=_loop, name="iptv-scheduler", daemon=True)
-    _thread.start()
-    logger.info("scheduler: started")
+
+
+# --------------------------------------------------------------------- facade
+def start() -> None:
+    """Kept for older callers; periodic work now lives in the worker process."""
+    logger.info("scheduler: periodic tasks are owned by the background worker")
 
 
 def stop(timeout: float = 3.0) -> None:
-    _stop.set()
-    if _thread is not None:
-        _thread.join(timeout=timeout)
+    # The worker owns the loop; there is no scheduler thread to stop here.
+    return None
 
 
 def trigger(name: str) -> bool:
-    """Start a task in the background. Returns False when one is already running."""
+    """Queue a task now. Returns False when that task is already queued/running."""
     if name not in TASK_NAMES:
         raise ValueError("Unknown task.")
-    if not _lock.acquire(blocking=False):
-        return False
-    # Mark the task as running before returning, otherwise a caller that polls
-    # immediately can see the old "idle" row and conclude the task already
-    # finished. The task thread updates it again when it really starts.
     conn = db.connect()
     try:
-        _set_state(conn, name, status="running", message="Starting…",
-                   started=int(time.time()))
+        _ensure_state(conn)
+        if _active(conn, name) is not None:
+            return False
+        job = jobs.enqueue(
+            conn, "task", {"name": name},
+            priority=40, dedupe_key=f"task:{name}",
+        )
+        if not job.get("_created"):
+            return False
+        _set_state(conn, name, status="queued", message="Queued")
+        return True
     finally:
         conn.close()
-    thread = threading.Thread(
-        target=_execute, args=(name,),
-        kwargs={"force": True, "locked": True, "release_lock": True},
-        name=f"iptv-task-{name}", daemon=True,
-    )
-    try:
-        thread.start()
-    except Exception:
-        conn = db.connect()
-        try:
-            _set_state(conn, name, status="error", message="The task could not start.")
-        finally:
-            conn.close()
-        _lock.release()
-        raise
-    return True
 
 
 def snapshot(conn) -> list[dict]:
@@ -347,12 +316,22 @@ def snapshot(conn) -> list[dict]:
 
 
 def is_running() -> bool:
-    return _lock.locked()
+    conn = db.connect()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM worker_jobs WHERE kind = 'task' "
+            "AND status IN ('queued', 'running') LIMIT 1"
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
 
 
 __all__ = [
     "TASK_NAMES",
+    "enqueue_due",
     "is_running",
+    "run_task",
     "snapshot",
     "start",
     "stop",

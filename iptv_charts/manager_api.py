@@ -16,7 +16,7 @@ import time
 
 from flask import Blueprint, Response, g, jsonify, request, send_file
 
-from . import (backup, connections, db, downloader, library, metadata,
+from . import (backup, connections, db, downloader, jobs, library, metadata,
                naming, probe, quality, scan, scheduler, settings_service)
 from .clients import tmdb as tmdb_client
 from .clients import tvdb as tvdb_client
@@ -44,6 +44,25 @@ def _payload() -> dict:
 
 
 def _error(exc: Exception):
+    if isinstance(exc, jobs.JobFailed):
+        # The message came from the worker, which ran the same library code
+        # the web process used to run. Preserve its error classification so a
+        # missing movie is still 404 and a rejected profile is still 400.
+        status = {
+            "LookupError": 404,
+            "ValueError": 400,
+            "ConnectionBusy": 409,
+            "TMDBKeyError": 409,
+            "TVDBKeyError": 409,
+            "TMDBError": 502,
+            "TVDBError": 502,
+            "MetadataError": 502,
+        }.get(exc.error_type, 500)
+        return _fail(str(exc), status)
+    if isinstance(exc, (jobs.WorkerUnavailable, jobs.JobTimeout)):
+        return _fail(str(exc), 503)
+    if isinstance(exc, jobs.JobCancelled):
+        return _fail(str(exc), 409)
     if isinstance(exc, LookupError):
         return _fail(str(exc), 404)
     if isinstance(exc, ValueError):
@@ -142,16 +161,29 @@ def add_movie():
         tmdb_id = _int(payload.get("tmdb_id"))
         if not tmdb_id:
             return _fail("Choose a movie first.")
+        search_now = _bool(payload.get("search"), True)
         movie = library.add_movie(
             conn, tmdb_id,
             profile_id=_int(payload.get("quality_profile_id")),
             monitored=_bool(payload.get("monitored"), True),
-            search_now=_bool(payload.get("search"), True),
+            search_now=False,
             minimum_availability=str(
                 payload.get("minimum_availability") or "released"
             ),
             priority=_int(payload.get("priority")) or 0,
         )
+        if search_now:
+            # The add is already durable. A search failure must not undo it;
+            # that is the same rule the old in-process search had.
+            try:
+                jobs.submit_and_wait(
+                    "search_movie", {"movie_id": movie["id"], "reason": "add"},
+                    priority=55, dedupe_key=f"search_movie:{movie['id']}:add",
+                    timeout=600.0,
+                )
+            except Exception as exc:
+                logger.warning("initial search for %s failed: %s", movie["title"], exc)
+            movie = library.get_movie(conn, movie["id"])
         return jsonify({"ok": True, "movie": movie}), 201
     except Exception as exc:
         return _error(exc)
@@ -216,7 +248,11 @@ def delete_movie(movie_id: int):
 def refresh_movie(movie_id: int):
     conn = _conn()
     try:
-        return jsonify({"ok": True, "movie": library.refresh_movie(conn, movie_id)})
+        result = jobs.submit_and_wait(
+            "refresh_movie", {"movie_id": movie_id},
+            priority=55, dedupe_key=f"refresh_movie:{movie_id}", timeout=300.0,
+        )
+        return jsonify({"ok": True, **(result or {})})
     except Exception as exc:
         return _error(exc)
 
@@ -228,7 +264,11 @@ def search_movie(movie_id: int):
         movie = library.get_movie(conn, movie_id)
         if movie is None:
             return _fail("That movie no longer exists.", 404)
-        result = library.search_movie(conn, movie, reason="manual")
+        result = jobs.submit_and_wait(
+            "search_movie", {"movie_id": movie_id, "reason": "manual"},
+            priority=60, dedupe_key=f"search_movie:{movie_id}:manual",
+            timeout=600.0,
+        ) or {}
         return jsonify({"ok": True, **result, "movie": library.get_movie(conn, movie_id)})
     except Exception as exc:
         return _error(exc)
@@ -238,11 +278,15 @@ def search_movie(movie_id: int):
 def movie_releases(movie_id: int):
     conn = _conn()
     try:
+        if library.get_movie(conn, movie_id) is None:
+            return _fail("That movie no longer exists.", 404)
         query = (request.args.get("q") or "").strip()[:120] or None
-        return jsonify({
-            "ok": True,
-            "releases": library.manual_movie_releases(conn, movie_id, query=query),
-        })
+        key = f"movie_releases:{movie_id}:{query or ''}"
+        result = jobs.submit_and_wait(
+            "movie_releases", {"movie_id": movie_id, "query": query},
+            priority=60, dedupe_key=key, timeout=600.0,
+        ) or {}
+        return jsonify({"ok": True, "releases": result.get("releases") or []})
     except Exception as exc:
         return _error(exc)
 
@@ -256,8 +300,15 @@ def grab_movie(movie_id: int):
         remote_id = str(payload.get("remote_id") or "").strip()
         if not source_id or not remote_id:
             return _fail("Choose a release first.")
-        download = library.grab_movie(conn, movie_id, source_id, remote_id)
-        return jsonify({"ok": True, "download": download})
+        result = jobs.submit_and_wait(
+            "grab_movie", {
+                "movie_id": movie_id, "source_id": source_id, "remote_id": remote_id,
+            },
+            priority=55,
+            dedupe_key=f"grab_movie:{movie_id}:{source_id}:{remote_id}",
+            timeout=600.0,
+        ) or {}
+        return jsonify({"ok": True, **(result or {})})
     except Exception as exc:
         return _error(exc)
 
@@ -271,15 +322,26 @@ def add_series():
         tmdb_id = _int(payload.get("tmdb_id"))
         if not tmdb_id:
             return _fail("Choose a series first.")
+        search_now = _bool(payload.get("search"), True)
         series = library.add_series(
             conn, tmdb_id,
             profile_id=_int(payload.get("quality_profile_id")),
             monitored=_bool(payload.get("monitored"), True),
-            search_now=_bool(payload.get("search"), True),
+            search_now=False,
             monitor_mode=str(payload.get("monitor_mode") or "all"),
             monitor_new_seasons=str(payload.get("monitor_new_seasons") or "all"),
             priority=_int(payload.get("priority")) or 0,
         )
+        if search_now:
+            try:
+                jobs.submit_and_wait(
+                    "search_series", {"series_id": series["id"], "reason": "add"},
+                    priority=55, dedupe_key=f"search_series:{series['id']}:add",
+                    timeout=900.0,
+                )
+            except Exception as exc:
+                logger.warning("initial search for %s failed: %s", series["title"], exc)
+            series = library.get_series(conn, series["id"])
         return jsonify({"ok": True, "series": series}), 201
     except Exception as exc:
         return _error(exc)
@@ -346,7 +408,11 @@ def delete_series(series_id: int):
 def refresh_series(series_id: int):
     conn = _conn()
     try:
-        return jsonify({"ok": True, "series": library.refresh_series(conn, series_id)})
+        result = jobs.submit_and_wait(
+            "refresh_series", {"series_id": series_id},
+            priority=55, dedupe_key=f"refresh_series:{series_id}", timeout=600.0,
+        )
+        return jsonify({"ok": True, **(result or {})})
     except Exception as exc:
         return _error(exc)
 
@@ -358,7 +424,11 @@ def search_series(series_id: int):
         series = library.get_series(conn, series_id)
         if series is None:
             return _fail("That series no longer exists.", 404)
-        result = library.search_series(conn, series, reason="manual")
+        result = jobs.submit_and_wait(
+            "search_series", {"series_id": series_id, "reason": "manual"},
+            priority=60, dedupe_key=f"search_series:{series_id}:manual",
+            timeout=900.0,
+        ) or {}
         return jsonify({"ok": True, **result, "series": library.get_series(conn, series_id)})
     except Exception as exc:
         return _error(exc)
@@ -400,7 +470,15 @@ def search_episode(series_id: int, episode_id: int):
         series = library.get_series(conn, series_id)
         if series is None:
             return _fail("That series no longer exists.", 404)
-        result = library.search_series(conn, series, episode_id=episode_id, reason="manual")
+        result = jobs.submit_and_wait(
+            "search_series", {
+                "series_id": series_id, "episode_id": episode_id,
+                "reason": "manual",
+            },
+            priority=60,
+            dedupe_key=f"search_series:{series_id}:episode:{episode_id}",
+            timeout=600.0,
+        ) or {}
         return jsonify({"ok": True, **result})
     except Exception as exc:
         return _error(exc)
@@ -411,12 +489,15 @@ def episode_releases(series_id: int, episode_id: int):
     conn = _conn()
     try:
         query = (request.args.get("q") or "").strip()[:120] or None
-        return jsonify({
-            "ok": True,
-            "releases": library.manual_episode_releases(
-                conn, series_id, episode_id, query=query
-            ),
-        })
+        result = jobs.submit_and_wait(
+            "episode_releases", {
+                "series_id": series_id, "episode_id": episode_id, "query": query,
+            },
+            priority=60,
+            dedupe_key=f"episode_releases:{series_id}:{episode_id}:{query or ''}",
+            timeout=600.0,
+        ) or {}
+        return jsonify({"ok": True, "releases": result.get("releases") or []})
     except Exception as exc:
         return _error(exc)
 
@@ -431,10 +512,21 @@ def grab_episode(series_id: int, episode_id: int):
         stream_id = str(payload.get("stream_id") or "").strip()
         if not source_id or not provider_remote_id or not stream_id:
             return _fail("Choose a release first.")
-        download = library.grab_episode(
-            conn, series_id, episode_id, source_id, provider_remote_id, stream_id
-        )
-        return jsonify({"ok": True, "download": download})
+        result = jobs.submit_and_wait(
+            "grab_episode", {
+                "series_id": series_id, "episode_id": episode_id,
+                "source_id": source_id,
+                "provider_remote_id": provider_remote_id,
+                "stream_id": stream_id,
+            },
+            priority=55,
+            dedupe_key=(
+                f"grab_episode:{series_id}:{episode_id}:{source_id}:"
+                f"{provider_remote_id}:{stream_id}"
+            ),
+            timeout=600.0,
+        ) or {}
+        return jsonify({"ok": True, **(result or {})})
     except Exception as exc:
         return _error(exc)
 
@@ -447,6 +539,9 @@ def activity():
         snapshot = downloader.snapshot(conn)
         snapshot["tasks"] = scheduler.snapshot(conn)
         snapshot["task_running"] = scheduler.is_running()
+        snapshot["worker"] = jobs.snapshot(conn, limit=20)
+        snapshot["worker_status"] = jobs.worker_status(conn)
+        snapshot["job_counts"] = jobs.counts(conn)
         snapshot["ok"] = True
         response = jsonify(snapshot)
         response.headers["Cache-Control"] = "no-store"
@@ -485,6 +580,13 @@ def edit_download(download_id: int):
             priority = max(-100, min(100, int(payload.get("priority") or 0)))
             conn.execute("UPDATE downloads SET priority = ? WHERE id = ?",
                          (priority, download_id))
+            # The worker claims the download job by its own priority; keep the
+            # queue's ordering in step with the row the Activity page edits.
+            conn.execute(
+                "UPDATE worker_jobs SET priority = ? WHERE kind = 'download' "
+                "AND dedupe_key = ? AND status IN ('queued', 'running')",
+                (priority, f"download:{download_id}"),
+            )
             conn.commit()
         return jsonify({
             "ok": True,
@@ -546,9 +648,12 @@ def scan_results():
 
 @bp.post("/scan/results/<int:result_id>/import")
 def scan_import(result_id: int):
-    conn = _conn()
     try:
-        return jsonify({"ok": True, **scan.import_result(conn, result_id)})
+        result = jobs.submit_and_wait(
+            "scan_import", {"result_id": result_id},
+            priority=45, dedupe_key=f"scan_import:{result_id}", timeout=600.0,
+        ) or {}
+        return jsonify({"ok": True, **(result or {})})
     except Exception as exc:
         return _error(exc)
 
@@ -565,9 +670,12 @@ def scan_ignore(result_id: int):
 
 @bp.post("/scan/import-all")
 def scan_import_all():
-    conn = _conn()
     try:
-        return jsonify({"ok": True, **scan.import_all(conn)})
+        result = jobs.submit_and_wait(
+            "scan_import_all", {}, priority=45,
+            dedupe_key="scan_import_all", timeout=900.0,
+        ) or {}
+        return jsonify({"ok": True, **(result or {})})
     except Exception as exc:
         return _error(exc)
 

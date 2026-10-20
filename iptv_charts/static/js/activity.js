@@ -10,6 +10,8 @@
   const queueBody = $('#queue-body');
   const historyBody = $('#history-body');
   const tasksBody = $('#tasks-body');
+  const workerBody = $('#worker-body');
+  const workerState = $('#worker-state');
   const queueCount = $('#queue-count');
   const status = $('#activity-status');
   let timer = null;
@@ -19,6 +21,20 @@
     refresh_metadata: 'Refresh metadata',
     refresh_catalog: 'Refresh playlists',
     scan_library: 'Scan library',
+  };
+
+  const jobLabels = {
+    sync: 'Playlist sync',
+    download: 'Download',
+    task: 'Scheduled task',
+    search_movie: 'Movie search',
+    search_series: 'Series search',
+    movie_releases: 'Movie releases',
+    episode_releases: 'Episode releases',
+    grab_movie: 'Grab movie',
+    grab_episode: 'Grab episode',
+    refresh_movie: 'Refresh movie',
+    refresh_series: 'Refresh series',
   };
 
   function schedule(delay) {
@@ -32,7 +48,11 @@
       renderQueue(data.active, data.recent || []);
       renderHistory(data.history || []);
       renderTasks(data.tasks || [], data.task_running);
-      const busy = (data.active || []).length > 0 || data.task_running;
+      renderWorker(data.worker || [], data.worker_status || {},
+                   data.job_counts || {});
+      const jobsQueued = Number(data.job_counts?.queued || 0)
+        + Number(data.job_counts?.running || 0);
+      const busy = (data.active || []).length > 0 || data.task_running || jobsQueued > 0;
       schedule(busy ? 1500 : 5000);
     } catch (error) {
       setStatus(status, error.message, 'bad');
@@ -177,6 +197,44 @@
       table.append(row);
     });
     tasksBody.append(table);
+  }
+
+  function renderWorker(jobs, status, counts) {
+    workerBody.replaceChildren();
+    if (workerState) {
+      if (!status.alive) {
+        workerState.textContent = 'Worker not running';
+        workerState.className = 'pill pill-bad';
+      } else {
+        const queued = Number(counts.queued || 0);
+        workerState.textContent = status.status === 'running'
+          ? 'Working' : (queued ? `${queued} queued` : 'Idle');
+        workerState.className = 'muted';
+      }
+    }
+    if (!jobs.length) {
+      workerBody.append(element('p', 'muted', 'No worker jobs recorded yet.'));
+      return;
+    }
+    const table = element('div', 'task-list');
+    jobs.forEach((job) => {
+      const row = element('div', 'task-row');
+      const main = element('div', 'task-main');
+      main.append(element('strong', '', jobLabels[job.kind] || job.kind));
+      const payload = job.payload ? JSON.stringify(job.payload) : '';
+      main.append(element('span', 'muted small',
+        `#${job.id} · ${formatTimestamp(job.started_at || job.created_at)} · ${payload}`));
+      if (job.message) main.append(element('span', 'task-message', job.message));
+      if (job.error) main.append(element('span', 'queue-error', job.error));
+      const state = element('div', 'task-state');
+      state.append(badge(job.status,
+        job.status === 'error' ? 'failed'
+          : job.status === 'running' ? 'downloading'
+            : job.status === 'queued' ? 'queued' : 'muted'));
+      row.append(main, state);
+      table.append(row);
+    });
+    workerBody.append(table);
   }
 
   document.addEventListener('change', async (event) => {

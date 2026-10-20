@@ -20,10 +20,11 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # --no-install-recommends keeps the ffmpeg dependency tree as small as the
-# Debian package allows. The list is removed afterwards so the layer does not
-# carry apt metadata.
+# Debian package allows. Supervisor runs the web and worker processes in this
+# one container; the list is removed afterwards so the layer does not carry
+# apt metadata.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg \
+ && apt-get install -y --no-install-recommends ffmpeg supervisor \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -32,7 +33,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY run.py ./
+COPY run.py worker.py supervisord.conf ./
 COPY iptv_charts ./iptv_charts
 
 # The app writes only to these paths, all of which are mount points.
@@ -55,11 +56,14 @@ USER app
 
 EXPOSE 8770
 
-# Uses python rather than curl so the image needs no extra package.
-HEALTHCHECK --interval=30s --timeout=6s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8770/api/health', timeout=4)" || exit 1
+# Uses python rather than curl so the image needs no extra package. A dead
+# worker is a failed health check even when the web UI still answers: queued
+# syncs and downloads would otherwise sit still forever.
+HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 \
+    CMD python -c "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8770/api/health', timeout=4)); assert d['status']=='ok' and d['worker']['alive']" || exit 1
 
-# 0.0.0.0 inside the container is required: a server bound to the container's
-# own 127.0.0.1 would be unreachable through the published port. The host side
-# is still bound to 127.0.0.1 only, so nothing is exposed to the network.
-CMD ["python", "run.py", "--host", "0.0.0.0", "--port", "8770", "--no-browser"]
+# Supervisor starts both processes. `run.py` binds 0.0.0.0 because a server
+# bound to the container's own 127.0.0.1 would be unreachable through the
+# published port; the host side is still bound to 127.0.0.1 only, so nothing is
+# exposed to the network. The worker has no listening socket.
+CMD ["supervisord", "-c", "/app/supervisord.conf"]

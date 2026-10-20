@@ -13,7 +13,8 @@ from urllib.parse import urlsplit
 
 from flask import Flask, abort, g, render_template, request
 
-from . import config, connections, db, items, metadata, naming, player, sources, sync
+from . import (config, connections, db, items, jobs, metadata, naming, player,
+               sources, sync)
 from .api import bp as api_bp
 from .manager_api import bp as manager_api_bp
 from .manager_web import bp as manager_web_bp
@@ -241,6 +242,10 @@ def create_app() -> Flask:
             "containerized": player.is_container(),
             "play_queue": str(config.play_queue_path() or ""),
             "player": {"id": found.id, "label": found.label} if found else None,
+            # The UI can be perfectly healthy while no background worker is
+            # running; surface that instead of leaving syncs queued forever.
+            "worker": jobs.worker_status(conn),
+            "worker_jobs": jobs.counts(conn),
         }
 
     @app.route("/sources/<int:source_id>/browse")

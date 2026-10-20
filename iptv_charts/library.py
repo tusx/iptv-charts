@@ -1,9 +1,10 @@
 """The media library: movies, series, provider matching, grabs and imports.
 
 This module owns the database rows and the filesystem side of an import. It
-deliberately does not own the worker threads: downloads are queued by asking
-``downloader`` (imported lazily to avoid a cycle), which then calls back into
-``import_download`` when the bytes are on disk.
+does not own the background process: downloads are queued by asking
+``downloader`` (imported lazily to avoid a cycle), whose worker calls back into
+``import_download`` when the bytes are on disk. Searches and grabs are invoked
+by worker handlers, never by an HTTP request thread.
 """
 
 from __future__ import annotations
@@ -310,11 +311,8 @@ def add_movie(conn, tmdb_id: int, *, profile_id: int | None = None,
     conn.commit()
     movie = get_movie(conn, int(cursor.lastrowid))
     logger.info("library: added movie %s (tmdb %s)", movie["title"], tmdb_id)
-    if search_now:
-        try:
-            search_movie(conn, movie, reason="add")
-        except Exception as exc:  # a missing catalog must not undo the add
-            logger.warning("library: initial search for %s failed: %s", movie["title"], exc)
+    # The API queues the initial search as a worker job after this transaction
+    # commits. Doing it here would put ffprobe back on the web request thread.
     return get_movie(conn, movie["id"])
 
 
@@ -691,11 +689,8 @@ def add_series(conn, tmdb_id: int, *, profile_id: int | None = None,
     series = get_series(conn, series["id"])
     logger.info("library: added series %s (tmdb %s, monitor %s)",
                 series["title"], tmdb_id, add_mode)
-    if search_now:
-        try:
-            search_series(conn, series, reason="add")
-        except Exception as exc:
-            logger.warning("library: initial search for %s failed: %s", series["title"], exc)
+    # The API queues the initial search as a worker job after this transaction
+    # commits; see add_movie above.
     return get_series(conn, series["id"])
 
 

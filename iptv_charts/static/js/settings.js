@@ -99,7 +99,6 @@
         episode_file_template: $('#episode-file-template').value.trim(),
       },
       downloads: {
-        concurrency: Number($('#download-concurrency').value),
         max_attempts: Number($('#download-attempts').value),
         probe_cache_hours: Number($('#probe-cache-hours').value),
         probe_timeout_seconds: Number($('#probe-timeout').value),

@@ -81,7 +81,7 @@ Cancel the sync first.
   "player": {"preferred_player": "auto", "player_command": ""},
   "metadata": {"language": "en-US", "tmdb_clear": false, "tvdb_clear": false},
   "media": {"movie_file_template": "{title} ({year}) [{resolution}]"},
-  "downloads": {"concurrency": 1, "max_attempts": 3,
+  "downloads": {"max_attempts": 3,
                  "probe_cache_hours": 24, "probe_timeout_seconds": 30,
                  "probe_max_candidates": 6, "probe_search_budget": 60},
   "scheduler": {"search_interval_hours": 6,
@@ -104,7 +104,9 @@ Special rules:
 - The player command is validated before the preference; a custom preference
   requires a non-empty command.
 - Media templates and the probe/download/scheduler ranges have the same
-  validation as their old section endpoints.
+  validation as their old section endpoints. `concurrency` is still accepted
+  by the legacy downloads endpoint but no longer changes anything: the
+  background worker is deliberately single-job.
 - The old section endpoints (`/api/settings`,
   `/api/settings/metadata|media|downloads|scheduler`) remain available for
   compatibility; the page uses only the atomic endpoint.

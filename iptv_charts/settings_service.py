@@ -252,7 +252,7 @@ def save_all(conn, payload: Mapping[str, Any]) -> dict:
             downloader.ensure_started()
             started = True
         except Exception as exc:  # noqa: BLE001
-            warnings.append(f"Settings saved, but download workers did not start: {exc}")
+            warnings.append(f"Settings saved, but the download queue could not be refreshed: {exc}")
 
     chosen = player.resolve(conn, refresh=True)
     example = None

@@ -31,7 +31,7 @@ os.environ.pop("IPTV_CHARTS_PLAY_QUEUE", None)
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from iptv_charts import db, sources, sync  # noqa: E402
+from iptv_charts import db, sources, sync, worker  # noqa: E402
 from iptv_charts.clients import m3u  # noqa: E402
 
 #: Deliberately larger than sync.BATCH_SIZE so the batching path is exercised
@@ -143,11 +143,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "audio/x-mpegurl")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            step = max(1, len(body) // 12)
+            step = max(1, len(body) // 20)
             for offset in range(0, len(body), step):
                 self.wfile.write(body[offset:offset + step])
                 self.wfile.flush()
-                time.sleep(0.03)
+                time.sleep(0.05)
             return
 
         if parsed.path == "/empty.m3u":
@@ -418,9 +418,10 @@ def test_progress_reporting(base_url: str) -> None:
     if with_bytes:
         check_true("byte progress never exceeds the total",
                    all(0 <= s["bytes_done"] <= s["bytes_total"] for s in with_bytes))
-        # Look for the moment the download finished, rather than assuming the
-        # last *running* sample is the last thing that happened.
-        best = max(with_bytes, key=lambda s: s["bytes_done"])
+        # The terminal sample is authoritative: progress is written by a
+        # reporter thread, so the final byte count may land with the finish
+        # rather than in the last running sample.
+        best = max(with_bytes + [terminal], key=lambda s: s["bytes_done"])
         check_true("download reached 100%",
                    best["bytes_done"] == best["bytes_total"])
 
@@ -473,6 +474,7 @@ def main() -> int:
     # The app calls this from create_app(); the tests talk to the database
     # layer directly, so they have to create the schema themselves.
     db.init_db()
+    worker.start_background()
 
     server, base_url = serve()
     try:
@@ -495,6 +497,7 @@ def main() -> int:
                          (xtream_id,))["n"], 500)
         conn.close()
     finally:
+        worker.stop_background()
         server.shutdown()
 
     passed = sum(1 for ok, _, _ in _results if ok)

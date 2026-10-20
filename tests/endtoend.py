@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from integration import CHANNEL_COUNT, serve  # noqa: E402
-from iptv_charts import db  # noqa: E402
+from iptv_charts import db, worker  # noqa: E402
 from iptv_charts.app import create_app  # noqa: E402
 
 _results: list[tuple[bool, str, str]] = []
@@ -49,6 +49,7 @@ def section(name: str) -> None:
 
 def main() -> int:
     db.init_db()
+    worker.start_background()
     server, base_url = serve()
 
     try:
@@ -526,6 +527,7 @@ def main() -> int:
         check("sync of a missing playlist is 404", response.status_code, 404)
 
     finally:
+        worker.stop_background()
         server.shutdown()
 
     passed = sum(1 for ok, _, _ in _results if ok)

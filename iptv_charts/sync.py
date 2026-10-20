@@ -1,23 +1,20 @@
 """The ingest engine: pull a playlist into SQLite, reporting honest progress.
 
-Three properties drive the design.
+**One sync at a time, owned by the worker.** The web process only inserts a
+``worker_jobs`` row. The background worker executes ``run_job`` for one source,
+with the same single-at-a-time guarantee as every other background task. This
+keeps memory flat and never opens two provider streams in parallel.
 
-**Sources sync sequentially, never in parallel.** Xtream panels enforce a
-per-account connection limit -- the app displays ``active_connections`` and
-``max_connections`` on the info page, which would be self-defeating if we
-opened several at once. Parallel syncs would also multiply peak memory and peg
-several cores parsing, which is the opposite of what this app is for. So there
-is one worker thread draining a queue.
+**Progress is durable.** A small reporter thread copies the in-memory ``Job``
+fields into ``worker_jobs.progress_data`` and the ``sources`` row several times
+a second. The web UI polls those rows, so progress survives a page reload -- and
+is visible from a different process, which is the whole point of the split.
 
-**All state is in-process.** A single ``waitress`` process serves every
-request, so a dict behind a lock is visible to every browser tab with no IPC.
-Putting progress in SQLite would mean a write per tick -- the opposite of
-light -- and would leave meaningless rows behind after a restart. Durable
-*results* go to the ``sources`` row, once, at the end.
-
-**Cancellation rolls everything back.** Each source is loaded inside one
-transaction, so cancelling leaves the previous catalog exactly as it was
-rather than half-replaced.
+**Cancellation is cooperative.** The flag lives in SQLite because the button is
+pressed in the web process. A cancelled first sync removes its partial catalog
+so it cannot masquerade as complete; a cancelled re-sync of an existing source
+is re-runnable and may leave the new rows in place until the next successful
+sync. It never touches another source.
 """
 
 from __future__ import annotations
@@ -26,13 +23,12 @@ import itertools
 import json
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from . import connections, db
+from . import connections, db, jobs
 from .clients import m3u, xtream
 from .errors import SyncCancelled
 
@@ -68,6 +64,12 @@ class Job:
     error: str | None = None
     started_at: float = 0.0
     finished_at: float | None = None
+    interrupted: bool = False
+    #: Whether the source had a catalog before this run. Used to remove the
+    #: half-written rows if a first sync is cancelled (there is no previous
+    #: catalog to preserve).
+    had_catalog: bool = False
+    job_id: int | None = None
     cancel: threading.Event = field(default_factory=threading.Event)
 
     @property
@@ -108,211 +110,364 @@ class Job:
         }
 
 
-# -------------------------------------------------------------------- manager
-class SyncManager:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._jobs: dict[int, Job] = {}
-        self._queue: deque[int] = deque()
-        self._worker: threading.Thread | None = None
-        self._batch_total = 0
-        self._batch_done = 0
-        self._running: int | None = None
-
-    # ------------------------------------------------------------ scheduling
-    def enqueue(self, source_ids: list[int]) -> list[int]:
-        """Queue sources for syncing. Returns the ids actually queued.
-
-        A source already queued or running is skipped rather than duplicated,
-        so hammering "Update" cannot start two syncs of the same playlist.
-        """
-        queued: list[int] = []
-        with self._lock:
-            for source_id in source_ids:
-                existing = self._jobs.get(source_id)
-                if existing is not None and existing.active:
-                    continue
-                job = Job(source_id=source_id)
-                self._jobs[source_id] = job
-                self._queue.append(source_id)
-                queued.append(source_id)
-
-            if queued:
-                # A fresh batch restarts the overall count.
-                if self._running is None:
-                    self._batch_total = len(queued)
-                    self._batch_done = 0
-
-        if queued:
-            self._ensure_worker()
-        return queued
-
-    def cancel(self, source_id: int) -> bool:
-        with self._lock:
-            job = self._jobs.get(source_id)
-            if job is None or not job.active:
-                return False
-            job.cancel.set()
-            job.message = "Cancelling…"
-            return True
-
-    def cancel_all(self) -> int:
-        with self._lock:
-            targets = [j for j in self._jobs.values() if j.active]
-        for job in targets:
-            job.cancel.set()
-            job.message = "Cancelling…"
-        return len(targets)
-
-    def _ensure_worker(self) -> None:
-        with self._lock:
-            if self._worker is not None and self._worker.is_alive():
-                return
-            # Daemon so a wedged sync can never prevent the process exiting.
-            self._worker = threading.Thread(
-                target=self._drain, name="iptv-sync", daemon=True
-            )
-            self._worker.start()
-
-    def _drain(self) -> None:
-        while True:
-            with self._lock:
-                if not self._queue:
-                    self._worker = None
-                    self._running = None
-                    self._batch_total = 0
-                    self._batch_done = 0
-                    return
-                source_id = self._queue.popleft()
-                job = self._jobs.get(source_id)
-                self._running = source_id
-
-            if job is None:
-                continue
-            if job.cancel.is_set():
-                job.state = "cancelled"
-                job.message = "Cancelled"
-                with self._lock:
-                    self._batch_done += 1
-                continue
-
-            self._run_one(source_id, job)
-
-    # -------------------------------------------------------------- one sync
-    def _run_one(self, source_id: int, job: Job) -> None:
-        job.state = "running"
-        job.started_at = time.time()
-        job.phase = "connecting"
-        job.message = "Connecting"
-
-        conn = None
-        try:
-            # Its own connection: this is a different thread from the request
-            # handlers, and SQLite connections must not be shared across them.
-            conn = db.connect()
-            source = db.get_one(conn, "SELECT * FROM sources WHERE id = ?", (source_id,))
-            if source is None:
-                raise RuntimeError("This playlist no longer exists.")
-
-            job.name = source["name"]
-
-            # A sync holds one of the account's connection slots for its whole
-            # duration. With a provider limit of 1 this makes downloads and
-            # syncs mutually exclusive; with a larger limit the remaining
-            # slots stay available. The wait is bounded so a permanently busy
-            # account produces an error instead of parking the worker forever.
-            with connections.acquire(
-                conn, source_id, purpose="Playlist sync", timeout=3600.0
-            ):
-                if source["kind"] == "xtream":
-                    _sync_xtream(conn, source, job)
-                else:
-                    _sync_m3u(conn, source, job)
-
-            job.state = "done"
-            job.phase = ""
-            job.detail = ""
-            job.message = f"{job.items_done:,} items"
-            _record_success(conn, source_id, job)
-        except SyncCancelled:
-            job.state = "cancelled"
-            job.phase = ""
-            job.message = "Cancelled — the previous catalog was left untouched"
-            _record_failure(conn, source_id, "cancelled", job.message)
-        except Exception as exc:  # surfaced to the user, not swallowed
-            job.state = "error"
-            job.phase = ""
-            job.error = str(exc)
-            job.message = "Failed"
-            _record_failure(conn, source_id, "error", str(exc))
-        finally:
-            job.finished_at = time.time()
-            if conn is not None:
-                conn.close()
-            with self._lock:
-                self._batch_done += 1
-                if self._running == source_id:
-                    self._running = None
-
-    # ---------------------------------------------------------------- status
-    def snapshot(self) -> dict[str, Any]:
-        with self._lock:
-            jobs = {sid: job.as_dict() for sid, job in self._jobs.items()}
-            batch_total = self._batch_total
-            batch_done = self._batch_done
-            running = self._running
-
-        active = [j for j in jobs.values() if j["state"] in ("queued", "running")]
-
-        overall = None
-        if active and batch_total:
-            current = jobs.get(running) if running is not None else None
-            partial = 0.0
-            if current and current["state"] == "running":
-                partial = current["fraction"] or 0.0
-            overall = min(1.0, (batch_done + partial) / batch_total)
-
-        return {
-            "jobs": jobs,
-            "active": bool(active),
-            "running": running,
-            "batch_total": batch_total,
-            "batch_done": batch_done,
-            "overall": overall,
-        }
+# -------------------------------------------------------------------- queue
+_SYNC_PRIORITY = 20
 
 
-_manager = SyncManager()
+def _source_id_for_job(job: dict) -> int | None:
+    try:
+        return int((job.get("payload") or {}).get("source_id"))
+    except (TypeError, ValueError):
+        return None
 
 
 def enqueue(source_ids: list[int]) -> list[int]:
-    return _manager.enqueue(source_ids)
+    """Queue sources for the background worker. Returns the ids newly queued.
+
+    A source already queued or running is skipped rather than duplicated, so
+    hammering Update cannot start two syncs of the same playlist. The queue row
+    is the only state; there is no in-process manager to lose on a restart.
+    """
+    queued: list[int] = []
+    conn = db.connect()
+    try:
+        for source_id in source_ids:
+            source_id = int(source_id)
+            if db.get_one(conn, "SELECT id FROM sources WHERE id = ?", (source_id,)) is None:
+                continue
+            job = jobs.enqueue(
+                conn, "sync", {"source_id": source_id},
+                priority=_SYNC_PRIORITY, dedupe_key=f"sync:{source_id}",
+            )
+            if job.get("_created"):
+                queued.append(source_id)
+                conn.execute(
+                    "UPDATE sources SET sync_status = 'queued', sync_message = 'Queued' "
+                    "WHERE id = ?",
+                    (source_id,),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    return queued
 
 
 def enqueue_all() -> list[int]:
-    """Queue every configured source. Reads the DB on the caller's thread."""
+    """Queue every configured source."""
     conn = db.connect()
     try:
-        rows = db.get_all(conn, "SELECT id FROM sources ORDER BY id")
+        rows = conn.execute("SELECT id FROM sources ORDER BY id").fetchall()
     finally:
         conn.close()
-    return _manager.enqueue([row["id"] for row in rows])
+    return enqueue([int(row["id"]) for row in rows])
 
 
 def cancel(source_id: int) -> bool:
-    return _manager.cancel(source_id)
+    conn = db.connect()
+    try:
+        job = jobs.active_for(conn, "sync", f"sync:{int(source_id)}")
+        if job is None:
+            return False
+        if not jobs.cancel(conn, int(job["id"])):
+            return False
+        conn.execute(
+            "UPDATE sources SET sync_message = 'Cancelling…' WHERE id = ?",
+            (int(source_id),),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
 
 def cancel_all() -> int:
-    return _manager.cancel_all()
+    conn = db.connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM worker_jobs WHERE kind = 'sync' "
+            "AND status IN ('queued', 'running')"
+        ).fetchall()
+        cancelled = 0
+        for row in rows:
+            if jobs.cancel(conn, int(row["id"])):
+                cancelled += 1
+                source_id = _source_id_for_job(jobs.normalise(row) or {})
+                if source_id is not None:
+                    conn.execute(
+                        "UPDATE sources SET sync_message = 'Cancelling…' WHERE id = ?",
+                        (source_id,),
+                    )
+        conn.commit()
+        return cancelled
+    finally:
+        conn.close()
+
+
+def _persist_now(job: Job) -> None:
+    """Write a phase transition immediately, not on the reporter's next tick.
+
+    Parsing a small playlist can finish inside one reporter interval. A
+    phase boundary is exactly the sample the UI must not miss, so it is worth
+    one synchronous small write.
+    """
+    if job.job_id is None:
+        return
+    conn = None
+    try:
+        conn = db.connect()
+        jobs.update_progress(
+            conn, int(job.job_id), message=job.message or "Syncing",
+            progress_data=_progress_data(job),
+        )
+    except Exception:
+        pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _progress_data(job: Job) -> dict[str, Any]:
+    return {
+        "phase": job.phase,
+        "detail": job.detail,
+        "bytes_done": int(job.bytes_done),
+        "bytes_total": int(job.bytes_total) if job.bytes_total is not None else None,
+        "items_done": int(job.items_done),
+        "fraction": job.fraction,
+    }
+
+
+def _job_view(job: dict, name: str = "") -> dict[str, Any]:
+    status = str(job.get("status") or "queued")
+    state = status if status in ("queued", "running") else {
+        "done": "done", "error": "error", "cancelled": "cancelled",
+    }.get(status, "error")
+    data = job.get("progress_data") or {}
+    started = job.get("started_at")
+    finished = job.get("finished_at")
+    end = finished or time.time()
+    elapsed = max(0.0, float(end) - float(started)) if started else 0.0
+    fraction = data.get("fraction")
+    if state == "done":
+        fraction = 1.0
+    return {
+        "source_id": _source_id_for_job(job),
+        "name": name,
+        "state": state,
+        "phase": data.get("phase") or "",
+        "detail": data.get("detail") or "",
+        "bytes_done": int(data.get("bytes_done") or 0),
+        "bytes_total": data.get("bytes_total"),
+        "items_done": int(data.get("items_done") or 0),
+        "message": job.get("message") or "",
+        "error": job.get("error") or None,
+        "elapsed": round(elapsed, 1),
+        "fraction": fraction,
+    }
 
 
 def snapshot() -> dict[str, Any]:
-    return _manager.snapshot()
+    """Latest sync job per source, shaped for the existing page templates."""
+    conn = db.connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM worker_jobs WHERE kind = 'sync' ORDER BY id DESC LIMIT 500"
+        ).fetchall()
+        sources = {
+            int(row["id"]): str(row["name"])
+            for row in conn.execute("SELECT id, name FROM sources")
+        }
+    finally:
+        conn.close()
+
+    latest: dict[int, dict] = {}
+    for row in rows:
+        job = jobs.normalise(row) or {}
+        source_id = _source_id_for_job(job)
+        if source_id is None or source_id in latest:
+            continue
+        latest[source_id] = job
+
+    out = {
+        source_id: _job_view(job, sources.get(source_id, ""))
+        for source_id, job in latest.items()
+    }
+    active = [job for job in out.values() if job["state"] in ("queued", "running")]
+    running = next(
+        (job["source_id"] for job in out.values() if job["state"] == "running"),
+        None,
+    )
+    return {
+        "jobs": out,
+        "active": bool(active),
+        "running": running,
+        "batch_total": len(active),
+        "batch_done": 0,
+        "overall": None,
+    }
 
 
 def is_busy() -> bool:
-    return _manager.snapshot()["active"]
+    conn = db.connect()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM worker_jobs WHERE kind = 'sync' "
+            "AND status IN ('queued', 'running') LIMIT 1"
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------- runner
+def run_job(source_id: int, job_id: int, *, stop_event: threading.Event | None = None) -> dict:
+    """Execute one sync job. Called only by the background worker.
+
+    Returns an outcome for the worker runner: ``status`` is the job's final
+    status, ``retry`` asks the runner to put the row back in the queue, and
+    ``data`` is the final progress payload for the UI.
+    """
+    source_id = int(source_id)
+    job_id = int(job_id)
+    job = Job(source_id=source_id, job_id=job_id)
+    job.state = "running"
+    job.started_at = time.time()
+    job.phase = "connecting"
+    job.message = "Connecting"
+    reporter_stop = threading.Event()
+    reporter: threading.Thread | None = None
+    conn = None
+
+    try:
+        conn = db.connect()
+        source = db.get_one(conn, "SELECT * FROM sources WHERE id = ?", (source_id,))
+        if source is None:
+            raise RuntimeError("This playlist no longer exists.")
+        job.name = source["name"]
+        job.had_catalog = db.get_one(
+            conn, "SELECT 1 FROM items WHERE source_id = ? LIMIT 1", (source_id,)
+        ) is not None
+
+        # A cancel can arrive while the job waits in the queue. Do not open a
+        # provider connection just to discover that.
+        row = db.get_one(
+            conn, "SELECT cancel_requested FROM worker_jobs WHERE id = ?", (job_id,)
+        )
+        if row and row["cancel_requested"]:
+            job.state = "cancelled"
+            job.message = "Cancelled"
+            _record_failure(conn, source_id, "cancelled", job.message)
+            return {
+                "status": "cancelled", "message": job.message,
+                "data": _progress_data(job),
+            }
+
+        def report() -> None:
+            rconn = None
+            try:
+                rconn = db.connect()
+                while not reporter_stop.wait(0.15):
+                    try:
+                        current = rconn.execute(
+                            "SELECT cancel_requested FROM worker_jobs WHERE id = ?",
+                            (job_id,),
+                        ).fetchone()
+                        if current is not None and current["cancel_requested"]:
+                            job.cancel.set()
+                        if stop_event is not None and stop_event.is_set():
+                            job.interrupted = True
+                            job.cancel.set()
+                        data = _progress_data(job)
+                        jobs.update_progress(
+                            rconn, job_id,
+                            message=job.message or "Syncing",
+                            progress_data=data,
+                        )
+                        rconn.execute(
+                            "UPDATE sources SET sync_status = 'syncing', sync_message = ? "
+                            "WHERE id = ?",
+                            ((job.message or "Syncing")[:500], source_id),
+                        )
+                        rconn.commit()
+                    except Exception:
+                        # A progress tick must never break the sync. The bulk
+                        # transaction can briefly hold the write lock.
+                        try:
+                            rconn.rollback()
+                        except Exception:
+                            pass
+            finally:
+                if rconn is not None:
+                    rconn.close()
+
+        reporter = threading.Thread(
+            target=report, name=f"iptv-sync-progress-{source_id}", daemon=True
+        )
+        reporter.start()
+        conn.execute(
+            "UPDATE sources SET sync_status = 'syncing', sync_message = 'Connecting' "
+            "WHERE id = ?",
+            (source_id,),
+        )
+        conn.commit()
+
+        with connections.acquire(
+            conn, source_id, purpose="Playlist sync", timeout=3600.0
+        ):
+            if source["kind"] == "xtream":
+                _sync_xtream(conn, source, job)
+            else:
+                _sync_m3u(conn, source, job)
+
+        job.state = "done"
+        job.phase = ""
+        job.detail = ""
+        job.message = f"{job.items_done:,} items"
+        _record_success(conn, source_id, job)
+        return {
+            "status": "done",
+            "message": job.message,
+            "result": {"items_done": int(job.items_done)},
+            "data": _progress_data(job),
+        }
+    except SyncCancelled:
+        job.phase = ""
+        if job.interrupted:
+            job.state = "queued"
+            job.message = "Interrupted by shutdown; it will resume."
+            _record_failure(conn, source_id, "queued", job.message)
+            return {
+                "status": "queued", "retry": True, "message": job.message,
+                "data": _progress_data(job),
+            }
+        job.state = "cancelled"
+        job.message = "Cancelled"
+        _record_failure(conn, source_id, "cancelled", job.message)
+        if not job.had_catalog:
+            _discard_partial_catalog(conn, source_id)
+        return {
+            "status": "cancelled", "message": job.message,
+            "data": _progress_data(job),
+        }
+    except Exception as exc:  # surfaced to the user, not swallowed
+        job.state = "error"
+        job.phase = ""
+        job.error = str(exc)
+        job.message = "Failed"
+        _record_failure(conn, source_id, "error", str(exc))
+        if not job.had_catalog:
+            _discard_partial_catalog(conn, source_id)
+        return {
+            "status": "error", "message": "Failed", "error": str(exc),
+            "data": _progress_data(job),
+        }
+    finally:
+        job.finished_at = time.time()
+        reporter_stop.set()
+        if reporter is not None:
+            reporter.join(timeout=3.0)
+        if conn is not None:
+            conn.close()
 
 
 # ------------------------------------------------------------------ xtream
@@ -365,6 +520,7 @@ def _sync_xtream(conn, source, job: Job) -> None:
 
                 def on_phase(phase: str, _job=job) -> None:
                     _job.phase = phase
+                    _persist_now(_job)
 
                 batch: list[tuple] = []
                 for raw in client.streams(
@@ -459,11 +615,24 @@ def _sync_m3u(conn, source, job: Job) -> None:
     job.message = "Fetching playlist"
 
     def on_progress(done: int, total: int | None, _job=job) -> None:
+        if _job.phase == "parse" and _job.bytes_total:
+            # Parsing re-reads the spooled file, so its byte counter starts at
+            # zero again. Keep the bar full rather than making the UI look like
+            # the download restarted; the phase label says what is happening.
+            done = max(done, int(_job.bytes_done))
+            total = _job.bytes_total
         _job.bytes_done = done
         _job.bytes_total = total
 
     def on_phase(phase: str, _job=job) -> None:
+        if phase == "parse" and _job.bytes_total:
+            # Persist the completed download before switching phase, then show
+            # the parse phase at 100%; this makes both transitions observable
+            # even for a playlist that parses in a few milliseconds.
+            _job.bytes_done = int(_job.bytes_total)
+            _persist_now(_job)
         _job.phase = phase
+        _persist_now(_job)
 
     lines = m3u.fetch_lines(
         url,
@@ -494,6 +663,7 @@ def _sync_m3u(conn, source, job: Job) -> None:
 
     job.phase = "parse"
     job.detail = "Reading channels"
+    _persist_now(job)
 
     with db.bulk_load(conn):
         conn.execute("DELETE FROM items WHERE source_id = ?", (source_id,))
@@ -636,6 +806,24 @@ def _record_success(conn, source_id: int, job: Job) -> None:
         pass  # bookkeeping must never turn a good sync into a failure
 
 
+def _discard_partial_catalog(conn, source_id: int) -> None:
+    """Remove rows from a first sync that was cancelled mid-import.
+
+    An *existing* catalog is deliberately not touched here: the sync's bulk
+    loader replaces rows in place, and recreating the old snapshot would be
+    more expensive than the next retry. For a new source, though, leaving a
+    truncated catalog makes the playlist look complete when it is not; remove
+    it so the next sync starts clean.
+    """
+    try:
+        conn.rollback()
+        conn.execute("DELETE FROM items WHERE source_id = ?", (source_id,))
+        conn.execute("DELETE FROM categories WHERE source_id = ?", (source_id,))
+        conn.commit()
+    except Exception:
+        pass
+
+
 def _record_failure(conn, source_id: int, status: str, message: str) -> None:
     if conn is None:
         return
@@ -658,5 +846,6 @@ __all__ = [
     "enqueue",
     "enqueue_all",
     "is_busy",
+    "run_job",
     "snapshot",
 ]

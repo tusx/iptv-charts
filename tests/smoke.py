@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from iptv_charts import (config, connections, db, items, languages,  # noqa: E402
+from iptv_charts import (config, connections, db, items, jobs, languages,  # noqa: E402
                          matching, metadata, naming, player, probe, quality,
                          sources, streams)
 from iptv_charts.clients import m3u, tmdb, xtream  # noqa: E402
@@ -632,6 +632,57 @@ def test_items() -> None:
         conn.close()
 
 
+# --------------------------------------------------------------- worker queue
+def test_worker_queue() -> None:
+    section("worker queue")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "queue.db"
+        db.init_db(path)
+        conn = db.connect(path)
+        first = jobs.enqueue(conn, "sync", {"source_id": 7},
+                             priority=20, dedupe_key="sync:7")
+        second = jobs.enqueue(conn, "sync", {"source_id": 7},
+                              priority=20, dedupe_key="sync:7")
+        check("dedupe collapses an active sync", second["id"], first["id"])
+        check("dedupe reports it was not created", second["_created"], False)
+
+        claimed = jobs.claim(conn)
+        check("one job can be claimed", claimed["id"], first["id"])
+        check("claim marks it running", claimed["status"], "running")
+        check("a busy worker cannot claim a second job", jobs.claim(conn), None)
+
+        jobs.update_progress(conn, first["id"], message="Parsing",
+                             progress_data={"phase": "parse", "items_done": 12})
+        running = jobs.get(conn, first["id"])
+        check("progress survives in the row", running["progress_data"]["items_done"], 12)
+
+        jobs.recover(conn)
+        recovered = jobs.get(conn, first["id"])
+        check("restart requeues a running job", recovered["status"], "queued")
+
+        jobs.cancel(conn, first["id"])
+        claimed = jobs.claim(conn)
+        check("a cancelled queued job is still claimable", claimed["id"], first["id"])
+        check("its handler sees the cancel flag", claimed["cancel_requested"], 1)
+        jobs.finish(conn, first["id"], "cancelled", message="Cancelled")
+
+        replacement = jobs.enqueue(conn, "sync", {"source_id": 7},
+                                   dedupe_key="sync:7")
+        check("terminal job releases its dedupe key",
+              replacement["_created"], True)
+        jobs.finish(conn, replacement["id"], "done", result={"items_done": 1})
+
+        jobs.worker_started(conn, 1234)
+        jobs.heartbeat(conn, status="idle")
+        status = jobs.worker_status(conn)
+        check("worker heartbeat is visible", status["alive"], True)
+        check("worker heartbeat records idle", status["status"], "idle")
+        counts = jobs.counts(conn)
+        check("job counts include the finished jobs", counts["done"], 1)
+        check("job counts include the cancelled job", counts["cancelled"], 1)
+        conn.close()
+
+
 # ---------------------------------------------------------------------- web
 def test_web() -> None:
     """Render the real app through Flask's test client.
@@ -1079,11 +1130,17 @@ def test_manager_foundations() -> None:
         check("migration adds the request_headers column", "request_headers" in columns, True)
         check("migration adds the connection limit", "connection_limit" in source_columns, True)
         check("migration adds download priority", "priority" in download_columns, True)
+        check("migration adds the worker cancel flag",
+              "cancel_requested" in download_columns, True)
         check("migration adds the queue index", "idx_downloads_queue" in indexes, True)
         check("migration adds quality tier fields",
               {"qualities", "audio_mode", "subtitle_mode", "probe_required"}
               <= profile_columns, True)
         check("migration creates the probe cache", "stream_probes" in tables, True)
+        check("migration creates the worker queue", "worker_jobs" in tables, True)
+        check("migration creates worker state", "worker_state" in tables, True)
+        check("migration creates the worker dedupe index",
+              "idx_worker_jobs_dedupe" in indexes, True)
         check("schema version recorded", version, db.SCHEMA_VERSION)
         check("migration seeds quality profiles", profiles, 2)
         check("migration backfills quality tiers", tiers, 2)
@@ -1100,6 +1157,7 @@ def main() -> int:
     test_player()
     test_player_bridge()
     test_manager_foundations()
+    test_worker_queue()
     test_web()
 
     passed = sum(1 for ok, _, _ in _results if ok)
