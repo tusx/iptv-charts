@@ -177,7 +177,8 @@ def claim(conn) -> dict | None:
             return None
         cursor = conn.execute(
             "UPDATE worker_jobs SET status = 'running', started_at = ?, "
-            "attempts = attempts + 1, message = 'Running' "
+            "attempts = attempts + 1, message = 'Running', finished_at = NULL, "
+            "error = NULL, error_type = NULL, result = NULL "
             "WHERE id = ? AND status = 'queued'",
             (now, int(row["id"])),
         )
@@ -251,7 +252,7 @@ def reschedule(conn, job_id: int, *, available_at: int,
                message: str | None = None, progress_data: Mapping[str, Any] | None = None) -> None:
     """Return a running job to the queue for a later retry."""
     fields = ["status = 'queued'", "started_at = NULL", "finished_at = NULL",
-              "available_at = ?"]
+              "available_at = ?", "error = NULL", "error_type = NULL", "result = NULL"]
     params: list[Any] = [int(available_at)]
     if message is not None:
         fields.append("message = ?")

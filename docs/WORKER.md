@@ -39,7 +39,9 @@ files are resumed.
 
 `current_job_id` and a heartbeat live in `worker_state`. `/api/health` and
 Activity expose whether a worker is actually alive, rather than showing a
-healthy UI over a queue that nothing is draining.
+healthy UI over a queue that nothing is draining. A `worker.lock` file taken
+with `flock` at startup makes the one-worker rule explicit: a second worker
+exits instead of racing recovery and claiming a different job.
 
 ## Job kinds
 
@@ -69,8 +71,10 @@ database-only work; the actual search/refresh/scan runs as the job. If a
 playlist sync is queued or running, search and metadata tasks are deferred for
 five minutes so they never use a half-replaced catalog. `refresh_catalog`
 queues sync jobs and returns; because syncs have a higher priority, they run
-before the next search pass. `IPTV_CHARTS_SCHEDULER=0` disables the automatic
-enqueue (manual task triggers still work).
+before the next search pass. A manual search/metadata task that arrives while
+a sync is queued is deferred for five minutes rather than reading the catalog
+being replaced. `IPTV_CHARTS_SCHEDULER=0` disables the automatic enqueue
+(manual task triggers still work).
 
 ## Connection limits across processes
 

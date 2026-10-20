@@ -13,6 +13,7 @@ the modules that already own it.
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import signal
@@ -21,7 +22,7 @@ import time
 import traceback
 from typing import Any, Callable, Mapping
 
-from . import db, downloader, jobs, library, scan, scheduler, sync
+from . import config, db, downloader, jobs, library, scan, scheduler, sync
 
 logger = logging.getLogger("iptv_charts.worker")
 
@@ -265,6 +266,18 @@ def run_forever(stop_event: threading.Event | None = None) -> None:
     stop = stop_event or threading.Event()
     db.init_db()
 
+    # One worker, enforced rather than assumed. Two workers would each claim
+    # a different job, and startup recovery in one could requeue a job the
+    # other is still running. The lock is released automatically on exit.
+    lock_path = config.data_dir() / "worker.lock"
+    lock = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        logger.error("worker: another worker already owns %s; exiting", lock_path)
+        lock.close()
+        return
+
     conn = db.connect()
     try:
         recovered = jobs.recover(conn)
@@ -383,6 +396,10 @@ def run_forever(stop_event: threading.Event | None = None) -> None:
         except Exception:
             pass
         claimed_conn.close()
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock.close()
         logger.info("worker: stopped")
 
 

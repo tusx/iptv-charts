@@ -22,7 +22,9 @@ when the library schema or user-visible workflow changes.
   download keeps using its existing row.
 - Interrupted jobs are requeued on startup; interrupted downloads resume from
   their temp file. The worker can be stopped at any time without losing the
-  queue.
+  queue. A `worker.lock` file refuses a second worker, and manual search/
+  metadata tasks defer while a sync is queued so they never read the catalog
+  being replaced.
 
 ### Changed
 

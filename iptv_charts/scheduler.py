@@ -251,6 +251,17 @@ def run_task(name: str) -> dict:
         row = db.get_one(conn, "SELECT * FROM task_state WHERE name = ?", (name,))
         if row is None:
             _ensure_state(conn)
+        # A manual trigger can arrive while a playlist sync is queued. The
+        # worker is serial, but task jobs deliberately outrank sync jobs; do
+        # not let a search run against the catalog the sync is about to
+        # replace. Periodic tasks are deferred in enqueue_due already.
+        if name in ("search_missing", "refresh_metadata") and sync.is_busy():
+            message = "Deferred while a playlist sync is queued or running."
+            _set_state(conn, name, status="idle", message=message,
+                       finished=started, next_run=started + 300)
+            logger.info("tasks: %s deferred while syncing", name)
+            return {"status": "done", "message": message,
+                    "result": {"task": name, "state": "idle"}}
         _set_state(conn, name, status="running", message="Running", started=started)
         logger.info("tasks: %s started", name)
         try:

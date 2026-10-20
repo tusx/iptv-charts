@@ -338,6 +338,15 @@ def run_job(source_id: int, job_id: int, *, stop_event: threading.Event | None =
     reporter: threading.Thread | None = None
     conn = None
 
+    def stop_reporter() -> None:
+        nonlocal reporter
+        reporter_stop.set()
+        if reporter is not None:
+            # Longer than SQLite's busy timeout: a tick blocked on the write
+            # lock must finish before the final source state is written.
+            reporter.join(timeout=15.0)
+            reporter = None
+
     try:
         conn = db.connect()
         source = db.get_one(conn, "SELECT * FROM sources WHERE id = ?", (source_id,))
@@ -419,6 +428,9 @@ def run_job(source_id: int, job_id: int, *, stop_event: threading.Event | None =
             else:
                 _sync_m3u(conn, source, job)
 
+        # Stop the reporter before writing the final source state; otherwise
+        # a tick racing this branch could overwrite 'ok' with 'syncing'.
+        stop_reporter()
         job.state = "done"
         job.phase = ""
         job.detail = ""
@@ -431,6 +443,7 @@ def run_job(source_id: int, job_id: int, *, stop_event: threading.Event | None =
             "data": _progress_data(job),
         }
     except SyncCancelled:
+        stop_reporter()
         job.phase = ""
         if job.interrupted:
             job.state = "queued"
@@ -450,6 +463,7 @@ def run_job(source_id: int, job_id: int, *, stop_event: threading.Event | None =
             "data": _progress_data(job),
         }
     except Exception as exc:  # surfaced to the user, not swallowed
+        stop_reporter()
         job.state = "error"
         job.phase = ""
         job.error = str(exc)
@@ -463,9 +477,7 @@ def run_job(source_id: int, job_id: int, *, stop_event: threading.Event | None =
         }
     finally:
         job.finished_at = time.time()
-        reporter_stop.set()
-        if reporter is not None:
-            reporter.join(timeout=3.0)
+        stop_reporter()
         if conn is not None:
             conn.close()
 
@@ -519,8 +531,11 @@ def _sync_xtream(conn, source, job: Job) -> None:
                     _job.bytes_total = total
 
                 def on_phase(phase: str, _job=job) -> None:
+                    # Do not write from here: this callback runs inside the
+                    # bulk-load transaction, and a second connection would
+                    # wait on the write lock. The reporter thread already
+                    # copies the phase on its next tick.
                     _job.phase = phase
-                    _persist_now(_job)
 
                 batch: list[tuple] = []
                 for raw in client.streams(

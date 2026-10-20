@@ -202,6 +202,7 @@ def _prepare_rows(tables: dict[str, list[dict]]) -> None:
             row["started_at"] = None
             row["finished_at"] = None
             row["error"] = None
+            row["cancel_requested"] = 0
     settings = {row.get("key"): row.get("value") for row in tables["settings"]}
     for key, allowed in TEMPLATE_TOKENS.items():
         if key in settings:
