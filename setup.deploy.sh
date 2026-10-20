@@ -227,7 +227,7 @@ info "waiting for the app to answer"
 ready=false
 for _ in $(seq 1 40); do
     health="$(curl -fsS --max-time 2 "http://127.0.0.1:${HOST_PORT}/api/health" 2>/dev/null || true)"
-    if [[ -n "$health" ]] && grep -q '"alive": true' <<<"$health"; then
+    if [[ -n "$health" ]] && grep -Eq '"alive"[[:space:]]*:[[:space:]]*true' <<<"$health"; then
         ready=true
         break
     fi
