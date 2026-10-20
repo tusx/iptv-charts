@@ -199,7 +199,7 @@ the settings page. In the container, a small host-side watcher runs the player:
 ```
 
 `setup.deploy.sh` restarts the bridge on every deploy. It is supervised: if the
-worker exits, it is started again, and `--status` finds it even if its pid file
+bridge exits, it is started again, and `--status` finds it even if its pid file
 was lost. It publishes a heartbeat and a list of the players installed on the
 host, which is how the settings page can offer them. Browser playback is
 unaffected if the bridge is not running.
