@@ -4,6 +4,52 @@ All notable changes to IPTV Charts are recorded here. The project follows
 semantic-ish versioning while the app is pre-1.0: the minor version changes
 when the library schema or user-visible workflow changes.
 
+## 0.7.0 — 2026-10-20
+
+### Added
+
+- **Movie candidate workspace.** The movie detail page now lists every matching
+  provider VOD with its cached ffprobe facts, whether the quality profile
+  accepts it, and controls to probe one/all candidates.
+- **Manual candidate pinning.** A probed candidate can be pinned as
+  **Only this** (override the profile and cancel other active attempts) or
+  **Also download** (keep the profile pick and add the candidate as an extra
+  version). Pins persist on the movie and future searches honour them.
+- **Additional movie versions.** Alternate downloads import under a distinct
+  `[alternate]` filename into `movie_alternates`, leaving the main file
+  untouched. The movie page lists, sizes and removes them; they are included
+  in backup/restore.
+- Candidate probe jobs (`probe_movie_candidate`, `probe_movie_candidates`) run
+  through the background worker like every other provider operation.
+- Section-scoped navigation: **Movies → Library / Wanted / Calendar** and
+  **Series → Library / Wanted / Calendar**. The global Wanted and Calendar
+  top-bar entries are gone; old `/wanted` and `/calendar` URLs redirect to the
+  movie section. The movie/series wanted pages only show their own items, and
+  **Search missing** from a section (or its Wanted page) scans only that
+  section. The Activity page remains global.
+- UI polish: section tab pills, candidate cards with probe facts and filters,
+  pinned badges, additional-version rows, library card hover states and a
+  refined top bar.
+- Schema v4 adds movie candidate fields, `downloads.mode`, and
+  `movie_alternates`. The migration recovers an existing main file's provider
+  identity from its imported download where possible. A candidate that is
+  already the main file is never queued again as an extra, and an extra that
+  later becomes the main file is folded into it rather than left as a
+  duplicate.
+
+### Changed
+
+- `downloads.active_download` and queue cancellation understand
+  `main`/`alternate` modes. A movie may have one active main and one active
+  alternate download, but the worker still runs one job at a time. The movie
+  page renders and cancels each active download separately.
+- Automatic retries back off per mode: a failed extra version no longer
+  suppresses the main search, and a failed pinned download is not repeated
+  automatically for 24 hours. Explicit searches and pins still retry. A pinned
+  extra is never queued while the same candidate is an active main download.
+- Tests cover candidate probing, “only” override, “also” version import,
+  removal, section-scoped pages and schema v4; test count 689.
+
 ## 0.6.0 — 2026-10-20
 
 ### Added

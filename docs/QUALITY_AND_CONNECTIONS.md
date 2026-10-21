@@ -164,7 +164,7 @@ API; the scheduler does not override them.
   - `in_cinemas` — wait until `release_date` <= today;
   - `released` — wait for the date and for TMDB status "Released" when a status
     is present.
-  A future movie remains monitored and appears in Calendar, but automatic
+  A future movie remains monitored and appears in the Movies calendar, but automatic
   search reports that it is not available yet.
 - **Series** store `monitor_new_seasons`:
   - `all` — newly discovered episodes are monitored;

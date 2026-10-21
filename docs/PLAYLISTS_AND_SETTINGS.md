@@ -10,9 +10,9 @@ playlist.
 - **IPTV** — playlist count/catalog totals, Add playlist, Update all,
   Manage, and one compact row per playlist with Browse, Edit, Update, Cancel
   and Remove.
-- **Movies** — library counts and Open, Add movie, Calendar, Wanted,
+- **Movies** — library counts and Open, Add movie, its scoped Calendar and Wanted tabs,
   Search missing.
-- **Series** — series/episode counts and Open, Add series, Calendar, Wanted,
+- **Series** — series/episode counts and Open, Add series, its scoped Calendar and Wanted tabs,
   Search missing.
 
 The full playlist management page remains at `/playlists`. It contains the

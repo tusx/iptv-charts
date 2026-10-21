@@ -175,6 +175,40 @@ def _refresh_series(job: Mapping[str, Any], _stop: threading.Event) -> dict:
         conn.close()
 
 
+def _probe_movie_candidate(job: Mapping[str, Any], _stop: threading.Event) -> dict:
+    payload = job.get("payload") or {}
+    conn = _conn_scope()
+    try:
+        release = library.probe_movie_candidate(
+            conn, int(payload["movie_id"]), int(payload["source_id"]),
+            str(payload["remote_id"]), refresh=bool(payload.get("refresh")),
+        )
+        probe = release.get("probe") or {}
+        message = (
+            f"Probed {release.get('resolution') or 'stream'}"
+            if probe.get("ok") else f"Probe failed: {probe.get('error') or 'unknown error'}"
+        )
+        return {"status": "done", "message": message, "result": release}
+    finally:
+        conn.close()
+
+
+def _probe_movie_candidates(job: Mapping[str, Any], _stop: threading.Event) -> dict:
+    payload = job.get("payload") or {}
+    conn = _conn_scope()
+    try:
+        result = library.probe_movie_candidates(
+            conn, int(payload["movie_id"]), refresh=bool(payload.get("refresh")),
+        )
+        return {
+            "status": "done",
+            "message": f"Probed {result['probed']} candidate(s); {result['failed']} failed.",
+            "result": result,
+        }
+    finally:
+        conn.close()
+
+
 def _scan_import(job: Mapping[str, Any], _stop: threading.Event) -> dict:
     payload = job.get("payload") or {}
     conn = _conn_scope()
@@ -216,7 +250,9 @@ def _download(job: Mapping[str, Any], _stop: threading.Event) -> dict:
 
 def _task(job: Mapping[str, Any], _stop: threading.Event) -> dict:
     payload = job.get("payload") or {}
-    return scheduler.run_task(str(payload["name"]))
+    return scheduler.run_task(
+        str(payload["name"]), str(payload.get("scope") or "all"),
+    )
 
 
 HANDLERS: dict[str, Callable[[Mapping[str, Any], threading.Event], dict]] = {
@@ -231,6 +267,8 @@ HANDLERS: dict[str, Callable[[Mapping[str, Any], threading.Event], dict]] = {
     "grab_episode": _grab_episode,
     "refresh_movie": _refresh_movie,
     "refresh_series": _refresh_series,
+    "probe_movie_candidate": _probe_movie_candidate,
+    "probe_movie_candidates": _probe_movie_candidates,
     "scan_import": _scan_import,
     "scan_import_all": _scan_import_all,
 }

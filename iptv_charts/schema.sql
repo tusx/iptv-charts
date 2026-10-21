@@ -268,7 +268,19 @@ CREATE TABLE IF NOT EXISTS movies (
     media_info         TEXT,            -- normalised ffprobe payload
     imported_at        INTEGER,
     last_search_at     INTEGER,
-    search_message     TEXT
+    search_message     TEXT,
+    -- One manually pinned provider candidate. `only` uses it instead of the
+    -- quality profile; `also` downloads it as an additional version while the
+    -- profile pick remains the main library file.
+    candidate_source_id   INTEGER,
+    candidate_remote_id   TEXT,
+    candidate_mode        TEXT CHECK (candidate_mode IN ('only', 'also')),
+    candidate_name        TEXT,
+    candidate_selected_at INTEGER,
+    -- Provider identity of the current main file, so an "also" pin of the
+    -- same candidate is not downloaded twice.
+    main_source_id        INTEGER,
+    main_remote_id        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title COLLATE NOCASE);
@@ -357,6 +369,9 @@ CREATE TABLE IF NOT EXISTS downloads (
     subtitle_languages TEXT,
     media_info        TEXT,
     priority          INTEGER NOT NULL DEFAULT 0,
+    -- main: the file tracked in movies.file_path. alternate: an extra version
+    -- stored in movie_alternates and never allowed to replace the main file.
+    mode              TEXT    NOT NULL DEFAULT 'main',
     release_name      TEXT,
     reason            TEXT,             -- add | auto | manual | upgrade | retry
     status            TEXT    NOT NULL DEFAULT 'queued'
@@ -386,6 +401,32 @@ CREATE INDEX IF NOT EXISTS idx_downloads_status
 -- migrations.
 CREATE INDEX IF NOT EXISTS idx_downloads_movie ON downloads (movie_id);
 CREATE INDEX IF NOT EXISTS idx_downloads_episode ON downloads (episode_id);
+
+-- Additional manual movie versions. The main `movies.file_path` stays the
+-- profile-selected file; these are extra downloads pinned by the user and are
+-- named with an [alternate] suffix so both can live in the same folder.
+CREATE TABLE IF NOT EXISTS movie_alternates (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_id           INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
+    download_id        INTEGER REFERENCES downloads(id) ON DELETE SET NULL,
+    source_id          INTEGER REFERENCES sources(id) ON DELETE SET NULL,
+    remote_id          TEXT    NOT NULL,
+    name               TEXT,
+    file_path          TEXT    NOT NULL,
+    file_size          INTEGER,
+    resolution         TEXT,
+    source             TEXT,
+    quality_label      TEXT,
+    audio_languages    TEXT,
+    subtitle_languages TEXT,
+    media_info         TEXT,
+    imported_at        INTEGER NOT NULL,
+    UNIQUE (movie_id, source_id, remote_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_movie_alternates_movie
+    ON movie_alternates (movie_id);
+
 
 CREATE TABLE IF NOT EXISTS history (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

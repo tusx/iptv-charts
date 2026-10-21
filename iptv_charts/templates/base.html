@@ -21,13 +21,9 @@
         <a href="{{ url_for('sources_list') }}"
            {% if endpoint in ('sources_list', 'browse', 'edit_source') %}class="active"{% endif %}>Playlists</a>
         <a href="{{ url_for('manager.movies') }}"
-           {% if endpoint in ('manager.movies', 'manager.movie_detail') %}class="active"{% endif %}>Movies</a>
+           {% if endpoint in ('manager.movies', 'manager.movie_detail', 'manager.movies_wanted', 'manager.movies_calendar') %}class="active"{% endif %}>Movies</a>
         <a href="{{ url_for('manager.series') }}"
-           {% if endpoint in ('manager.series', 'manager.series_detail') %}class="active"{% endif %}>Series</a>
-        <a href="{{ url_for('manager.calendar_view') }}"
-           {% if endpoint == 'manager.calendar_view' %}class="active"{% endif %}>Calendar</a>
-        <a href="{{ url_for('manager.wanted') }}"
-           {% if endpoint == 'manager.wanted' %}class="active"{% endif %}>Wanted</a>
+           {% if endpoint in ('manager.series', 'manager.series_detail', 'manager.series_wanted', 'manager.series_calendar') %}class="active"{% endif %}>Series</a>
         <a href="{{ url_for('manager.activity') }}"
            {% if endpoint == 'manager.activity' %}class="active"{% endif %}>Activity</a>
         <a href="{{ url_for('settings') }}"

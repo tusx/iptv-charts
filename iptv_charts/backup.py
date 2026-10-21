@@ -34,11 +34,16 @@ TABLES = (
     "series",
     "series_episodes",
     "downloads",
+    "movie_alternates",
     "settings",
     "history",
     "scan_results",
     "task_state",
 )
+#: Tables introduced after the first backup format. Older archives simply do
+#: not have their JSON file; restore treats them as empty instead of refusing.
+OPTIONAL_TABLES = {"movie_alternates"}
+
 EXCLUDED = (
     "items", "categories", "items_fts", "metadata_cache",
     "provider_series_cache", "stream_probes", "image cache",
@@ -110,7 +115,8 @@ def _read_archive(data: bytes) -> tuple[dict, dict[str, list[dict]]]:
             raise ValueError("That ZIP is not an IPTV Charts backup.")
         if int(manifest.get("format_version") or 0) != FORMAT_VERSION:
             raise ValueError("This backup was made by an incompatible version of the app.")
-        if int(manifest.get("schema_version") or 0) > db.SCHEMA_VERSION:
+        manifest_schema = int(manifest.get("schema_version") or 0)
+        if manifest_schema > db.SCHEMA_VERSION:
             raise ValueError("This backup comes from a newer version of the app.")
 
         expected = {f"tables/{table}.json" for table in TABLES}
@@ -122,6 +128,12 @@ def _read_archive(data: bytes) -> tuple[dict, dict[str, list[dict]]]:
         for table in TABLES:
             entry = f"tables/{table}.json"
             if entry not in names:
+                # The alternates table arrived in schema 4. Backups made before
+                # it legitimately have no file; a schema-4 backup that omits it
+                # is damaged and must not be restored as "no alternates".
+                if table in OPTIONAL_TABLES and manifest_schema < 4:
+                    tables[table] = []
+                    continue
                 raise ValueError(f"The backup is missing {entry}.")
             info = archive.getinfo(entry)
             total_size += info.file_size
@@ -194,6 +206,14 @@ def _prepare_rows(tables: dict[str, list[dict]]) -> None:
             row["file_size"] = None
             row["resolution"] = None
             row["imported_at"] = None
+    valid_alternates = []
+    for row in tables.get("movie_alternates", []):
+        path = _confined_media_path(row.get("file_path"))
+        if not path:
+            continue
+        row["file_path"] = path
+        valid_alternates.append(row)
+    tables["movie_alternates"] = valid_alternates
     for row in tables["downloads"]:
         if row.get("status") in downloader.ACTIVE:
             row["status"] = "queued"
@@ -262,9 +282,9 @@ def restore(conn, data: bytes) -> dict:
         conn.execute(
             "DELETE FROM worker_jobs WHERE status IN ('queued', 'running')"
         )
-        for table in ("scan_results", "history", "downloads", "series_episodes",
-                      "movies", "series", "quality_profiles", "task_state",
-                      "settings", "sources"):
+        for table in ("scan_results", "history", "downloads", "movie_alternates",
+                      "series_episodes", "movies", "series", "quality_profiles",
+                      "task_state", "settings", "sources"):
             conn.execute(f"DELETE FROM {table}")
         for table in TABLES:
             counts[table] = _insert_rows(conn, table, tables[table])

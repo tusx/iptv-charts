@@ -112,7 +112,7 @@
   $('#search-missing-btn')?.addEventListener('click', async (event) => {
     const button = event.currentTarget;
     try {
-      await post('/api/tasks/search_missing/run');
+      await post('/api/tasks/search_missing/run', { scope: 'movies' });
       feedback(button, 'Search started');
     } catch (error) {
       feedback(button, error.message, false);

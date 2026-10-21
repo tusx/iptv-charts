@@ -1,12 +1,14 @@
 {% extends "base.html" %}
-{% from "_macros.html" import poster, status_badge, progress %}
+{% from "_macros.html" import poster, status_badge, progress, library_nav %}
 {% block title %}{{ series.title }} · {{ app_name }}{% endblock %}
 
 {% block content %}
 <section class="detail-page">
   <p class="crumb"><a href="{{ url_for('manager.series') }}">Series</a> / {{ series.title }}</p>
+  {{ library_nav('series', 'library') }}
 
-  <div class="detail-hero">
+  <div class="detail-hero{% if series.backdrop %} has-backdrop{% endif %}"
+       {% if series.backdrop %}style="--hero-backdrop: url('{{ series.backdrop }}')"{% endif %}>
     <div class="detail-poster">
       {{ poster(series.poster, series.title, 'poster-large') }}
     </div>

@@ -6,7 +6,7 @@ import calendar as calendar_module
 import json
 from datetime import date, timedelta
 
-from flask import Blueprint, abort, g, render_template, request
+from flask import Blueprint, abort, g, redirect, render_template, request, url_for
 
 from . import config, db, languages, library, metadata, quality, scan, scheduler
 
@@ -76,10 +76,47 @@ def _active_maps(conn) -> tuple[dict, dict]:
         total = item.get("bytes_total")
         item["fraction"] = (item.get("bytes_done") or 0) / total if total else None
         if item.get("movie_id"):
-            by_movie[int(item["movie_id"])] = item
+            movie_id = int(item["movie_id"])
+            existing = by_movie.get(movie_id)
+            # The movie card can show one bar; prefer the main file over an
+            # additional version so progress and status are not confusing.
+            if existing is None or (
+                item.get("mode") == "main" and existing.get("mode") != "main"
+            ):
+                by_movie[movie_id] = item
         if item.get("episode_id"):
             by_episode[int(item["episode_id"])] = item
     return by_movie, by_episode
+
+
+def _movie_search_pending(conn, movie_id: int) -> bool:
+    for row in conn.execute(
+        "SELECT payload FROM worker_jobs WHERE kind = 'search_movie' "
+        "AND status IN ('queued', 'running')"
+    ):
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if int(payload.get("movie_id") or 0) == int(movie_id):
+            return True
+    return False
+
+
+def _active_for_movie(conn, movie_id: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM downloads WHERE movie_id = ? "
+        "AND status IN ('queued', 'downloading', 'importing') "
+        "ORDER BY CASE mode WHEN 'main' THEN 0 ELSE 1 END, id",
+        (int(movie_id),),
+    ).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        total = item.get("bytes_total")
+        item["fraction"] = (item.get("bytes_done") or 0) / total if total else None
+        out.append(item)
+    return out
 
 
 def _genres(value):
@@ -172,12 +209,26 @@ def movie_detail(movie_id: int):
         abort(404, description="That movie no longer exists.")
     active, _ = _active_maps(conn)
     _decorate_movies([movie], active)
+    candidates = library.movie_candidates_view(conn, movie)
+    alternates = library.movie_alternates(conn, movie_id)
+    main_identity = library.main_release_identity(conn, movie)
     return render_template(
         "movie.html",
         movie=movie,
         profiles=_profiles(conn),
         status=library.movie_status(conn, movie),
         history=_history_for(conn, movie_id=movie_id),
+        candidates=candidates["candidates"],
+        candidate_total=candidates["total"],
+        candidate_probed=candidates["probed"],
+        alternates=alternates,
+        alternate_keys={
+            f"{row['source_id']}:{row['remote_id']}" for row in alternates
+            if row.get("source_id")
+        },
+        main_key=f"{main_identity[0]}:{main_identity[1]}" if main_identity else "",
+        search_pending=_movie_search_pending(conn, movie_id),
+        downloads=_active_for_movie(conn, movie_id),
         **_media_context(),
     )
 
@@ -252,46 +303,66 @@ def _month(raw: str | None) -> tuple[date, date, str, str]:
     return first, last, previous.strftime("%Y-%m"), following.strftime("%Y-%m")
 
 
+def _calendar_context(conn, section: str, raw_month: str | None) -> dict:
+    first, last, previous, following = _month(raw_month)
+    start, end = first.isoformat(), last.isoformat()
+    days: dict[str, list[dict]] = {}
+    if section == "movies":
+        rows = conn.execute(
+            "SELECT * FROM movies WHERE release_date IS NOT NULL "
+            "AND release_date BETWEEN ? AND ? ORDER BY release_date, title COLLATE NOCASE",
+            (start, end),
+        ).fetchall()
+        for row in rows:
+            item = dict(row)
+            item["kind"] = "movie"
+            item["downloaded"] = bool(item.get("file_path"))
+            item["poster"] = metadata.image_url("w92", item.get("poster_path"))
+            days.setdefault(str(item["release_date"])[:10], []).append(item)
+    else:
+        rows = conn.execute(
+            """
+            SELECT e.*, s.title AS series_title, s.poster_path AS series_poster
+            FROM series_episodes e JOIN series s ON s.id = e.series_id
+            WHERE e.air_date IS NOT NULL AND e.air_date BETWEEN ? AND ?
+            ORDER BY e.air_date, s.title COLLATE NOCASE, e.season, e.episode
+            """,
+            (start, end),
+        ).fetchall()
+        for row in rows:
+            item = dict(row)
+            item["kind"] = "episode"
+            item["downloaded"] = bool(item.get("file_path"))
+            item["poster"] = metadata.image_url("w92", item.get("series_poster"))
+            days.setdefault(str(item["air_date"])[:10], []).append(item)
+    return {
+        "section": section,
+        "days": sorted(days.items()),
+        "month_label": first.strftime("%B %Y"),
+        "month_value": first.strftime("%Y-%m"),
+        "previous": previous,
+        "following": following,
+    }
+
+
+@bp.get("/movies/calendar")
+def movies_calendar():
+    return render_template(
+        "calendar.html", **_calendar_context(_conn(), "movies", request.args.get("month"))
+    )
+
+
+@bp.get("/series/calendar")
+def series_calendar():
+    return render_template(
+        "calendar.html", **_calendar_context(_conn(), "series", request.args.get("month"))
+    )
+
+
 @bp.get("/calendar")
 def calendar_view():
-    conn = _conn()
-    first, last, previous, following = _month(request.args.get("month"))
-    start, end = first.isoformat(), last.isoformat()
-    episodes = conn.execute(
-        """
-        SELECT e.*, s.title AS series_title, s.poster_path AS series_poster
-        FROM series_episodes e JOIN series s ON s.id = e.series_id
-        WHERE e.air_date IS NOT NULL AND e.air_date BETWEEN ? AND ?
-        ORDER BY e.air_date, s.title COLLATE NOCASE, e.season, e.episode
-        """,
-        (start, end),
-    ).fetchall()
-    movies = conn.execute(
-        "SELECT * FROM movies WHERE release_date IS NOT NULL "
-        "AND release_date BETWEEN ? AND ? ORDER BY release_date, title COLLATE NOCASE",
-        (start, end),
-    ).fetchall()
-    days: dict[str, list[dict]] = {}
-    for row in episodes:
-        item = dict(row)
-        item["kind"] = "episode"
-        item["downloaded"] = bool(item.get("file_path"))
-        item["poster"] = metadata.image_url("w92", item.get("series_poster"))
-        days.setdefault(str(item["air_date"])[:10], []).append(item)
-    for row in movies:
-        item = dict(row)
-        item["kind"] = "movie"
-        item["downloaded"] = bool(item.get("file_path"))
-        item["poster"] = metadata.image_url("w92", item.get("poster_path"))
-        days.setdefault(str(item["release_date"])[:10], []).append(item)
-    return render_template(
-        "calendar.html",
-        days=sorted(days.items()),
-        month_label=first.strftime("%B %Y"),
-        month_value=first.strftime("%Y-%m"),
-        previous=previous,
-        following=following,
-    )
+    month = request.args.get("month")
+    return redirect(url_for("manager.movies_calendar", **({"month": month} if month else {})))
 
 
 # -------------------------------------------------------------------- wanted
@@ -333,22 +404,46 @@ def _cutoff_episodes(conn) -> list[dict]:
     return out
 
 
-@bp.get("/wanted")
-def wanted():
-    conn = _conn()
+def _movie_wanted_context(conn) -> dict:
     movies = library.wanted_movies(conn)
     for movie in movies:
         movie["poster"] = metadata.image_url("w92", movie.get("poster_path"))
-    episodes = library.wanted_episodes(conn)
-    return render_template(
-        "wanted.html",
-        movies=movies,
-        episodes=episodes,
-        cutoff_movies=_cutoff_movies(conn),
-        cutoff_episodes=_cutoff_episodes(conn),
-        counts=_movie_counts(conn),
-        series_counts=_series_counts(conn),
-    )
+    return {
+        "section": "movies",
+        "movies": movies,
+        "episodes": [],
+        "cutoff_movies": _cutoff_movies(conn),
+        "cutoff_episodes": [],
+        "counts": _movie_counts(conn),
+        "series_counts": _series_counts(conn),
+    }
+
+
+def _series_wanted_context(conn) -> dict:
+    return {
+        "section": "series",
+        "movies": [],
+        "episodes": library.wanted_episodes(conn),
+        "cutoff_movies": [],
+        "cutoff_episodes": _cutoff_episodes(conn),
+        "counts": _movie_counts(conn),
+        "series_counts": _series_counts(conn),
+    }
+
+
+@bp.get("/movies/wanted")
+def movies_wanted():
+    return render_template("wanted.html", **_movie_wanted_context(_conn()))
+
+
+@bp.get("/series/wanted")
+def series_wanted():
+    return render_template("wanted.html", **_series_wanted_context(_conn()))
+
+
+@bp.get("/wanted")
+def wanted():
+    return redirect(url_for("manager.movies_wanted"))
 
 
 # ------------------------------------------------------------------ activity

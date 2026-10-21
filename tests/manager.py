@@ -1244,6 +1244,8 @@ def main() -> int:
         archive = zipfile.ZipFile(io.BytesIO(response.data))
         manifest = json.loads(archive.read("manifest.json"))
         names = set(archive.namelist())
+        check_true("backup includes additional movie versions",
+                   "tables/movie_alternates.json" in names)
         check("backup format", manifest.get("format"), "iptv-charts-backup")
         check_true("backup excludes items", "items" in manifest.get("excluded", []))
         check_true("backup includes movies", "tables/movies.json" in names)
@@ -1276,6 +1278,118 @@ def main() -> int:
         conn.close()
         check_true("catalog rebuilt after restore", item_count > 300)
 
+        # --------------------------------------- candidates and pinned versions
+        section("movie candidates, pinning and additional versions")
+        conn = db.connect()
+        matrix_row = conn.execute(
+            "SELECT * FROM movies WHERE title = 'The Matrix' LIMIT 1"
+        ).fetchone()
+        conn.close()
+        check_true("matrix restored for candidate test", matrix_row is not None)
+        matrix_id = int(matrix_row["id"])
+        old_main = Path(matrix_row["file_path"]) if matrix_row["file_path"] else None
+        page = page_text(client, f"/movies/{matrix_id}")
+        check_true("movie page has source candidates", "Source candidates" in page)
+        check_true("movie page has pin actions", "Only this" in page and "Also download" in page)
+
+        payload = client.get(f"/api/movies/{matrix_id}/candidates").get_json()
+        by_remote = {str(row["remote_id"]): row for row in payload["candidates"]}
+        candidate = by_remote.get("60001")
+        check_true("matrix 1080p candidate listed", candidate is not None)
+        if candidate is not None:
+            response = client.post(
+                f"/api/movies/{matrix_id}/candidates/probe",
+                json={"source_id": candidate["source_id"], "remote_id": "60001"},
+            )
+            check("candidate probe status", response.status_code, 200)
+            probed = response.get_json().get("candidate") or {}
+            check("candidate probe reports 1080p",
+                  (probed.get("probe") or {}).get("resolution"), "1080p")
+
+            page = page_text(client, f"/movies/{matrix_id}")
+            check_true("page shows probed candidate", "Probed" in page)
+
+            response = client.post(f"/api/movies/{matrix_id}/candidate", json={
+                "source_id": candidate["source_id"], "remote_id": "60001",
+                "mode": "also", "grab": True,
+            })
+            check("also-download selection accepted", response.status_code, 200)
+            check_true("also selection queued the profile search",
+                       response.get_json().get("search_queued"))
+            def alternate_row():
+                c = db.connect()
+                try:
+                    row = c.execute(
+                        "SELECT * FROM movie_alternates WHERE movie_id = ?",
+                        (matrix_id,),
+                    ).fetchone()
+                    return dict(row) if row else None
+                finally:
+                    c.close()
+            alternate = wait_until(alternate_row, timeout=30)
+            check_true("additional version imported", alternate is not None)
+            if alternate is not None:
+                check_true("additional version exists", Path(alternate["file_path"]).exists())
+                check("additional filename is distinct",
+                      Path(alternate["file_path"]).name,
+                      "The Matrix (1999) [1080p] [alternate].mp4")
+                check("additional marker", Path(alternate["file_path"]).read_bytes()[:9],
+                      b"RES:1080\n")
+                c = db.connect()
+                now_main = c.execute(
+                    "SELECT file_path FROM movies WHERE id = ?", (matrix_id,)
+                ).fetchone()["file_path"]
+                c.close()
+                check("additional version leaves main file unchanged", now_main,
+                      str(old_main))
+                check_true("page lists additional versions", "Additional versions" in page_text(
+                    client, f"/movies/{matrix_id}"
+                ))
+                backup = client.post("/api/backup/export", json={})
+                archive = zipfile.ZipFile(io.BytesIO(backup.data))
+                alternate_rows = json.loads(archive.read("tables/movie_alternates.json"))
+                check("backup includes the additional version row", len(alternate_rows), 1)
+
+            response = client.delete(f"/api/movies/{matrix_id}/candidate")
+            check("candidate pin cleared", response.status_code, 200)
+
+            response = client.post(f"/api/movies/{matrix_id}/candidate", json={
+                "source_id": candidate["source_id"], "remote_id": "60001",
+                "mode": "only", "grab": True,
+            })
+            check("only-this selection accepted", response.status_code, 200)
+            only_download = (response.get_json() or {}).get("download")
+            check_true("only-this returned a main download", only_download)
+            if only_download:
+                only_done = wait_download(only_download["id"], timeout=30)
+                check("pinned override imported", only_done["status"], "imported")
+                c = db.connect()
+                pinned_main = c.execute(
+                    "SELECT file_path FROM movies WHERE id = ?", (matrix_id,)
+                ).fetchone()["file_path"]
+                c.close()
+                check("pinned override replaces the main file",
+                      Path(pinned_main).name, "The Matrix (1999) [1080p].mp4")
+                check_true("pinned override removed the old main file",
+                           old_main is None or not old_main.exists())
+
+            if alternate is not None:
+                # The only-this pin selected the same candidate that was kept
+                # as an extra version, so the main import folds it into the
+                # main file instead of leaving a duplicate.
+                alt_path = Path(alternate["file_path"])
+                c = db.connect()
+                duplicate_row = c.execute(
+                    "SELECT COUNT(*) AS n FROM movie_alternates WHERE movie_id = ?",
+                    (matrix_id,),
+                ).fetchone()["n"]
+                c.close()
+                check("duplicate extra row removed when it became main",
+                      duplicate_row, 0)
+                check_true("duplicate extra file removed when it became main",
+                           not alt_path.exists())
+            client.delete(f"/api/movies/{matrix_id}/candidate")
+
         # -------------------------------------------------------------- pages/api
         section("rendered pages and settings APIs")
         for path, needle in (
@@ -1286,8 +1400,10 @@ def main() -> int:
             ("/movies", "The Matrix"),
             (f"/movies/{movie['id']}", "The Matrix"),
             (f"/series/{series['id']}", "The Beginning"),
-            ("/calendar", "Calendar"),
-            ("/wanted", "Wanted"),
+            ("/movies/calendar", "Movie calendar"),
+            ("/series/calendar", "Episode calendar"),
+            ("/movies/wanted", "Wanted movies"),
+            ("/series/wanted", "Wanted episodes"),
             ("/activity", "Queue"),
             ("/scan", "Library scan"),
             ("/settings", "Probe cache"),
@@ -1295,6 +1411,22 @@ def main() -> int:
         ):
             text = page_text(client, path)
             check_true(f"{path} renders", needle in text)
+
+        movies_wanted = page_text(client, "/movies/wanted")
+        series_wanted = page_text(client, "/series/wanted")
+        check_true("movie wanted page is movie-only",
+                   "Wanted movies" in movies_wanted and "Missing episodes" not in movies_wanted)
+        check_true("series wanted page is episode-only",
+                   "Wanted episodes" in series_wanted and "Missing movies" not in series_wanted)
+        movies_calendar = page_text(client, "/movies/calendar")
+        series_calendar = page_text(client, "/series/calendar")
+        check_true("movie calendar is movie-only",
+                   "Movie calendar" in movies_calendar and "Episode calendar" not in movies_calendar)
+        check_true("series calendar is episode-only",
+                   "Episode calendar" in series_calendar and "Movie calendar" not in series_calendar)
+        check_true("top navigation no longer lists global wanted/calendar",
+                   all(label not in page_text(client, "/").split('<nav class="topbar-nav">', 1)[-1].split("</nav>", 1)[0]
+                       for label in (">Wanted<", ">Calendar<")))
 
         settings_page = page_text(client, "/settings")
         check_true("settings shows ffprobe", "ffprobe" in settings_page)

@@ -72,6 +72,13 @@ API for other software. Provider catalogs and metadata keys stay local.
   group tags.
 - **Manual search** when automatic matching misses, with a query override, a
   list of every candidate release, and the probed stream facts next to each.
+- **Movie candidate workspace**: every matching VOD, its cached ffprobe facts
+  (resolution, video/HDR, audio and subtitle tracks, size), and the profile
+  decision in one view. Probe one or all candidates without leaving the page.
+- **Pin a candidate**: **Only this** overrides the profile and stops other
+  attempts; **Also download** keeps the profile pick and adds the pinned
+  candidate as an extra version. Pins persist and are honoured by scheduled
+  searches. Additional versions are listed and removable on the movie page.
 - **Built-in download queue** with progress, cancel, retry, history, editable
   **priority**, and a durable SQLite queue that survives restarts. Direct HTTP
   downloads resume; HLS playlists are remuxed with ffmpeg without transcoding.
@@ -86,8 +93,10 @@ API for other software. Provider catalogs and metadata keys stay local.
 - **Radarr/Sonarr-style add choices**: minimum availability for movies
   (announced, in cinemas, or released), monitor all/future/first/latest/no
   episodes for series, and what to do when a new season is discovered.
-- **Calendar** of episode air dates and movie release dates, and **Wanted**
-  views for missing movies, aired monitored episodes, and files below cutoff.
+- **Section-scoped Library / Wanted / Calendar tabs** under Movies and Series.
+  Movie Wanted lists only movies; Series Wanted lists only episodes; the
+  calendars are scoped the same way. No global Wanted/Calendar clutter in the
+  top bar.
 - **Library scan**: find files already on disk, match them to TMDB, review the
   proposals, and import the ones you confirm. A scan also returns files that
   have disappeared to "missing".
@@ -404,9 +413,9 @@ still work):
 - **Scan library** — manual only.
 
 All four can be run from **Activity**, which also shows the queue, recent
-failures, history and the next scheduled run. **Calendar** shows episodes and
-movie release dates by day; **Wanted** lists missing movies, missing aired
-episodes and files below cutoff.
+failures, history and the next scheduled run. **Movies → Calendar** shows movie
+release dates, **Series → Calendar** shows episode air dates, and the matching
+**Wanted** tabs list missing movies or missing episodes respectively.
 
 ### Library scan
 
@@ -569,6 +578,8 @@ library matcher uses the same shape without the source filter.
   authentication and the TVDB v4 login/search/episode/pagination contract.
 - [`docs/WORKER.md`](docs/WORKER.md) — the durable one-job-at-a-time worker,
   its queue, connection locks, recovery and deployment.
+- [`docs/MOVIE_CANDIDATES.md`](docs/MOVIE_CANDIDATES.md) — the candidate
+  workspace, pin modes and additional movie versions.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow and invariants.
 - [`LICENSE`](LICENSE) — MIT.
@@ -579,7 +590,7 @@ library matcher uses the same shape without the source filter.
 ./setup.test.sh --check
 ```
 
-Runs five suites, 654 checks, none of which touch the internet:
+Runs five suites, 689 checks, none of which touch the internet:
 
 | Suite | Covers |
 |---|---|
@@ -612,7 +623,7 @@ iptv_charts/
   app.py             Flask factory, page routes, request guards
   api.py             JSON endpoints: probe, create, sync, status, settings
   manager_api.py      library, metadata, queue, task, scan, backup, profile API
-  manager_web.py      Movies, Series, Calendar, Wanted, Activity, Scan, Profiles pages
+  manager_web.py      Movies/Series with their Wanted and Calendar sections, Activity, Scan, Profiles
   settings_service.py atomic validation/save for the unified settings form
   config.py          path resolution, port selection, media folders
   db.py              SQLite connections, schema, migrations, bulk-load tuning

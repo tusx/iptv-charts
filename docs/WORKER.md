@@ -58,6 +58,7 @@ exits instead of racing recovery and claiming a different job.
 | `episode_releases` | manual episode release list |
 | `grab_movie` / `grab_episode` | re-probe the selected release, then enqueue the download |
 | `refresh_movie` / `refresh_series` | metadata refresh from TMDB/TVDB |
+| `probe_movie_candidate` / `probe_movie_candidates` | ffprobe one candidate or the movie candidate list |
 | `scan_import` / `scan_import_all` | import reviewed scan results (may add metadata and probe files) |
 
 Automatic search, scheduled tasks and downloads enqueue and return

@@ -1,18 +1,31 @@
 {% extends "base.html" %}
-{% from "_macros.html" import poster, status_badge, empty %}
-{% block title %}Calendar · {{ app_name }}{% endblock %}
+{% from "_macros.html" import poster, status_badge, empty, library_nav %}
+{% set is_movies = section == 'movies' %}
+{% set calendar_endpoint = 'manager.movies_calendar' if is_movies else 'manager.series_calendar' %}
+{% block title %}{{ 'Movies' if is_movies else 'Series' }} / Calendar · {{ app_name }}{% endblock %}
 
 {% block content %}
+{{ library_nav(section, 'calendar') }}
 <section class="page-head">
   <div>
-    <p class="crumb"><a href="{{ url_for('home') }}">Home</a> / Calendar</p>
-    <h1>Calendar</h1>
-    <p class="subtitle">Episode air dates and movie release dates from your library metadata.</p>
+    <p class="crumb">
+      <a href="{{ url_for('home') }}">Home</a> /
+      <a href="{{ url_for('manager.movies' if is_movies else 'manager.series') }}">{{ 'Movies' if is_movies else 'Series' }}</a> /
+      Calendar
+    </p>
+    <h1>{{ 'Movie calendar' if is_movies else 'Episode calendar' }}</h1>
+    <p class="subtitle">
+      {% if is_movies %}
+        Release dates for movies in your library.
+      {% else %}
+        Air dates for episodes in your library.
+      {% endif %}
+    </p>
   </div>
   <div class="page-actions calendar-nav">
-    <a class="btn btn-ghost btn-sm" href="{{ url_for('manager.calendar_view', month=previous) }}">← Previous</a>
+    <a class="btn btn-ghost btn-sm" href="{{ url_for(calendar_endpoint, month=previous) }}">← Previous</a>
     <strong>{{ month_label }}</strong>
-    <a class="btn btn-ghost btn-sm" href="{{ url_for('manager.calendar_view', month=following) }}">Next →</a>
+    <a class="btn btn-ghost btn-sm" href="{{ url_for(calendar_endpoint, month=following) }}">Next →</a>
   </div>
 </section>
 
@@ -48,7 +61,7 @@
     {% endfor %}
   </div>
 {% else %}
-  {{ empty('Nothing this month', 'No episodes or movie releases have dates in this month. Try another month.') }}
+  {{ empty('Nothing this month', 'No ' ~ ('movie releases' if is_movies else 'episodes') ~ ' have dates in this month. Try another month.') }}
 {% endif %}
 {% endblock %}
 

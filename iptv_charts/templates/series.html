@@ -1,8 +1,9 @@
 {% extends "base.html" %}
-{% from "_macros.html" import poster, status_badge, empty %}
+{% from "_macros.html" import poster, status_badge, empty, library_nav %}
 {% block title %}Series · {{ app_name }}{% endblock %}
 
 {% block content %}
+{{ library_nav('series', 'library') }}
 <section class="page-head">
   <div>
     <p class="crumb"><a href="{{ url_for('home') }}">Home</a> / Series</p>

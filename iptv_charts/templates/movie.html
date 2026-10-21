@@ -1,12 +1,14 @@
 {% extends "base.html" %}
-{% from "_macros.html" import poster, status_badge, progress %}
+{% from "_macros.html" import poster, status_badge, progress, library_nav %}
 {% block title %}{{ movie.title }} · {{ app_name }}{% endblock %}
 
 {% block content %}
 <section class="detail-page">
   <p class="crumb"><a href="{{ url_for('manager.movies') }}">Movies</a> / {{ movie.title }}</p>
+  {{ library_nav('movies', 'library') }}
 
-  <div class="detail-hero">
+  <div class="detail-hero{% if movie.backdrop %} has-backdrop{% endif %}"
+       {% if movie.backdrop %}style="--hero-backdrop: url('{{ movie.backdrop }}')"{% endif %}>
     <div class="detail-poster">
       {{ poster(movie.poster, movie.title, 'poster-large') }}
     </div>
@@ -26,6 +28,7 @@
       <div class="library-badges">
         {{ status_badge(status) }}
         {% if movie.monitored %}<span class="badge badge-monitored">Monitored</span>{% endif %}
+        {% if movie.candidate_mode %}<span class="badge badge-downloaded">Pinned {{ movie.candidate_mode }}</span>{% endif %}
         {% if not movie.available and not movie.file_path %}
           <span class="badge badge-muted">Awaiting release</span>
         {% endif %}
@@ -42,6 +45,161 @@
       {% endif %}
     </div>
   </div>
+
+  <section class="candidate-section" id="candidate-section">
+    <div class="section-head">
+      <div>
+        <h2>Source candidates</h2>
+        <p class="hint">
+          {{ candidate_total }} catalog match{{ '' if candidate_total == 1 else 'es' }} ·
+          {{ candidate_probed }} probed with ffprobe. Pin one version to override the
+          quality profile, or keep the profile pick and download it as an extra version.
+        </p>
+      </div>
+      <div class="section-actions">
+        <button class="btn btn-sm" type="button" id="candidate-probe-all"
+                {% if not candidates %}disabled title="No catalog candidates to probe"{% endif %}>Probe unprobed</button>
+        <button class="btn btn-sm btn-ghost" type="button" id="movie-manual-search-section">Manual search</button>
+      </div>
+    </div>
+
+    {% if movie.candidate_mode %}
+      <div class="candidate-pin">
+        <span class="badge badge-downloaded">Pinned</span>
+        <span>
+          <strong>{{ movie.candidate_name or 'Selected candidate' }}</strong>
+          <span class="muted">
+            — {{ 'only this version' if movie.candidate_mode == 'only' else 'additional version alongside the profile pick' }}
+          </span>
+          {% if movie.candidate_mode == 'also' and search_pending %}
+            <span class="hint">Background search running; the extra version is queued after the profile pick.</span>
+          {% endif %}
+        </span>
+        <button class="btn btn-sm btn-ghost" type="button" id="candidate-clear">Clear pin</button>
+      </div>
+    {% endif %}
+
+    <div class="candidate-filters" id="candidate-filters">
+      <button class="chip is-active" type="button" data-candidate-filter="all" aria-pressed="true">All <span>{{ candidates|length }}</span></button>
+      <button class="chip" type="button" data-candidate-filter="probed" aria-pressed="false">Probed <span>{{ candidate_probed }}</span></button>
+      <button class="chip" type="button" data-candidate-filter="allowed" aria-pressed="false">Profile allows</button>
+      <button class="chip" type="button" data-candidate-filter="selected" aria-pressed="false">Pinned</button>
+      <span class="hint" id="candidate-filter-status" role="status"></span>
+    </div>
+
+    {% if candidates %}
+      <div class="candidate-grid" id="candidate-grid">
+        {% for candidate in candidates %}
+          {% set candidate_key = candidate.source_id ~ ':' ~ candidate.remote_id %}
+          <article class="candidate-card{% if candidate.selected %} is-selected{% endif %}{% if candidate.probe_ok %} is-probed{% endif %}"
+                   data-candidate
+                   data-probe="{{ 'ok' if candidate.probe_ok else 'failed' if candidate.probe_status == 'failed' else 'none' }}"
+                   data-allowed="{{ 'yes' if candidate.allowed else 'no' if candidate.allowed is not none else 'unknown' }}"
+                   data-selected="{{ 'yes' if candidate.selected else 'no' }}">
+            <div class="candidate-head">
+              <div class="candidate-title">
+                <h3>{{ candidate.name }}</h3>
+                <p>
+                  {{ candidate.source_name or 'Unknown playlist' }} ·
+                  {{ candidate.candidate_year or 'year ?' }} ·
+                  {{ candidate.resolution or 'unknown' }}
+                  {% if candidate.source and candidate.source != 'unknown' %} · {{ candidate.source|upper }}{% endif %}
+                </p>
+              </div>
+              <div class="candidate-badges">
+                {% if candidate.selected %}
+                  <span class="badge badge-downloaded">{{ 'Pinned: only' if candidate.selection_mode == 'only' else 'Pinned: also' }}</span>
+                {% endif %}
+                {% if candidate_key in alternate_keys %}
+                  <span class="badge badge-monitored">Saved as extra</span>
+                {% endif %}
+                {% if candidate.probe_ok %}
+                  <span class="badge badge-downloaded">Probed</span>
+                {% elif candidate.probe_status == 'failed' %}
+                  <span class="badge badge-failed">Probe failed</span>
+                {% else %}
+                  <span class="badge badge-muted">Not probed</span>
+                {% endif %}
+                <span class="candidate-score">match {{ ((candidate.score or 0) * 100)|round|int }}%</span>
+              </div>
+            </div>
+
+            {% if candidate.probe_ok %}
+              <div class="probe-facts">
+                <div><strong>{{ candidate.probe.resolution or candidate.resolution or 'Unknown' }}</strong><span>Resolution</span></div>
+                <div><strong>{{ candidate.probe.video_codec or 'Video' }}</strong><span>Video</span></div>
+                <div><strong>{{ candidate.probe.hdr or 'SDR' }}</strong><span>HDR</span></div>
+                <div><strong>{{ candidate.probe.audio_track_count or 0 }}</strong><span>Audio</span></div>
+                <div><strong>{{ candidate.probe.subtitle_track_count or 0 }}</strong><span>Subtitles</span></div>
+                <div>
+                  <strong>
+                    {% if candidate.probe.size %}{{ (candidate.probe.size / 1048576)|round(1) }} MiB{% else %}Unknown{% endif %}
+                  </strong><span>Size</span>
+                </div>
+              </div>
+              <div class="candidate-langs">
+                {% if candidate.probe.audio_languages %}
+                  <span class="track-chip">Audio: {{ candidate.probe.audio_languages|join('/') }}</span>
+                {% endif %}
+                {% if candidate.probe.subtitle_languages %}
+                  <span class="track-chip">Subtitles: {{ candidate.probe.subtitle_languages|join('/') }}</span>
+                {% endif %}
+                {% if candidate.quality_label %}
+                  <span class="track-chip">{{ candidate.quality_label }}</span>
+                {% endif %}
+                {% if candidate.probe_age is not none %}
+                  <span class="hint">Probed {{ format_age(candidate.probed_at) }}</span>
+                {% endif %}
+              </div>
+            {% elif candidate.probe_status == 'failed' %}
+              <p class="queue-error small">Probe failed: {{ candidate.probe_error }}</p>
+            {% else %}
+              <p class="hint">No ffprobe facts yet. Probe this candidate to see resolution, audio and subtitles before grabbing it.</p>
+            {% endif %}
+
+            <p class="candidate-reason {{ 'is-allowed' if candidate.allowed else 'is-rejected' if candidate.allowed is not none else '' }}">
+              {{ candidate.reason }}
+            </p>
+
+            <div class="candidate-actions">
+              <button class="btn btn-sm btn-ghost" type="button"
+                      data-probe-source="{{ candidate.source_id }}"
+                      data-probe-remote="{{ candidate.remote_id }}"
+                      data-probe-refresh="{{ '1' if candidate.probe_status != 'not_probed' else '0' }}">
+                {{ 'Re-probe' if candidate.probe_ok else 'Probe' }}
+              </button>
+              <button class="btn btn-sm" type="button"
+                      data-pin-source="{{ candidate.source_id }}"
+                      data-pin-remote="{{ candidate.remote_id }}"
+                      data-pin-mode="only"
+                      {% if candidate.selected and candidate.selection_mode == 'only' and movie.file_path %}disabled title="Already the main file"
+                      {% elif not candidate.probe_ok %}disabled title="Probe this candidate first"{% endif %}>
+                Only this
+              </button>
+              <button class="btn btn-sm" type="button"
+                      data-pin-source="{{ candidate.source_id }}"
+                      data-pin-remote="{{ candidate.remote_id }}"
+                      data-pin-mode="also"
+                      {% if candidate_key == main_key %}disabled title="Already the main file"
+                      {% elif candidate_key in alternate_keys %}disabled title="Already saved as an additional version"
+                      {% elif not candidate.probe_ok %}disabled title="Probe this candidate first"{% endif %}>
+                Also download
+              </button>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+      {% if candidate_total > candidates|length %}
+        <p class="hint">Showing the first {{ candidates|length }} of {{ candidate_total }} matches. Use manual search for a wider query.</p>
+      {% endif %}
+    {% else %}
+      <div class="empty-state">
+        <h2>No matching VODs found</h2>
+        <p>Update the playlist or use manual search with a different query.</p>
+      </div>
+    {% endif %}
+    <p class="hint" id="candidate-action-status" role="status"></p>
+  </section>
 
   <div class="detail-columns">
     <section class="detail-panel">
@@ -71,15 +229,40 @@
         <p class="muted">No file on disk yet.</p>
       {% endif %}
 
-      {% if movie.download %}
+      {% for download in downloads %}
         <div class="download-panel">
           <div class="download-panel-head">
-            <strong>{{ movie.download.status|title }}</strong>
-            <span class="muted">{{ movie.download.release_name }}</span>
+            <strong>
+              {{ download.status|title }}
+              {% if download.mode == 'alternate' %}· Additional version{% else %}· Main file{% endif %}
+            </strong>
+            <span class="muted">{{ download.release_name }}</span>
           </div>
-          {{ progress(movie.download) }}
-          <button class="btn btn-sm btn-danger" data-cancel-download="{{ movie.download.id }}" type="button">Cancel download</button>
+          {{ progress(download) }}
+          <button class="btn btn-sm btn-danger" data-cancel-download="{{ download.id }}" type="button">Cancel download</button>
         </div>
+      {% endfor %}
+
+      <h2>Additional versions</h2>
+      {% if alternates %}
+        <div class="alternate-list">
+          {% for alternate in alternates %}
+            <article class="alternate-row">
+              <div class="alternate-main">
+                <strong>{{ alternate.quality_label or alternate.resolution or 'Release' }}</strong>
+                <span class="muted">{{ alternate.name or 'Pinned candidate' }}</span>
+                <span class="mono wrap-anywhere small">{{ alternate.file_path }}</span>
+              </div>
+              <span class="alternate-size">
+                {{ (alternate.file_size / 1048576)|round(1) if alternate.file_size else 'Unknown' }} MiB
+              </span>
+              <button class="btn btn-sm btn-ghost" type="button"
+                      data-delete-alternate="{{ alternate.id }}">Remove</button>
+            </article>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="muted">No additional pinned versions. Choose “Also download” on a candidate to keep one alongside the main file.</p>
       {% endif %}
 
       <h2>Edit</h2>

@@ -1096,6 +1096,12 @@ def test_manager_foundations() -> None:
         # index did not exist yet, and schema.sql runs before migration.
         conn.execute("DROP INDEX IF EXISTS idx_downloads_queue")
         conn.execute("ALTER TABLE downloads DROP COLUMN priority")
+        for column in ("candidate_source_id", "candidate_remote_id",
+                       "candidate_mode", "candidate_name", "candidate_selected_at",
+                       "main_source_id", "main_remote_id"):
+            conn.execute(f"ALTER TABLE movies DROP COLUMN {column}")
+        conn.execute("ALTER TABLE downloads DROP COLUMN mode")
+        conn.execute("DROP TABLE IF EXISTS movie_alternates")
         conn.execute("ALTER TABLE sources DROP COLUMN connection_limit")
         conn.execute("ALTER TABLE quality_profiles DROP COLUMN qualities")
         conn.execute("PRAGMA user_version = 0")
@@ -1112,6 +1118,9 @@ def test_manager_foundations() -> None:
         )}
         profile_columns = {row["name"] for row in conn.execute(
             "PRAGMA table_info(quality_profiles)"
+        )}
+        movie_columns = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(movies)"
         )}
         tables = {row["name"] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -1138,6 +1147,12 @@ def test_manager_foundations() -> None:
         check("migration creates the probe cache", "stream_probes" in tables, True)
         check("migration creates the worker queue", "worker_jobs" in tables, True)
         check("migration creates worker state", "worker_state" in tables, True)
+        check("migration adds movie candidate pin fields",
+              {"candidate_source_id", "candidate_remote_id", "candidate_mode"}
+              <= movie_columns, True)
+        check("migration adds download mode", "mode" in download_columns, True)
+        check("migration creates additional movie versions",
+              "movie_alternates" in tables, True)
         check("migration creates the worker dedupe index",
               "idx_worker_jobs_dedupe" in indexes, True)
         check("schema version recorded", version, db.SCHEMA_VERSION)

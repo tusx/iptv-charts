@@ -140,43 +140,53 @@ def enqueue_due() -> int:
         conn.close()
 
 # ---------------------------------------------------------------------- tasks
-def _task_search_missing(conn) -> str:
+def _task_search_missing(conn, scope: str = "all") -> str:
+    if scope not in {"all", "movies", "series"}:
+        scope = "all"
     budget = 100
     searched_movies = queued_movies = 0
-    movies = [
-        movie for movie in library.list_movies(conn, status="monitored")
-        if library.movie_needs_search(conn, movie)
-    ]
-    for movie in movies[:100]:
-        if budget <= 0:
-            break
-        try:
-            result = library.search_movie(conn, movie, reason="auto")
-            searched_movies += 1
-            if result.get("queued"):
-                queued_movies += 1
-                budget -= 1
-        except Exception as exc:
-            logger.warning("tasks: movie search failed for %s: %s", movie["title"], exc)
+    if scope in {"all", "movies"}:
+        movies = [
+            movie for movie in library.list_movies(conn, status="monitored")
+            if library.movie_needs_search(conn, movie)
+        ]
+        for movie in movies[:100]:
+            if budget <= 0:
+                break
+            try:
+                result = library.search_movie(conn, movie, reason="auto")
+                searched_movies += 1
+                if result.get("queued"):
+                    queued_movies += 1
+                    budget -= 1
+            except Exception as exc:
+                logger.warning("tasks: movie search failed for %s: %s", movie["title"], exc)
 
     searched_series = queued_series = 0
-    series = [
-        item for item in library.list_series(conn, status="monitored")
-        if library.series_needs_search(conn, item)
-    ]
-    for item in series[:50]:
-        if budget <= 0:
-            break
-        try:
-            result = library.search_series(conn, item, reason="auto")
-            searched_series += 1
-            queued = int(result.get("queued") or 0)
-            if queued:
-                queued_series += queued
-                budget -= queued
-        except Exception as exc:
-            logger.warning("tasks: series search failed for %s: %s", item["title"], exc)
+    if scope in {"all", "series"}:
+        series = [
+            item for item in library.list_series(conn, status="monitored")
+            if library.series_needs_search(conn, item)
+        ]
+        for item in series[:50]:
+            if budget <= 0:
+                break
+            try:
+                result = library.search_series(conn, item, reason="auto")
+                searched_series += 1
+                queued = int(result.get("queued") or 0)
+                if queued:
+                    queued_series += queued
+                    budget -= queued
+            except Exception as exc:
+                logger.warning("tasks: series search failed for %s: %s", item["title"], exc)
 
+    if scope == "movies":
+        return (f"Searched {searched_movies} movie(s); "
+                f"queued {queued_movies} download(s).")
+    if scope == "series":
+        return (f"Searched {searched_series} series; "
+                f"queued {queued_series} download(s).")
     return (f"Searched {searched_movies} movie(s) and {searched_series} series; "
             f"queued {queued_movies + queued_series} download(s).")
 
@@ -241,10 +251,12 @@ TASK_FUNCS = {
 
 
 # --------------------------------------------------------------------- runner
-def run_task(name: str) -> dict:
+def run_task(name: str, scope: str = "all") -> dict:
     """Execute one task. The worker calls this exactly once per job."""
     if name not in TASK_NAMES:
         raise ValueError("Unknown task.")
+    if scope not in {"all", "movies", "series"}:
+        scope = "all"
     conn = db.connect()
     started = int(time.time())
     try:
@@ -265,7 +277,10 @@ def run_task(name: str) -> dict:
         _set_state(conn, name, status="running", message="Running", started=started)
         logger.info("tasks: %s started", name)
         try:
-            message = TASK_FUNCS[name](conn)
+            if name == "search_missing":
+                message = TASK_FUNCS[name](conn, scope)
+            else:
+                message = TASK_FUNCS[name](conn)
             status = "idle"
         except Exception as exc:
             status = "error"
@@ -299,22 +314,32 @@ def stop(timeout: float = 3.0) -> None:
     return None
 
 
-def trigger(name: str) -> bool:
-    """Queue a task now. Returns False when that task is already queued/running."""
+def trigger(name: str, scope: str = "all") -> bool:
+    """Queue a task now. Returns False when that task is already queued/running.
+
+    ``scope`` narrows Search missing to one section (``movies``/``series``); a
+    scoped run shares the same task slot so the worker still runs one at a time.
+    """
     if name not in TASK_NAMES:
         raise ValueError("Unknown task.")
+    if scope not in {"all", "movies", "series"}:
+        raise ValueError("Unknown task scope.")
     conn = db.connect()
     try:
         _ensure_state(conn)
         if _active(conn, name) is not None:
             return False
+        payload = {"name": name}
+        if name == "search_missing" and scope != "all":
+            payload["scope"] = scope
         job = jobs.enqueue(
-            conn, "task", {"name": name},
+            conn, "task", payload,
             priority=40, dedupe_key=f"task:{name}",
         )
         if not job.get("_created"):
             return False
-        _set_state(conn, name, status="queued", message="Queued")
+        label = f"Queued ({scope})" if payload.get("scope") else "Queued"
+        _set_state(conn, name, status="queued", message=label)
         return True
     finally:
         conn.close()

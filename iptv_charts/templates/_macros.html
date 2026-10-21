@@ -45,3 +45,18 @@
     <p>{{ message }}</p>
   </div>
 {%- endmacro %}
+
+
+{% macro library_nav(section, active) -%}
+<nav class="section-tabs" aria-label="{{ section|title }} sections">
+  <a href="{{ url_for('manager.movies' if section == 'movies' else 'manager.series') }}"
+     class="{% if active == 'library' %}is-active{% endif %}"
+     {% if active == 'library' %}aria-current="page"{% endif %}>Library</a>
+  <a href="{{ url_for('manager.movies_wanted' if section == 'movies' else 'manager.series_wanted') }}"
+     class="{% if active == 'wanted' %}is-active{% endif %}"
+     {% if active == 'wanted' %}aria-current="page"{% endif %}>Wanted</a>
+  <a href="{{ url_for('manager.movies_calendar' if section == 'movies' else 'manager.series_calendar') }}"
+     class="{% if active == 'calendar' %}is-active{% endif %}"
+     {% if active == 'calendar' %}aria-current="page"{% endif %}>Calendar</a>
+</nav>
+{%- endmacro %}

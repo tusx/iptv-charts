@@ -74,8 +74,9 @@ body {
   align-items: center;
   gap: 20px;
   padding: 0 22px;
-  height: 56px;
-  background: var(--bg-raised);
+  height: 58px;
+  background: color-mix(in srgb, var(--bg-raised) 88%, transparent);
+  backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
@@ -114,6 +115,20 @@ body {
 .topbar-nav a.active { background: var(--bg-hover); color: var(--fg); }
 
 .topbar-meta { display: flex; align-items: center; gap: 8px; }
+
+.section-tabs {
+  display: flex; gap: 4px; align-items: center;
+  margin: 0 0 18px; padding: 4px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg-raised); width: fit-content; max-width: 100%;
+  box-shadow: var(--shadow);
+}
+.section-tabs a {
+  color: var(--fg-muted); text-decoration: none;
+  padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 560;
+}
+.section-tabs a:hover { color: var(--fg); background: var(--bg-hover); }
+.section-tabs a.is-active { color: var(--accent-fg); background: var(--accent); }
 
 /* ----------------------------------------------------------------- content */
 .content {
@@ -1068,7 +1083,9 @@ button.poster-art {
 
 .library-filter {
   display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
-  margin: 18px 0 20px;
+  margin: 0 0 20px; padding: 12px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-raised);
 }
 .library-filter select, .search-field input, .stack-form input, .stack-form select {
   background: var(--bg-raised); color: var(--fg);
@@ -1087,6 +1104,12 @@ button.poster-art {
   border-radius: var(--radius); overflow: hidden;
   display: flex; flex-direction: column;
   box-shadow: var(--shadow);
+  transition: border-color .12s ease, transform .12s ease, box-shadow .12s ease;
+}
+.library-card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 18px rgb(0 0 0 / 0.2);
 }
 .library-poster-link { display: block; }
 .library-card-body { padding: 10px 12px 13px; display: flex; flex-direction: column; gap: 5px; }
@@ -1151,6 +1174,14 @@ button.poster-art {
   display: flex; gap: 26px; align-items: flex-start;
   margin: 8px 0 26px;
 }
+.detail-hero.has-backdrop {
+  padding: 20px; border: 1px solid var(--border); border-radius: var(--radius);
+  background-image:
+    linear-gradient(100deg, var(--bg-raised) 25%, color-mix(in srgb, var(--bg-raised) 72%, transparent)),
+    var(--hero-backdrop);
+  background-size: cover; background-position: center;
+  box-shadow: var(--shadow);
+}
 .detail-info { flex: 1; min-width: 0; }
 .detail-info h1 { margin: 0 0 5px; font-size: clamp(24px, 4vw, 36px); letter-spacing: -0.02em; }
 .detail-meta { margin: 0 0 8px; color: var(--fg-faint); font-size: 13px; }
@@ -1209,6 +1240,89 @@ button.poster-art {
 .release-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .release-main strong { font-size: 13px; overflow-wrap: anywhere; }
 .release-score { color: var(--fg-faint); font-size: 11px; }
+
+/* ---------------------------------------------------------- candidates */
+.candidate-section {
+  background: var(--bg-raised); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow);
+  margin-bottom: 20px;
+}
+.section-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 12px;
+}
+.section-head h2 { margin: 0 0 3px; font-size: 16px; font-weight: 650; }
+.section-head .hint { margin: 0; }
+.section-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+.candidate-pin {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 11px; margin: 10px 0 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg-raised));
+  font-size: 13px;
+}
+.candidate-pin .btn { margin-left: auto; }
+.candidate-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 10px 0 12px; }
+.chip {
+  font: inherit; font-size: 12px; font-weight: 560;
+  border: 1px solid var(--border); background: var(--bg-hover);
+  color: var(--fg-muted); border-radius: 999px; padding: 4px 10px;
+  cursor: pointer;
+}
+.chip:hover { color: var(--fg); border-color: var(--border-strong); }
+.chip.is-active { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
+.chip span { opacity: .8; margin-left: 3px; }
+.candidate-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.candidate-card {
+  display: flex; flex-direction: column; gap: 9px;
+  padding: 13px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-raised); min-width: 0;
+  transition: border-color .12s ease, box-shadow .12s ease, transform .12s ease;
+}
+.candidate-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow); }
+.candidate-card[hidden] { display: none; }
+.candidate-card.is-probed { border-left: 3px solid var(--ok); }
+.candidate-card.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent), var(--shadow);
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg-raised));
+}
+.candidate-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.candidate-title { min-width: 0; }
+.candidate-title h3 { margin: 0; font-size: 13.5px; font-weight: 650; overflow-wrap: anywhere; }
+.candidate-title p { margin: 2px 0 0; color: var(--fg-faint); font-size: 11.5px; overflow-wrap: anywhere; }
+.candidate-badges { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.candidate-score { color: var(--fg-faint); font-size: 10.5px; white-space: nowrap; }
+.probe-facts {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px; padding: 8px; border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+}
+.probe-facts div { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 2px 4px; }
+.probe-facts strong { font-size: 12px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.probe-facts span { color: var(--fg-faint); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.candidate-langs { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+.track-chip {
+  display: inline-block; padding: 2px 7px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg-hover);
+  color: var(--fg-muted); font-size: 10.5px; white-space: nowrap;
+}
+.candidate-reason { margin: 0; font-size: 12px; color: var(--fg-muted); line-height: 1.45; }
+.candidate-reason.is-allowed { color: var(--ok); }
+.candidate-reason.is-rejected { color: var(--warn); }
+.candidate-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 2px; }
+.candidate-actions .btn { font-size: 12px; padding: 5px 10px; }
+.alternate-list { display: flex; flex-direction: column; gap: 7px; margin-bottom: 18px; }
+.alternate-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px; align-items: center; padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+.alternate-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-size: 12px; }
+.alternate-main strong { font-size: 13px; }
+.alternate-main .small { font-size: 10.5px; }
+.alternate-size { color: var(--fg-faint); font-size: 11px; white-space: nowrap; }
 
 /* ---------------------------------------------------------- episodes/seasons */
 .season { border-top: 1px solid var(--border); padding: 12px 0 5px; }
@@ -1324,6 +1438,11 @@ button.poster-art {
   .queue-row { grid-template-columns: 1fr; }
   .queue-actions { justify-content: flex-start; }
   .library-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
+  .candidate-grid { grid-template-columns: 1fr; }
+  .probe-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .alternate-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .alternate-size { grid-column: 2; grid-row: 1; }
+  .alternate-row > .btn { grid-column: 1 / -1; justify-self: start; }
 }
 
 /* ---------------------------------------------------- quality profile editor */

@@ -251,7 +251,13 @@ def _reconcile_missing(conn) -> int:
     missing = 0
     for row, kind, root in _tracked_files(conn):
         if not Path(row["file_path"]).exists():
-            if kind == "movie":
+            if kind == "alternate":
+                conn.execute("DELETE FROM movie_alternates WHERE id = ?", (row["id"],))
+                library.add_history(
+                    conn, "missing", str(row["name"] or "Alternate version"),
+                    kind="movie", movie_id=row["movie_id"], message=row["file_path"],
+                )
+            elif kind == "movie":
                 conn.execute(
                     "UPDATE movies SET file_path = NULL, file_size = NULL, "
                     "resolution = NULL, imported_at = NULL WHERE id = ?", (row["id"],)
@@ -279,6 +285,11 @@ def _tracked_files(conn):
     ).fetchall()
     for row in movies:
         yield row, "movie", config.movie_library_dir()
+    alternates = conn.execute(
+        "SELECT id, movie_id, name, file_path FROM movie_alternates"
+    ).fetchall()
+    for row in alternates:
+        yield row, "alternate", config.movie_library_dir()
     episodes = conn.execute(
         "SELECT e.id, e.series_id, e.season, e.episode, e.file_path, "
         "s.title AS series_title FROM series_episodes e "
@@ -300,6 +311,12 @@ def run(conn) -> str:
         row["path"]: row["status"]
         for row in conn.execute("SELECT path, status FROM scan_results")
     }
+    alternate_paths = set()
+    for row in conn.execute("SELECT file_path FROM movie_alternates"):
+        try:
+            alternate_paths.add(str(Path(row["file_path"]).resolve()))
+        except (OSError, TypeError):
+            alternate_paths.add(str(row["file_path"]))
     for root, kind in (
         (config.movie_library_dir().resolve(), "movie"),
         (config.series_library_dir().resolve(), "episode"),
@@ -307,6 +324,8 @@ def run(conn) -> str:
         if not root.exists():
             continue
         for path in _walk(root):
+            if str(path) in alternate_paths:
+                continue
             status = existing.get(str(path))
             if status in ("imported", "ignored"):
                 continue
@@ -409,6 +428,7 @@ def import_result(conn, result_id: int) -> dict:
             raise ValueError("That movie already has a different file.")
         conn.execute(
             "UPDATE movies SET file_path = ?, file_size = ?, resolution = ?, "
+            "main_source_id = NULL, main_remote_id = NULL, "
             "imported_at = ?, updated_at = ? WHERE id = ?",
             (str(path), path.stat().st_size, result["resolution"], _now(), _now(), movie["id"]),
         )

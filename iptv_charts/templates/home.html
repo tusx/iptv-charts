@@ -138,9 +138,9 @@
       {% else %}
         <a class="btn btn-sm" href="{{ url_for('settings') }}#metadata-settings">Set up TMDB</a>
       {% endif %}
-      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.calendar_view') }}">Calendar</a>
-      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.wanted') }}">Wanted</a>
-      <button class="btn btn-sm btn-ghost" type="button" data-search-missing>Search missing</button>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.movies_calendar') }}">Calendar</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.movies_wanted') }}">Wanted</a>
+      <button class="btn btn-sm btn-ghost" type="button" data-search-missing data-search-scope="movies">Search missing</button>
     </div>
     {% if not tmdb_configured %}
       <p class="hint">Add a TMDB key in Settings to search for movies.</p>
@@ -173,9 +173,9 @@
       {% else %}
         <a class="btn btn-sm" href="{{ url_for('settings') }}#metadata-settings">Set up TMDB</a>
       {% endif %}
-      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.calendar_view') }}">Calendar</a>
-      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.wanted') }}">Wanted</a>
-      <button class="btn btn-sm btn-ghost" type="button" data-search-missing>Search missing</button>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.series_calendar') }}">Calendar</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.series_wanted') }}">Wanted</a>
+      <button class="btn btn-sm btn-ghost" type="button" data-search-missing data-search-scope="series">Search missing</button>
     </div>
     {% if not tmdb_configured %}
       <p class="hint">Add a TMDB key in Settings to search for series.</p>

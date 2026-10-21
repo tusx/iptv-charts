@@ -1,8 +1,9 @@
 {% extends "base.html" %}
-{% from "_macros.html" import poster, status_badge, progress, empty %}
+{% from "_macros.html" import poster, status_badge, progress, empty, library_nav %}
 {% block title %}Movies · {{ app_name }}{% endblock %}
 
 {% block content %}
+{{ library_nav('movies', 'library') }}
 <section class="page-head">
   <div>
     <p class="crumb"><a href="{{ url_for('home') }}">Home</a> / Movies</p>
@@ -58,6 +59,7 @@
           <div class="library-badges">
             {{ status_badge('downloading' if movie.download else movie.status) }}
             {% if movie.monitored %}<span class="badge badge-monitored">Monitored</span>{% endif %}
+            {% if movie.candidate_mode %}<span class="badge badge-downloaded">Pinned</span>{% endif %}
             {% if not movie.available and not movie.file_path %}
               <span class="badge badge-muted">Awaiting release</span>
             {% endif %}

@@ -23,7 +23,7 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 #: Bumped whenever schema.sql starts relying on a column that existing
 #: databases do not have. New tables appear through CREATE IF NOT EXISTS;
 #: columns need an explicit step below.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _TASKS = ("search_missing", "refresh_metadata", "refresh_catalog", "scan_library")
 
@@ -220,6 +220,51 @@ def migrate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "ALTER TABLE downloads ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
             )
+
+    if version < 4:
+        # Manual candidate pin and additional movie versions. The alternate
+        # table itself is created by schema.sql; existing downloads are main.
+        movie_columns = _columns(conn, "movies")
+        additions = (
+            ("candidate_source_id", "INTEGER"),
+            ("candidate_remote_id", "TEXT"),
+            ("candidate_mode", "TEXT"),
+            ("candidate_name", "TEXT"),
+            ("candidate_selected_at", "INTEGER"),
+            ("main_source_id", "INTEGER"),
+            ("main_remote_id", "TEXT"),
+        )
+        for column, definition in additions:
+            if column not in movie_columns:
+                conn.execute(f"ALTER TABLE movies ADD COLUMN {column} {definition}")
+        if "mode" not in _columns(conn, "downloads"):
+            conn.execute(
+                "ALTER TABLE downloads ADD COLUMN mode TEXT NOT NULL DEFAULT 'main'"
+            )
+        # Files downloaded before v4 have no stored provider identity. Recover
+        # it from the imported download that produced the current main file so
+        # the candidate page cannot re-download the same stream as an extra.
+        conn.execute(
+            """
+            UPDATE movies SET
+                main_source_id = COALESCE(main_source_id, (
+                    SELECT d.source_id FROM downloads d
+                    WHERE d.movie_id = movies.id AND d.kind = 'movie'
+                      AND d.mode = 'main' AND d.status = 'imported'
+                      AND d.source_id IS NOT NULL AND d.final_path = movies.file_path
+                    ORDER BY d.id DESC LIMIT 1
+                )),
+                main_remote_id = COALESCE(main_remote_id, (
+                    SELECT d.provider_remote_id FROM downloads d
+                    WHERE d.movie_id = movies.id AND d.kind = 'movie'
+                      AND d.mode = 'main' AND d.status = 'imported'
+                      AND d.source_id IS NOT NULL AND d.final_path = movies.file_path
+                    ORDER BY d.id DESC LIMIT 1
+                ))
+            WHERE file_path IS NOT NULL AND file_path <> ''
+              AND (main_source_id IS NULL OR main_remote_id IS NULL)
+            """
+        )
 
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()

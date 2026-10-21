@@ -249,7 +249,9 @@
       button.disabled = true;
       button.textContent = 'Starting…';
       try {
-        await postJSON('/api/tasks/search_missing/run');
+        await postJSON('/api/tasks/search_missing/run', {
+          scope: button.dataset.searchScope || 'all',
+        });
         button.textContent = '✓ Search started';
         window.setTimeout(() => {
           button.disabled = false;

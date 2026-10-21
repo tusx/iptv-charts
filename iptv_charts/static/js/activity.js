@@ -37,6 +37,8 @@
     refresh_series: 'Refresh series',
     scan_import: 'Import scan result',
     scan_import_all: 'Import scan results',
+    probe_movie_candidate: 'Probe movie candidate',
+    probe_movie_candidates: 'Probe movie candidates',
   };
 
   function schedule(delay) {
@@ -96,6 +98,7 @@
     main.append(element('strong', '', download.title));
     const bits = [
       download.kind === 'episode' ? 'Episode' : 'Movie',
+      download.mode === 'alternate' ? 'Additional version' : null,
       download.source_name || 'Unknown playlist',
       download.quality_label || download.resolution || 'unknown',
       `priority ${download.priority || 0}`,
@@ -222,7 +225,14 @@
     jobs.forEach((job) => {
       const row = element('div', 'task-row');
       const main = element('div', 'task-main');
-      main.append(element('strong', '', jobLabels[job.kind] || job.kind));
+      let label = jobLabels[job.kind] || job.kind;
+      if (job.kind === 'task' && job.payload?.name) {
+        label = taskLabels[job.payload.name] || label;
+        if (job.payload.scope && job.payload.scope !== 'all') {
+          label += ` (${job.payload.scope})`;
+        }
+      }
+      main.append(element('strong', '', label));
       const payload = job.payload ? JSON.stringify(job.payload) : '';
       main.append(element('span', 'muted small',
         `#${job.id} · ${formatTimestamp(job.started_at || job.created_at)} · ${payload}`));

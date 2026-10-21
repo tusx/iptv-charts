@@ -204,10 +204,20 @@ def movie_detail(movie_id: int):
             "SELECT * FROM history WHERE movie_id = ? ORDER BY id DESC LIMIT 50",
             (movie_id,),
         )]
+        candidates = library.movie_candidates_view(conn, movie)
+        downloads = [dict(row) for row in conn.execute(
+            "SELECT * FROM downloads WHERE movie_id = ? "
+            "AND status IN ('queued', 'downloading', 'importing') "
+            "ORDER BY CASE mode WHEN 'main' THEN 0 ELSE 1 END, id",
+            (movie_id,),
+        )]
         return jsonify({
             "ok": True, "movie": movie,
             "status": library.movie_status(conn, movie),
             "download": library.active_download(conn, movie_id=movie_id),
+            "downloads": downloads,
+            "candidates": candidates,
+            "alternates": library.movie_alternates(conn, movie_id),
             "history": history,
         })
     except Exception as exc:
@@ -291,6 +301,127 @@ def movie_releases(movie_id: int):
             priority=60, dedupe_key=key, timeout=600.0,
         ) or {}
         return jsonify({"ok": True, "releases": result.get("releases") or []})
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.get("/movies/<int:movie_id>/candidates")
+def movie_candidates(movie_id: int):
+    conn = _conn()
+    try:
+        movie = library.get_movie(conn, movie_id)
+        if movie is None:
+            return _fail("That movie no longer exists.", 404)
+        view = library.movie_candidates_view(conn, movie)
+        return jsonify({"ok": True, **view, "movie": movie})
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.post("/movies/<int:movie_id>/candidates/probe")
+def probe_movie_candidate(movie_id: int):
+    conn = _conn()
+    try:
+        payload = _payload()
+        source_id = _int(payload.get("source_id"))
+        remote_id = str(payload.get("remote_id") or "").strip()
+        if not source_id or not remote_id:
+            return _fail("Choose a candidate first.")
+        result = jobs.submit_and_wait(
+            "probe_movie_candidate", {
+                "movie_id": movie_id, "source_id": source_id,
+                "remote_id": remote_id, "refresh": _bool(payload.get("refresh")),
+            },
+            priority=65,
+            dedupe_key=f"probe_movie:{movie_id}:{source_id}:{remote_id}",
+            timeout=300.0,
+        )
+        return jsonify({"ok": True, "candidate": result})
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.post("/movies/<int:movie_id>/candidates/probe-all")
+def probe_movie_candidates(movie_id: int):
+    conn = _conn()
+    try:
+        payload = request.get_json(silent=True)
+        refresh = _bool(payload.get("refresh")) if isinstance(payload, dict) else False
+        result = jobs.submit_and_wait(
+            "probe_movie_candidates", {"movie_id": movie_id, "refresh": refresh},
+            priority=50, dedupe_key=f"probe_movies:{movie_id}", timeout=3600.0,
+        )
+        return jsonify({"ok": True, **(result or {})})
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.post("/movies/<int:movie_id>/candidate")
+def select_movie_candidate(movie_id: int):
+    conn = _conn()
+    try:
+        payload = _payload()
+        source_id = _int(payload.get("source_id"))
+        remote_id = str(payload.get("remote_id") or "").strip()
+        mode = str(payload.get("mode") or "").strip().lower()
+        if not source_id or not remote_id:
+            return _fail("Choose a candidate first.")
+        if mode not in ("only", "also"):
+            return _fail("Choose whether to use only this version or download it too.")
+        grab = _bool(payload.get("grab"), True)
+        result = library.select_movie_candidate(
+            conn, movie_id, source_id, remote_id, mode, grab=grab,
+        )
+        search_queued = False
+        if result.pop("search_needed", False):
+            job = jobs.enqueue(
+                conn, "search_movie",
+                {"movie_id": movie_id, "reason": "selection"},
+                priority=55,
+                # Selecting a different candidate while a search is running
+                # needs its own follow-up; the running job may have read the
+                # previous pin already.
+                dedupe_key=(
+                    f"search_movie:{movie_id}:selection:{source_id}:{remote_id}"
+                ),
+            )
+            search_queued = bool(job.get("_created"))
+        alternate = result.get("download") if mode == "also" else None
+        main_download = result.get("download") if mode == "only" else None
+        return jsonify({
+            "ok": True,
+            "movie": result.get("movie"),
+            "candidate": result.get("candidate"),
+            "download": main_download,
+            "alternate": alternate,
+            "search_queued": search_queued,
+            "message": (
+                "Pinned candidate. Search queued; it will add this version unless "
+                "the quality profile picks the same candidate."
+                if mode == "also" else
+                "Pinned candidate; other candidates were overridden and this "
+                "version was queued."
+            ),
+        })
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.delete("/movies/<int:movie_id>/candidate")
+def clear_movie_candidate(movie_id: int):
+    conn = _conn()
+    try:
+        return jsonify({"ok": True, "movie": library.clear_movie_candidate(conn, movie_id)})
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.delete("/movies/<int:movie_id>/alternates/<int:alternate_id>")
+def delete_movie_alternate(movie_id: int, alternate_id: int):
+    conn = _conn()
+    try:
+        library.remove_movie_alternate(conn, movie_id, alternate_id)
+        return jsonify({"ok": True})
     except Exception as exc:
         return _error(exc)
 
@@ -634,10 +765,14 @@ def tasks():
 
 @bp.post("/tasks/<name>/run")
 def run_task(name: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
+    scope = str(payload.get("scope") or "all")
     try:
-        if not scheduler.trigger(name):
+        if not scheduler.trigger(name, scope):
             return _fail("A task is already running. Wait for it to finish.", 409)
-        return jsonify({"ok": True, "started": name})
+        return jsonify({"ok": True, "started": name, "scope": scope})
     except ValueError as exc:
         return _fail(str(exc), 404)
 

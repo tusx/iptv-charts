@@ -333,9 +333,34 @@ class DownloadManager:
             return 0
 
     def enqueue_movie(self, conn, movie: Mapping[str, Any], release: Mapping[str, Any],
-                      *, reason: str = "auto", priority: int | None = None) -> dict:
-        if library.active_download(conn, movie_id=int(movie["id"])):
-            raise ValueError("A download for this movie is already active.")
+                      *, reason: str = "auto", priority: int | None = None,
+                      mode: str = "main", allow_active: bool = False) -> dict:
+        mode = "alternate" if str(mode).lower() == "alternate" else "main"
+        movie_id = int(movie["id"])
+        if mode == "main":
+            if not allow_active and library.active_download(
+                    conn, movie_id=movie_id, mode="main"):
+                raise ValueError("A download for this movie is already active.")
+        else:
+            if library.active_download(conn, movie_id=movie_id, mode="alternate"):
+                raise ValueError("An additional download for this movie is already active.")
+            existing = db.get_one(
+                conn,
+                "SELECT id, file_path FROM movie_alternates "
+                "WHERE movie_id = ? AND source_id = ? AND remote_id = ?",
+                (movie_id, int(release["source_id"]), str(release["remote_id"])),
+            )
+            if existing is not None:
+                raise ValueError("That candidate is already saved as an additional version.")
+            same = db.get_one(
+                conn,
+                "SELECT id FROM downloads WHERE movie_id = ? AND mode = 'alternate' "
+                "AND source_id = ? AND provider_remote_id = ? "
+                "AND status IN ('queued', 'downloading', 'importing')",
+                (movie_id, int(release["source_id"]), str(release["remote_id"])),
+            )
+            if same is not None:
+                raise ValueError("That candidate is already queued as an additional version.")
         now = _now()
         probe = release.get("probe") if isinstance(release, Mapping) else None
         priority_value = (priority if priority is not None
@@ -346,9 +371,9 @@ class DownloadManager:
                 kind, movie_id, source_id, source_name, provider_kind,
                 provider_remote_id, container_ext, title, resolution, source,
                 quality_label, audio_languages, subtitle_languages, media_info,
-                priority, release_name, reason, status, attempts, max_attempts,
+                priority, mode, release_name, reason, status, attempts, max_attempts,
                 requested_at
-            ) VALUES ('movie', ?, ?, ?, 'vod', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ) VALUES ('movie', ?, ?, ?, 'vod', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       'queued', 0, ?, ?)
             """,
             (
@@ -358,7 +383,7 @@ class DownloadManager:
                 release.get("source"), release.get("quality_label"),
                 self._json(release.get("audio_languages")),
                 self._json(release.get("subtitle_languages")),
-                self._json(probe), self._priority(priority_value),
+                self._json(probe), self._priority(priority_value), mode,
                 release.get("name"), reason, self.max_attempts(conn), now,
             ),
         )
@@ -366,7 +391,11 @@ class DownloadManager:
         library.add_history(
             conn, "grabbed", movie["title"], kind="movie", movie_id=movie["id"],
             download_id=download_id,
-            message=f"{release.get('resolution') or 'unknown'} from {release.get('source_name')}",
+            message=(
+                f"{release.get('resolution') or 'unknown'} from "
+                f"{release.get('source_name')}"
+                + (" (additional version)" if mode == "alternate" else "")
+            ),
         )
         conn.commit()
         logger.info("downloads: queued movie %s (#%d, %s)", movie["title"],
@@ -457,12 +486,15 @@ class DownloadManager:
         return dict(db.get_one(conn, "SELECT * FROM downloads WHERE id = ?", (int(download_id),)))
 
     def cancel_for(self, conn, *, movie_id: int | None = None,
-                   series_id: int | None = None) -> None:
+                   series_id: int | None = None, mode: str | None = None) -> None:
         clauses = ["status IN (?, ?, ?)"]
         params: list[Any] = list(ACTIVE)
         if movie_id is not None:
             clauses.append("movie_id = ?")
             params.append(int(movie_id))
+        if mode in ("main", "alternate"):
+            clauses.append("mode = ?")
+            params.append(mode)
         if series_id is not None:
             clauses.append("series_id = ?")
             params.append(int(series_id))
@@ -940,8 +972,11 @@ def shutdown(timeout: float = 3.0) -> None:
     _manager.shutdown(timeout)
 
 
-def enqueue_movie(conn, movie, release, *, reason: str = "auto") -> dict:
-    return _manager.enqueue_movie(conn, movie, release, reason=reason)
+def enqueue_movie(conn, movie, release, *, reason: str = "auto",
+                  mode: str = "main", allow_active: bool = False) -> dict:
+    return _manager.enqueue_movie(
+        conn, movie, release, reason=reason, mode=mode, allow_active=allow_active
+    )
 
 
 def enqueue_episode(conn, series, episode, candidate, provider_episode,
@@ -954,8 +989,8 @@ def cancel_download(conn, download_id: int) -> dict:
     return _manager.cancel_download(conn, download_id)
 
 
-def cancel_for(conn, *, movie_id=None, series_id=None) -> None:
-    _manager.cancel_for(conn, movie_id=movie_id, series_id=series_id)
+def cancel_for(conn, *, movie_id=None, series_id=None, mode=None) -> None:
+    _manager.cancel_for(conn, movie_id=movie_id, series_id=series_id, mode=mode)
 
 
 def retry_download(conn, download_id: int) -> dict:
