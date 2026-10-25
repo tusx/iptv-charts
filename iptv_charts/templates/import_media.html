@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Import existing · {{ app_name }}{% endblock %}
+
+{% block content %}
+{# base.html has no head block; a link in the document body is still honoured
+   by every browser this local app supports, and keeps the asset cacheable. #}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/import_media.css') }}">
+
+<section class="page-head import-head">
+  <div>
+    <p class="crumb">
+      <a href="{{ url_for('home') }}">Home</a> /
+      <a href="{{ url_for('manager.movies') }}">Movies</a> ·
+      <a href="{{ url_for('manager.series') }}">Series</a> / Import
+    </p>
+    <h1>Import existing</h1>
+    <p class="subtitle">
+      Files already in {{ media_host_dir }} that the library does not track yet.
+      Scanning only reads the folders; a file is attached only when you confirm.
+    </p>
+  </div>
+</section>
+
+<div class="import-page" id="import-page"
+     data-default-profile="{{ default_profile_id or '' }}"
+     data-initial-tab="{{ initial_tab }}"
+     data-tmdb-configured="{{ '1' if tmdb_configured else '0' }}">
+
+  <div class="section-tabs import-tabs" role="tablist" aria-label="Import kind">
+    <button class="import-tab" type="button" role="tab" data-tab="movie"
+            aria-selected="{{ 'true' if initial_tab == 'movie' else 'false' }}">Movies</button>
+    <button class="import-tab" type="button" role="tab" data-tab="series"
+            aria-selected="{{ 'true' if initial_tab == 'series' else 'false' }}">Series</button>
+  </div>
+
+  <section class="import-toolbar" aria-label="Import options">
+    <label class="import-field">
+      <span>Quality profile</span>
+      <select id="import-profile">
+        {% for profile in profiles %}
+          <option value="{{ profile.id }}"
+                  {% if profile.id == default_profile_id %}selected{% endif %}>
+            {{ profile.name }}
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <div class="import-toolbar-actions">
+      <button class="btn btn-primary" id="import-scan" type="button">Scan folders</button>
+      <button class="btn" id="import-ready" type="button" disabled>Import ready</button>
+    </div>
+  </section>
+
+  <section class="import-series-options" id="import-series-options" hidden>
+    <label class="import-field">
+      <span>Episodes to monitor</span>
+      <select id="import-series-mode">
+        <option value="all">All episodes</option>
+        <option value="none">None</option>
+        <option value="manual">Selected seasons</option>
+        <option value="future">Future episodes only</option>
+      </select>
+    </label>
+    <div class="import-seasons" id="import-seasons" hidden>
+      <span class="import-seasons-label">Seasons</span>
+      <div class="import-season-list" id="import-season-list"></div>
+    </div>
+  </section>
+
+  {% if not tmdb_configured %}
+    <div class="import-notice" role="note">
+      TMDB is not configured. Files that already match a library item can be
+      imported, but new metadata cannot be searched until a token is added in
+      <a href="{{ url_for('settings') }}">Settings</a>.
+    </div>
+  {% endif %}
+
+  <p class="hint import-status" id="import-status" role="status"></p>
+
+  <div class="import-list" id="import-list" aria-live="polite"></div>
+
+  <div class="empty-state import-empty" id="import-empty" hidden>
+    <h2 id="import-empty-title">Scan your folders</h2>
+    <p id="import-empty-text">
+      Untracked movie and episode files appear here with the title, year and
+      episode parsed from their names.
+    </p>
+  </div>
+</div>
+
+<template id="import-row-template">
+  <article class="import-card">
+    <div class="import-card-head">
+      <div class="import-file">
+        <span class="import-file-name"></span>
+        <span class="import-file-path muted"></span>
+      </div>
+      <div class="import-badges"></div>
+    </div>
+
+    <p class="import-parsed"></p>
+
+    <div class="import-match">
+      <div class="import-match-info"></div>
+      <div class="import-search" hidden>
+        <div class="import-search-row">
+          <input class="import-search-input" type="search"
+                 placeholder="Type a movie or series title" aria-label="Search title">
+          <button class="btn btn-sm import-search-run" type="button">Search</button>
+        </div>
+        <div class="import-results" role="listbox" aria-label="Metadata results"></div>
+      </div>
+    </div>
+
+    <div class="import-card-foot">
+      <span class="import-message muted"></span>
+      <div class="import-actions">
+        <button class="btn btn-sm import-find" type="button">Find metadata</button>
+        <button class="btn btn-sm btn-primary import-do" type="button" disabled>Import</button>
+      </div>
+    </div>
+  </article>
+</template>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/import_media.js') }}"></script>
+{% endblock %}

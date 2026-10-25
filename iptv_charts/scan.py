@@ -11,9 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import shutil
 import time
+from datetime import date
 from pathlib import Path
 
 from . import config, db, library, matching, metadata, naming, quality
@@ -507,11 +509,598 @@ def import_all(conn) -> dict:
     return {"imported": imported, "failed": failed}
 
 
+# ------------------------------------------------------- import existing page
+# The /import page is a review-only view over the same discovery rules as
+# ``run``. It never proposes by itself and never touches files: the page lists
+# untracked files with the title/year/episode parsed from their names, the user
+# fetches metadata on demand, and only an explicit confirmation attaches a
+# file. ``run`` keeps its own behaviour (pending rows + automatic TMDB hints).
+class ImportConflict(ValueError):
+    """A file or TMDB identity is already attached to another library item."""
+
+
+def _resolved(path: str | Path) -> str:
+    try:
+        return str(Path(path).resolve())
+    except (OSError, TypeError):
+        return str(path)
+
+
+def _owned_files(conn) -> dict[str, dict]:
+    """Every tracked file path, so an import can never attach a file twice."""
+    owned: dict[str, dict] = {}
+    for row in conn.execute(
+        "SELECT id, title, file_path FROM movies "
+        "WHERE file_path IS NOT NULL AND file_path <> ''"
+    ):
+        owned[_resolved(row["file_path"])] = {
+            "kind": "movie", "id": int(row["id"]), "title": row["title"],
+        }
+    for row in conn.execute(
+        "SELECT a.id, a.name, a.file_path, a.movie_id, m.title "
+        "FROM movie_alternates a JOIN movies m ON m.id = a.movie_id"
+    ):
+        owned[_resolved(row["file_path"])] = {
+            "kind": "alternate", "id": int(row["id"]),
+            "title": f"{row['title']} ({row['name'] or 'alternate version'})",
+        }
+    for row in conn.execute(
+        "SELECT e.id, e.series_id, e.season, e.episode, e.file_path, "
+        "s.title AS series_title FROM series_episodes e "
+        "JOIN series s ON s.id = e.series_id "
+        "WHERE e.file_path IS NOT NULL AND e.file_path <> ''"
+    ):
+        season, episode = int(row["season"]), int(row["episode"])
+        owned[_resolved(row["file_path"])] = {
+            "kind": "episode", "id": int(row["id"]),
+            "series_id": int(row["series_id"]),
+            "season": season, "episode": episode,
+            "title": f"{row['series_title']} S{season:02d}E{episode:02d}",
+        }
+    return owned
+
+
+def _ignored_paths(conn) -> set[str]:
+    return {
+        _resolved(row["path"])
+        for row in conn.execute("SELECT path FROM scan_results WHERE status = 'ignored'")
+    }
+
+
+def _parsed_title(parsed: matching.ParsedName, fallback: str) -> str:
+    return parsed.title_variants[0] if parsed.title_variants else fallback
+
+
+def _review_movie(conn, path: Path, root: Path, rows: list[dict]) -> dict:
+    relative = path.relative_to(root)
+    parsed = matching.parse_name(path.stem)
+    if len(relative.parts) > 1:
+        folder = root / relative.parts[0]
+        folder_parsed = matching.parse_name(folder.name)
+        title = _parsed_title(folder_parsed, folder.name)
+        year = folder_parsed.year or parsed.year
+        folder_resolution = folder_parsed.resolution
+    else:
+        title = _parsed_title(parsed, path.stem)
+        year = parsed.year
+        folder_resolution = "unknown"
+    resolution = parsed.resolution if parsed.resolution != "unknown" else folder_resolution
+    matched, confidence = _match_library_rows(title, year, rows)
+    item = {
+        "kind": "movie", "title": title, "year": year,
+        "season": parsed.season, "episode": parsed.episode,
+        "resolution": resolution,
+        "matched_movie_id": int(matched["id"]) if matched else None,
+        "matched_title": matched["title"] if matched else None,
+        "confidence": confidence,
+        "importable": not parsed.is_episode,
+        "is_episode": parsed.is_episode,
+    }
+    if parsed.is_episode:
+        item["message"] = "Looks like a TV episode; import it from the Series tab."
+    elif matched:
+        item["message"] = f"Matches the existing library movie “{matched['title']}”."
+    else:
+        item["message"] = "Fetch metadata to choose the movie."
+    return item
+
+
+def _review_episode(conn, path: Path, root: Path, rows: list[dict]) -> dict:
+    relative = path.relative_to(root)
+    parsed = matching.parse_name(path.stem)
+    if len(relative.parts) > 1:
+        folder = root / relative.parts[0]
+        folder_parsed = matching.parse_name(folder.name)
+        title = _parsed_title(folder_parsed, folder.name)
+        year = folder_parsed.year or parsed.year
+        folder_resolution = folder_parsed.resolution
+    else:
+        title = _parsed_title(parsed, path.stem)
+        year = parsed.year
+        folder_resolution = "unknown"
+    resolution = parsed.resolution if parsed.resolution != "unknown" else folder_resolution
+    marker = matching.episode_marker(path.stem)
+    season, episode = marker if marker else (None, None)
+    matched, confidence = _match_library_rows(title, year, rows)
+    matched_series_id = int(matched["id"]) if matched else None
+    matched_episode_id = None
+    if matched and marker is not None:
+        row = _find_episode(conn, matched_series_id, season, episode)
+        matched_episode_id = int(row["id"]) if row else None
+    item = {
+        "kind": "episode", "title": title, "year": year,
+        "season": season, "episode": episode,
+        "resolution": resolution,
+        "matched_series_id": matched_series_id,
+        "matched_title": matched["title"] if matched else None,
+        "matched_episode_id": matched_episode_id,
+        "confidence": confidence,
+        "importable": marker is not None,
+        "is_episode": True,
+    }
+    if marker is None:
+        item["message"] = "The season and episode could not be read from the filename."
+    elif matched and matched_episode_id:
+        item["message"] = (
+            f"Matches {matched['title']} S{season:02d}E{episode:02d}; "
+            "the file will be attached to that episode."
+        )
+    elif matched:
+        item["message"] = (
+            f"Matches the series “{matched['title']}”, but S{season:02d}E{episode:02d} "
+            "is not in its metadata yet."
+        )
+    else:
+        item["message"] = "Fetch metadata to choose the series."
+    return item
+
+
+def discover(conn, kind: str) -> list[dict]:
+    """List untracked video files under the movie or series root.
+
+    This is read-only: it does not insert ``scan_results`` rows, probe files or
+    call a metadata provider. ``kind`` is ``movie`` or ``series``. Files that
+    are already tracked, or were previously ignored in the scan review, are
+    omitted. Paths are absolute and resolved inside the configured root.
+    """
+    kind = str(kind or "").strip().lower()
+    if kind not in {"movie", "series"}:
+        raise ValueError("Choose the Movies or Series tab.")
+    root = (config.movie_library_dir() if kind == "movie"
+            else config.series_library_dir()).resolve()
+    if not root.exists():
+        return []
+    rows = library.list_movies(conn) if kind == "movie" else library.list_series(conn)
+    owned = _owned_files(conn)
+    ignored = _ignored_paths(conn)
+    found: list[dict] = []
+    for path in _walk(root):
+        key = _resolved(path)
+        if key in owned or key in ignored:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        relative = path.relative_to(root)
+        item = (_review_movie(conn, path, root, rows) if kind == "movie"
+                else _review_episode(conn, path, root, rows))
+        item.update({
+            "path": str(path),
+            "relative": str(relative),
+            "name": path.name,
+            "size": int(stat.st_size),
+            "modified_at": int(stat.st_mtime),
+            "tracked": False,
+        })
+        found.append(item)
+    found.sort(key=lambda row: (
+        (row.get("title") or "").casefold(),
+        row.get("year") or 0,
+        row.get("season") or 0,
+        row.get("episode") or 0,
+        row["path"],
+    ))
+    return found
+
+
+def _confined_media_path(raw_path, root: Path) -> Path:
+    """Resolve a review path and require it to stay inside the given root."""
+    if not raw_path:
+        raise ValueError("Choose a file to import.")
+    try:
+        path = naming.confine(Path(str(raw_path)), root)
+    except naming.TemplateError as exc:
+        raise ValueError(str(exc)) from exc
+    if not path.exists() or not path.is_file():
+        raise ValueError("The file no longer exists on disk.")
+    if path.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise ValueError("That file is not a supported video.")
+    return path
+
+
+def _profile_id(conn, profile_id) -> int:
+    if profile_id in (None, ""):
+        resolved = library.default_profile_id(conn)
+        if resolved is None:
+            raise ValueError("Create a quality profile in Settings first.")
+        return int(resolved)
+    try:
+        resolved = int(profile_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Choose a valid quality profile.") from exc
+    if db.get_one(conn, "SELECT id FROM quality_profiles WHERE id = ?", (resolved,)) is None:
+        raise ValueError("That quality profile does not exist.")
+    return resolved
+
+
+def _media_resolution(path: Path, fallback: str | None) -> str:
+    probed, _error = _probe(path)
+    value = probed or fallback or "unknown"
+    return value if value != "unknown" else "unknown"
+
+
+def _seed_bworker(conn) -> int:
+    """Create bworker work for every monitored item.
+
+    The foundation owns this helper; calling it here keeps a freshly imported
+    item immediately pickable by bworker. A database that predates the bworker
+    tables (or a worktree without the foundation) still imports successfully.
+    """
+    try:
+        return int(db.seed_bworker_work(conn) or 0)
+    except AttributeError:
+        logger.info("scan: bworker work seeding is unavailable in this build")
+        return 0
+    except sqlite3.Error as exc:
+        logger.warning("scan: bworker work seeding skipped: %s", exc)
+        return 0
+
+
+def _mark_imported(conn, *, path: Path, kind: str, title: str | None,
+                   year: int | None, season: int | None, episode: int | None,
+                   resolution: str | None, tmdb_id: int | None,
+                   matched_movie_id: int | None, matched_series_id: int | None,
+                   matched_episode_id: int | None) -> None:
+    conn.execute(
+        """
+        INSERT INTO scan_results (
+            path, kind, title, year, season, episode, resolution, tmdb_id,
+            matched_movie_id, matched_series_id, matched_episode_id,
+            confidence, status, message, scanned_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 'imported', ?, ?)
+        ON CONFLICT(path) DO UPDATE SET
+            kind = excluded.kind, title = excluded.title, year = excluded.year,
+            season = excluded.season, episode = excluded.episode,
+            resolution = excluded.resolution, tmdb_id = excluded.tmdb_id,
+            matched_movie_id = excluded.matched_movie_id,
+            matched_series_id = excluded.matched_series_id,
+            matched_episode_id = excluded.matched_episode_id,
+            confidence = excluded.confidence, status = 'imported',
+            message = excluded.message, scanned_at = excluded.scanned_at
+        """,
+        (
+            str(path), kind, title, year, season, episode, resolution, tmdb_id,
+            matched_movie_id, matched_series_id, matched_episode_id,
+            "Imported from the Import existing page.", _now(),
+        ),
+    )
+
+
+def _finished(conn, *, path: Path, kind: str, title: str, year: int | None,
+              season: int | None, episode: int | None, resolution: str | None,
+              tmdb_id: int | None, matched_movie_id: int | None,
+              matched_series_id: int | None, matched_episode_id: int | None,
+              item_id: int, extra: dict | None = None) -> dict:
+    _mark_imported(
+        conn, path=path, kind=kind, title=title, year=year, season=season,
+        episode=episode, resolution=resolution, tmdb_id=tmdb_id,
+        matched_movie_id=matched_movie_id, matched_series_id=matched_series_id,
+        matched_episode_id=matched_episode_id,
+    )
+    seeded = _seed_bworker(conn)
+    conn.commit()
+    result = {
+        "path": str(path), "kind": kind, "title": title,
+        "resolution": resolution, "tmdb_id": tmdb_id,
+        "work_seeded": seeded,
+    }
+    result.update(extra or {})
+    return result
+
+
+def _import_movie(conn, path: Path, *, tmdb_id: int | None,
+                  matched_movie_id: int | None, profile_id: int | None,
+                  resolution: str | None) -> dict:
+    key = _resolved(path)
+    owner = _owned_files(conn).get(key)
+    target = None
+    if tmdb_id:
+        # An explicitly selected identity must never fall back to a stale
+        # local match; otherwise a new TMDB choice could attach the file to
+        # an unrelated existing row and leave the identity unchanged.
+        target = db.get_one(conn, "SELECT * FROM movies WHERE tmdb_id = ?",
+                            (int(tmdb_id),))
+    elif matched_movie_id:
+        target = db.get_one(conn, "SELECT * FROM movies WHERE id = ?",
+                            (int(matched_movie_id),))
+    if owner is not None:
+        same_movie = False
+        if tmdb_id:
+            # An explicit TMDB choice wins over a stale local match.
+            same_movie = (target is not None and owner["kind"] == "movie"
+                          and owner["id"] == int(target["id"]))
+        elif matched_movie_id:
+            same_movie = owner["kind"] == "movie" and owner["id"] == int(matched_movie_id)
+        if same_movie:
+            movie = library.get_movie(conn, owner["id"])
+            conn.execute("UPDATE movies SET monitored = 1 WHERE id = ?", (movie["id"],))
+            if profile_id:
+                conn.execute("UPDATE movies SET quality_profile_id = ? WHERE id = ?",
+                             (int(profile_id), movie["id"]))
+            return _finished(
+                conn, path=path, kind="movie", title=movie["title"],
+                year=movie.get("year"), season=None, episode=None,
+                resolution=movie.get("resolution") or resolution, tmdb_id=movie["tmdb_id"],
+                matched_movie_id=movie["id"], matched_series_id=None,
+                matched_episode_id=None, item_id=movie["id"],
+                extra={"movie_id": movie["id"], "already_imported": True,
+                       "monitored": True},
+            )
+        raise ImportConflict(f"That file is already attached to “{owner['title']}”.")
+
+    if target is None:
+        if not tmdb_id:
+            raise ValueError("Choose the movie metadata for this file.")
+        target = library.add_movie(conn, int(tmdb_id), profile_id=profile_id,
+                                   monitored=True)
+    movie = library.get_movie(conn, int(target["id"]))
+    if movie.get("file_path") and _resolved(movie["file_path"]) != key:
+        raise ImportConflict(
+            f"“{movie['title']}” already has a different file attached."
+        )
+    if profile_id:
+        conn.execute("UPDATE movies SET quality_profile_id = ? WHERE id = ?",
+                     (int(profile_id), movie["id"]))
+    final_resolution = _media_resolution(path, resolution)
+    now = _now()
+    conn.execute(
+        "UPDATE movies SET file_path = ?, file_size = ?, resolution = ?, "
+        "main_source_id = NULL, main_remote_id = NULL, monitored = 1, "
+        "imported_at = ?, updated_at = ? WHERE id = ?",
+        (str(path), path.stat().st_size, final_resolution, now, now, movie["id"]),
+    )
+    library.add_history(conn, "imported", movie["title"], kind="movie",
+                        movie_id=movie["id"], message="import existing")
+    return _finished(
+        conn, path=path, kind="movie", title=movie["title"], year=movie.get("year"),
+        season=None, episode=None, resolution=final_resolution,
+        tmdb_id=movie["tmdb_id"], matched_movie_id=movie["id"],
+        matched_series_id=None, matched_episode_id=None, item_id=movie["id"],
+        extra={"movie_id": movie["id"], "already_imported": False,
+               "monitored": True},
+    )
+
+
+def _episode_monitor_value(episode: dict, mode: str,
+                           seasons: set[int] | None) -> bool:
+    season = int(episode["season"])
+    if season == 0:
+        return False
+    if mode == "all":
+        return True
+    if mode == "none":
+        return False
+    if mode == "future":
+        air_date = str(episode.get("air_date") or "")[:10]
+        return not air_date or air_date >= date.today().isoformat()
+    if mode == "manual":
+        return season in (seasons or set())
+    raise ValueError("Unknown series monitoring mode.")
+
+
+def _apply_series_mode(conn, series_id: int, mode: str,
+                       seasons: set[int] | None) -> None:
+    mode = str(mode or "all").strip().lower()
+    if mode not in {"all", "none", "manual", "future"}:
+        raise ValueError("Choose all, none, manual seasons or future episodes.")
+    if mode == "manual" and not seasons:
+        raise ValueError("Choose at least one season to monitor.")
+    episodes = library.series_episodes(conn, series_id)
+    for episode in episodes:
+        monitored = _episode_monitor_value(episode, mode, seasons)
+        conn.execute("UPDATE series_episodes SET monitored = ? WHERE id = ?",
+                     (1 if monitored else 0, episode["id"]))
+
+
+def _import_episode(conn, path: Path, *, tmdb_id: int | None,
+                    matched_series_id: int | None, profile_id: int | None,
+                    resolution: str | None, season: int | None,
+                    episode: int | None, series_mode: str,
+                    seasons: set[int] | None) -> dict:
+    marker = matching.episode_marker(path.stem)
+    if marker is None:
+        raise ValueError(
+            "The season and episode could not be read from the filename."
+        )
+    parsed_season, parsed_episode = marker
+    season = int(season) if season is not None else parsed_season
+    episode = int(episode) if episode is not None else parsed_episode
+    key = _resolved(path)
+    owner = _owned_files(conn).get(key)
+    target = None
+    if tmdb_id:
+        # As for movies: the explicit TMDB choice is authoritative and must
+        # not silently use a stale local series match instead.
+        target = db.get_one(conn, "SELECT * FROM series WHERE tmdb_id = ?",
+                            (int(tmdb_id),))
+    elif matched_series_id:
+        target = db.get_one(conn, "SELECT * FROM series WHERE id = ?",
+                            (int(matched_series_id),))
+    if owner is not None:
+        same_series = False
+        if target is not None and owner["kind"] == "episode":
+            same_series = int(owner["series_id"]) == int(target["id"])
+        elif matched_series_id and owner["kind"] == "episode":
+            same_series = int(owner["series_id"]) == int(matched_series_id)
+        if (same_series and owner["kind"] == "episode"
+                and owner["season"] == season and owner["episode"] == episode):
+            series = library.get_series(conn, owner["series_id"])
+            conn.execute("UPDATE series SET monitored = 1 WHERE id = ?", (series["id"],))
+            if profile_id:
+                conn.execute("UPDATE series SET quality_profile_id = ? WHERE id = ?",
+                             (int(profile_id), series["id"]))
+            _apply_series_mode(conn, series["id"], series_mode, seasons)
+            return _finished(
+                conn, path=path, kind="episode", title=series["title"],
+                year=series.get("year"), season=season, episode=episode,
+                resolution=series_episodes_resolution(conn, owner["id"]) or resolution,
+                tmdb_id=series["tmdb_id"], matched_movie_id=None,
+                matched_series_id=series["id"], matched_episode_id=owner["id"],
+                item_id=owner["id"],
+                extra={"series_id": series["id"], "episode_id": owner["id"],
+                       "already_imported": True, "monitored": True},
+            )
+        raise ImportConflict(f"That file is already attached to “{owner['title']}”.")
+
+    if target is None:
+        if not tmdb_id:
+            raise ValueError("Choose the series metadata for this file.")
+        target = library.add_series(
+            conn, int(tmdb_id), profile_id=profile_id, monitored=True,
+            monitor_mode="none", monitor_new_seasons="all",
+        )
+    series = library.get_series(conn, int(target["id"]))
+    if profile_id:
+        conn.execute("UPDATE series SET quality_profile_id = ?, monitored = 1 "
+                     "WHERE id = ?", (int(profile_id), series["id"]))
+    row = _find_episode(conn, series["id"], season, episode)
+    if row is None:
+        # A newly added or stale series may not have this episode yet.
+        library.refresh_series_episodes(conn, series)
+        row = _find_episode(conn, series["id"], season, episode)
+    if row is None:
+        raise ValueError(
+            f"The series has no S{season:02d}E{episode:02d} episode in its metadata."
+        )
+    if row.get("file_path") and _resolved(row["file_path"]) != key:
+        raise ImportConflict(
+            f"{series['title']} S{season:02d}E{episode:02d} already has a "
+            "different file attached."
+        )
+    final_resolution = _media_resolution(path, resolution)
+    conn.execute(
+        "UPDATE series_episodes SET file_path = ?, file_size = ?, resolution = ?, "
+        "imported_at = ? WHERE id = ?",
+        (str(path), path.stat().st_size, final_resolution, _now(), row["id"]),
+    )
+    _apply_series_mode(conn, series["id"], series_mode, seasons)
+    title = f"{series['title']} S{season:02d}E{episode:02d}"
+    library.add_history(conn, "imported", title, kind="episode",
+                        series_id=series["id"], episode_id=row["id"],
+                        message="import existing")
+    return _finished(
+        conn, path=path, kind="episode", title=series["title"],
+        year=series.get("year"), season=season, episode=episode,
+        resolution=final_resolution, tmdb_id=series["tmdb_id"],
+        matched_movie_id=None, matched_series_id=series["id"],
+        matched_episode_id=row["id"], item_id=row["id"],
+        extra={"series_id": series["id"], "episode_id": row["id"],
+               "already_imported": False, "monitored": True},
+    )
+
+
+def series_episodes_resolution(conn, episode_id: int) -> str | None:
+    row = db.get_one(conn, "SELECT resolution FROM series_episodes WHERE id = ?",
+                     (int(episode_id),))
+    return row["resolution"] if row else None
+
+
+def import_untracked(conn, *, path, kind: str, tmdb_id: int | None = None,
+                     matched_movie_id: int | None = None,
+                     matched_series_id: int | None = None,
+                     title: str | None = None, year: int | None = None,
+                     season: int | None = None, episode: int | None = None,
+                     resolution: str | None = None,
+                     profile_id: int | None = None,
+                     series_mode: str = "all",
+                     seasons: list[int] | tuple[int, ...] | set[int] | None = None
+                     ) -> dict:
+    """Attach one review file to the library without moving it.
+
+    ``kind`` is the discovered file kind: ``movie`` or ``episode``. A movie is
+    confined to the movie root and an episode to the series root. The selected
+    quality profile defaults to the library default (the 1080p builtin).
+
+    Duplicates are refused: a path that is already tracked, or a TMDB identity
+    already attached to a different file, raises :class:`ImportConflict`.
+    Importing the same file for the same identity again is idempotent and is
+    reported with ``already_imported=True``.
+    """
+    kind = str(kind or "").strip().lower()
+    if kind == "series":
+        kind = "episode"
+    if kind not in {"movie", "episode"}:
+        raise ValueError("Choose a movie or episode to import.")
+    tmdb_id = _optional_int(tmdb_id, "TMDB id")
+    matched_movie_id = _optional_int(matched_movie_id, "movie id")
+    matched_series_id = _optional_int(matched_series_id, "series id")
+    season = _optional_int(season, "season")
+    episode = _optional_int(episode, "episode")
+    year = _optional_int(year, "year")
+    normalized_seasons = {
+        int(value) for value in (seasons or [])
+        if str(value).strip() not in {"", "None"}
+    }
+    series_mode = str(series_mode or "all").strip().lower()
+    if series_mode not in {"all", "none", "manual", "future"}:
+        raise ValueError("Choose all, none, manual seasons or future episodes.")
+    if (kind == "episode" and series_mode == "manual"
+            and not normalized_seasons):
+        # Validate before library rows are created: a rejected form must not
+        # leave a half-imported series behind.
+        raise ValueError("Choose at least one season to monitor.")
+    resolved_profile = _profile_id(conn, profile_id)
+    if kind == "movie":
+        if season is not None or episode is not None:
+            raise ValueError("A movie file cannot have a season or episode.")
+        root = config.movie_library_dir()
+        target = _confined_media_path(path, root)
+        parsed = matching.parse_name(target.stem)
+        if parsed.is_episode:
+            raise ValueError(
+                "That file looks like a TV episode; import it from the Series tab."
+            )
+        return _import_movie(
+            conn, target, tmdb_id=tmdb_id, matched_movie_id=matched_movie_id,
+            profile_id=resolved_profile, resolution=resolution,
+        )
+    root = config.series_library_dir()
+    target = _confined_media_path(path, root)
+    return _import_episode(
+        conn, target, tmdb_id=tmdb_id, matched_series_id=matched_series_id,
+        profile_id=resolved_profile, resolution=resolution, season=season,
+        episode=episode, series_mode=series_mode, seasons=normalized_seasons,
+    )
+
+
+def _optional_int(value, label: str) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {label}.") from exc
+
+
 __all__ = [
     "AUTO_IMPORT_CONFIDENCE",
+    "ImportConflict",
+    "discover",
     "ignore_result",
     "import_all",
     "import_result",
+    "import_untracked",
     "results",
     "run",
 ]
