@@ -1,7 +1,9 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon %}
 {% block title %}Playlists · {{ app_name }}{% endblock %}
 
 {% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/settings_sections.css') }}">
 <div class="page-head">
   <div>
     <h1>Playlists</h1>
@@ -165,6 +167,80 @@
   </div>
 {% endif %}
 
+{# IPTV owns external playback and playlist defaults; the global /settings page
+   deliberately no longer edits either. Data is loaded from the section API so
+   the shared /playlists route does not need to change. #}
+<form class="settings-card iptv-settings-card" id="iptv-settings"
+      data-iptv-settings
+      data-load-url="/api/settings/sections/iptv"
+      data-save-url="/api/settings/sections/iptv"
+      data-command-check-url="/api/settings/sections/iptv/command-check"
+      autocomplete="off">
+  <div class="settings-card-head">
+    <h2>{{ icon('tv') }} IPTV settings</h2>
+    <span class="pill pill-warn" id="iptv-player-state">Loading…</span>
+  </div>
+  <p class="hint">
+    External playback hands a stream to a player on this machine (or on the
+    host, through the player bridge). It is off by default; the browser player
+    is always available. These controls save separately from playlist cards.
+  </p>
+
+  <div class="iptv-enabled-row">
+    <label class="check" for="iptv-external-enabled">
+      <input type="checkbox" id="iptv-external-enabled">
+      External player enabled
+    </label>
+    <span class="hint">Off by default</span>
+  </div>
+
+  <fieldset class="iptv-player-fields" id="iptv-player-fields" disabled>
+    <legend class="hint">Player choice</legend>
+    <div class="choices" id="iptv-player-choices"></div>
+
+    <label class="field">
+      <span>Custom command</span>
+      <input id="iptv-player-command" type="text" spellcheck="false"
+             placeholder="mpv --title={title} --user-agent={user_agent} {url}">
+    </label>
+    <div class="settings-actions">
+      <button class="btn btn-sm btn-ghost" type="button" id="iptv-command-check">
+        {{ icon('circle-check') }} Check command syntax
+      </button>
+      <span class="settings-status" id="iptv-command-status" role="status"></span>
+    </div>
+    <p class="hint">
+      Placeholders: <code>{url}</code>, <code>{title}</code>,
+      <code>{user_agent}</code>, <code>{referrer}</code>. The URL is appended
+      at the end if the command never mentions it. Nothing is passed through a
+      shell, so quotes only group arguments. Checking never runs the command.
+    </p>
+    <p class="hint iptv-note" id="iptv-player-hints" role="status"></p>
+  </fieldset>
+
+  <div class="settings-subcard">
+    <h3>Playlist defaults</h3>
+    <label class="field">
+      <span>Playlist stale after (hours)</span>
+      <input type="number" id="iptv-stale-hours" min="1" max="8760" step="1"
+             value="24">
+    </label>
+    <p class="hint">
+      A playlist card shows a refresh reminder after this many hours.
+      Connection limits stay per playlist — set them on each card or its edit
+      page; there is no shared default that could silently override a provider
+      limit.
+    </p>
+  </div>
+
+  <div class="settings-savebar">
+    <button class="btn btn-primary" type="submit" id="iptv-settings-save" disabled>
+      {{ icon('floppy-disk') }} Save IPTV settings
+    </button>
+    <span class="settings-status" id="iptv-settings-status" role="status"></span>
+  </div>
+</form>
+
 {% include "_add_playlist_dialog.html" %}
 {% endblock %}
 
@@ -175,4 +251,5 @@
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/iptv_settings.js') }}"></script>
 {% endblock %}

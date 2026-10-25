@@ -1,0 +1,87 @@
+{% from "_macros.html" import icon %}
+{# Shared bworker task-policy editor. Included on the Movies and Series
+   settings pages; every policy row is rendered, with activity_cleanup locked
+   because cleanup continues even while the bworker is paused. #}
+<section class="settings-card" id="policy-settings">
+  <h2>{{ icon('sliders') }} Task toggles and retry policy</h2>
+  <p class="hint">
+    These policies apply to the background worker globally, whichever section
+    page you save them from. A stopped task keeps its failed state until it is
+    reset; other work continues.
+  </p>
+
+  <form id="policy-form" data-policy-editor
+        data-policies-url="{{ policies_url }}" data-reset-url="{{ policies_reset_url }}"
+        autocomplete="off">
+    <div class="policy-list">
+      {% for policy in policies %}
+        <div class="policy-row{% if policy.always_enabled %} is-locked{% endif %}"
+             data-work-type="{{ policy.work_type }}"
+             data-locked="{{ 1 if policy.always_enabled else 0 }}">
+          <div class="policy-identity">
+            <strong>{{ policy.label }}</strong>
+            <span class="policy-key">{{ policy.work_type }}</span>
+            <label class="policy-enable">
+              <input type="checkbox" name="enabled" data-policy-field="enabled"
+                     {% if policy.always_enabled or policy.enabled %}checked{% endif %}
+                     {% if policy.always_enabled %}disabled{% endif %}>
+              Enabled
+            </label>
+            {% if policy.always_enabled %}
+              <span class="policy-lock-note">
+                {{ icon('lock') }} Always on — cleanup continues while paused.
+              </span>
+            {% endif %}
+          </div>
+
+          <div class="policy-controls">
+            <label class="field">
+              <span>Retry delay (s)</span>
+              <input type="number" name="retry_delay_seconds" min="1" max="604800"
+                     step="1" data-policy-field="retry_delay_seconds"
+                     value="{{ policy.retry_delay_seconds }}"
+                     {% if policy.always_enabled %}disabled{% endif %}>
+            </label>
+            <label class="field">
+              <span>Backoff ×</span>
+              <input type="number" name="backoff_multiplier" min="1" max="10"
+                     step="0.1" data-policy-field="backoff_multiplier"
+                     value="{{ policy.backoff_multiplier }}"
+                     {% if policy.always_enabled %}disabled{% endif %}>
+            </label>
+            <label class="field">
+              <span>Max delay (s)</span>
+              <input type="number" name="max_delay_seconds" min="1" max="604800"
+                     step="1" data-policy-field="max_delay_seconds"
+                     value="{{ policy.max_delay_seconds or '' }}"
+                     {% if policy.always_enabled %}disabled{% endif %}>
+            </label>
+            <label class="field">
+              <span>Max failures</span>
+              <input type="number" name="max_failures" min="1" max="10000"
+                     step="1" data-policy-field="max_failures"
+                     value="{{ policy.max_failures if policy.max_failures is not none else '' }}"
+                     {% if policy.infinite_retry or policy.always_enabled %}disabled{% endif %}>
+            </label>
+            <label class="policy-infinite">
+              <input type="checkbox" name="infinite_retry" data-policy-field="infinite_retry"
+                     {% if policy.always_enabled or policy.infinite_retry %}checked{% endif %}
+                     {% if policy.always_enabled %}disabled{% endif %}>
+              Retry forever
+            </label>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+
+    <div class="settings-actions">
+      <button class="btn btn-primary" type="submit" id="policy-save">
+        {{ icon('floppy-disk') }} Save task policies
+      </button>
+      <button class="btn btn-ghost" type="button" id="policy-reset">
+        {{ icon('rotate-right') }} Reset all failed attempts
+      </button>
+      <span class="settings-status" id="policy-status" role="status"></span>
+    </div>
+  </form>
+</section>

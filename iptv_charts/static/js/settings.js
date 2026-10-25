@@ -1,5 +1,9 @@
-/* Settings page: one form, one atomic save, plus action buttons that are not
- * settings (provider tests, probe-cache clear, backup/restore). */
+/* Global settings page: metadata providers and the refresh schedule save
+ * atomically with one button. Player, naming, downloads/probing and section
+ * search defaults moved to the IPTV/Movies/Series settings pages.
+ *
+ * Provider tests and backup/restore are actions, not settings, and stay
+ * outside the form. */
 
 (() => {
   'use strict';
@@ -29,48 +33,20 @@
   }
 
   async function withButton(button, working, fn) {
-    const original = button.textContent;
+    const original = button.innerHTML;
     button.disabled = true;
     button.textContent = working;
     try {
       return await fn();
     } finally {
       button.disabled = false;
-      button.textContent = original;
+      button.innerHTML = original;
     }
   }
 
   const form = $('#settings-form');
   const status = $('#settings-status');
   const saveButton = $('#settings-save');
-  const previewCard = $('#settings-preview-card');
-  const preview = $('#settings-preview');
-  const mediaPreview = $('#media-preview');
-
-  function showCommand(argv) {
-    if (!Array.isArray(argv) || !argv.length) {
-      if (previewCard) previewCard.hidden = true;
-      return;
-    }
-    if (!preview) return;
-    preview.textContent = argv.join('\n');
-    if (previewCard) previewCard.hidden = false;
-  }
-
-  function showMediaPreview(results) {
-    if (!mediaPreview || !results) return;
-    mediaPreview.textContent = [
-      `Movie folder: ${results.movie_folder}`,
-      `Movie file:   ${results.movie_file}.mkv`,
-      `Episode file: ${results.episode_file}.mkv`,
-    ].join('\n');
-    mediaPreview.hidden = false;
-  }
-
-  function selectedPlayer() {
-    const chosen = form.querySelector('input[name="preferred_player"]:checked');
-    return chosen ? chosen.value : 'auto';
-  }
 
   function collect() {
     const metadata = {
@@ -86,27 +62,8 @@
     if (pin) metadata.tvdb_pin = pin;
 
     return {
-      player: {
-        preferred_player: selectedPlayer(),
-        player_command: $('#player-command').value.trim(),
-      },
       metadata,
-      media: {
-        movie_folder_template: $('#movie-folder-template').value.trim(),
-        movie_file_template: $('#movie-file-template').value.trim(),
-        series_folder_template: $('#series-folder-template').value.trim(),
-        season_folder_template: $('#season-folder-template').value.trim(),
-        episode_file_template: $('#episode-file-template').value.trim(),
-      },
-      downloads: {
-        max_attempts: Number($('#download-attempts').value),
-        probe_cache_hours: Number($('#probe-cache-hours').value),
-        probe_timeout_seconds: Number($('#probe-timeout').value),
-        probe_max_candidates: Number($('#probe-max-candidates').value),
-        probe_search_budget: Number($('#probe-search-budget').value),
-      },
       scheduler: {
-        search_interval_hours: Number($('#search-interval').value),
         refresh_interval_hours: Number($('#refresh-interval').value),
         catalog_refresh_hours: Number($('#catalog-interval').value),
       },
@@ -115,14 +72,10 @@
 
   function focusSection(section) {
     const ids = {
-      player: '#player-settings',
       metadata: '#metadata-settings',
-      media: '#media-settings',
-      downloads: '#download-settings',
       scheduler: '#scheduler-settings',
     };
-    const id = ids[section] || '';
-    const target = id ? document.querySelector(id) : null;
+    const target = $(ids[section] || '');
     if (!target) return;
     target.scrollIntoView({ behavior: 'smooth', block: 'start' });
     target.querySelector('input, select, textarea')?.focus({ preventScroll: true });
@@ -130,22 +83,18 @@
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const payload = collect();
-    if (payload.player.preferred_player === 'custom' && !payload.player.player_command) {
-      setStatus(status, 'Give the custom command first, or choose another player.', 'bad');
-      focusSection('player');
-      return;
-    }
-    setStatus(status, 'Saving all settings…');
+    if (!form.reportValidity()) return;
+    setStatus(status, 'Saving global settings…');
     try {
       const result = await withButton(saveButton, 'Saving…',
-        () => postJSON('/api/settings/save', payload));
+        () => postJSON('/api/settings/save', collect()));
       const bits = ['Saved'];
-      if (result.player) bits.push(`playing via ${result.player.label}`);
+      const meta = result.metadata || {};
+      bits.push(`TMDB ${meta.tmdb ? 'configured' : 'not configured'}`);
+      bits.push(`TVDB ${meta.tvdb ? 'configured' : 'not configured'}`);
       if ((result.warnings || []).length) bits.push(result.warnings.join(' '));
       setStatus(status, `${bits.join(' — ')}.`, 'ok');
-      showCommand(result.command);
-      showMediaPreview(result.media?.preview);
+      // Never keep a submitted secret in the DOM after a successful save.
       $('#tmdb-token').value = '';
       $('#tvdb-key').value = '';
       $('#tvdb-pin').value = '';
@@ -172,20 +121,6 @@
       }
     });
   });
-
-  const clearProbes = $('#probes-clear');
-  if (clearProbes) {
-    clearProbes.addEventListener('click', async () => {
-      setStatus(status, 'Clearing the probe cache…');
-      try {
-        const result = await withButton(clearProbes, 'Clearing…',
-          () => postJSON('/api/probes/clear', {}));
-        setStatus(status, `Cleared ${result.cleared} cached probe(s).`, 'ok');
-      } catch (error) {
-        setStatus(status, error.message, 'bad');
-      }
-    });
-  }
 
   // ------------------------------------------------------ backup and restore
   const exportButton = $('#backup-export');

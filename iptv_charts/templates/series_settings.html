@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon %}
+{% block title %}Series settings · {{ app_name }}{% endblock %}
+
+{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/settings_sections.css') }}">
+
+<div class="page-head settings-section-page">
+  <div>
+    <p class="crumb"><a href="/settings">Settings</a> / Series</p>
+    <h1>{{ icon('tv') }} Series settings</h1>
+    <p class="subtitle">{{ header.subtitle }}</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-ghost" href="/series">Open series</a>
+  </div>
+</div>
+
+<form class="settings-form settings-section-page" id="series-settings-form"
+      data-settings-section="series"
+      data-save-url="{{ save_url }}"
+      data-preview-url="{{ preview_url }}"
+      autocomplete="off">
+  <section class="settings-card" id="series-naming-settings">
+    <h2>{{ icon('folder-open') }} Naming</h2>
+    <p class="hint">
+      Each template is one folder or file name. The downloaded file's extension
+      is appended automatically. Season 0 (specials) follows the same season
+      template.
+    </p>
+
+    <div class="settings-subcard">
+      <h3>{{ header.library_label }}</h3>
+      <code class="wrap-anywhere">{{ header.library_dir }}</code>
+    </div>
+
+    <div class="field-row">
+      <label class="field">
+        <span>Series folder</span>
+        <input type="text" name="series_folder_template" spellcheck="false"
+               data-setting="series_folder_template"
+               value="{{ templates.series_folder_template }}">
+      </label>
+      <label class="field">
+        <span>Season folder</span>
+        <input type="text" name="season_folder_template" spellcheck="false"
+               data-setting="season_folder_template"
+               value="{{ templates.season_folder_template }}">
+      </label>
+    </div>
+    <label class="field">
+      <span>Episode file</span>
+      <input type="text" name="episode_file_template" spellcheck="false"
+             data-setting="episode_file_template"
+             value="{{ templates.episode_file_template }}">
+    </label>
+    <p class="hint">
+      Series folder: <code>{title}</code>, <code>{year}</code>.
+      Season folder: <code>{season:00}</code>.
+      Episode file adds <code>{series}</code>, <code>{episode:00}</code>,
+      <code>{episode_title}</code>, <code>{resolution}</code>,
+      <code>{source}</code> and <code>{quality}</code>.
+    </p>
+    <pre class="command-preview settings-preview-output" id="series-naming-preview">Series folder: {{ preview.series_folder }}
+Season folder: {{ preview.season_folder }}
+Episode file:  {{ preview.episode_file }}.mkv</pre>
+    <p class="settings-status" id="series-naming-status" role="status"></p>
+  </section>
+
+  <section class="settings-card" id="series-defaults-settings">
+    <h2>{{ icon('star') }} Add and monitor defaults</h2>
+    <div class="field-row">
+      <label class="field">
+        <span>Default quality profile</span>
+        <select name="default_profile_key" data-setting="default_profile_key">
+          {% for profile in profiles %}
+            <option value="{{ profile.key }}"
+                    {% if profile.key == default_profile_key %}selected{% endif %}>
+              {{ profile.name }} ({{ profile.resolution }})
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field">
+        <span>Default monitor mode when adding</span>
+        <select name="default_monitor_mode" data-setting="default_monitor_mode">
+          <option value="all" {% if default_monitor_mode == 'all' %}selected{% endif %}>
+            All episodes
+          </option>
+          <option value="future" {% if default_monitor_mode == 'future' %}selected{% endif %}>
+            Future episodes only
+          </option>
+          <option value="first" {% if default_monitor_mode == 'first' %}selected{% endif %}>
+            First season
+          </option>
+          <option value="latest" {% if default_monitor_mode == 'latest' %}selected{% endif %}>
+            Latest season
+          </option>
+          <option value="none" {% if default_monitor_mode == 'none' %}selected{% endif %}>
+            No episodes
+          </option>
+        </select>
+      </label>
+    </div>
+    <label class="field">
+      <span>Default new-season policy</span>
+      <select name="default_monitor_new_seasons"
+              data-setting="default_monitor_new_seasons">
+        <option value="all"
+                {% if default_monitor_new_seasons == 'all' %}selected{% endif %}>
+          Monitor all newly discovered episodes
+        </option>
+        <option value="future"
+                {% if default_monitor_new_seasons == 'future' %}selected{% endif %}>
+          Monitor only future or unknown air dates
+        </option>
+        <option value="none"
+                {% if default_monitor_new_seasons == 'none' %}selected{% endif %}>
+          Do not monitor new seasons
+        </option>
+      </select>
+    </label>
+    <p class="hint">
+      Monitor mode sets the initial episode selection when a series is added.
+      The new-season policy decides what happens when later metadata refreshes
+      discover episodes; season 0 (specials) is never auto-monitored.
+    </p>
+  </section>
+
+  <section class="settings-card" id="series-search-settings">
+    <h2>{{ icon('magnifying-glass') }} Search and probing</h2>
+    <p class="hint">
+      Monitored episodes are searched again on this interval until the profile
+      target is met. Per-series overrides take precedence when they are set on
+      the series.
+    </p>
+    <div class="field-row">
+      <label class="field">
+        <span>Search interval (hours)</span>
+        <input type="number" name="series_search_interval_hours" min="1" max="8760"
+               step="0.5" data-setting="series_search_interval_hours"
+               value="{{ series_search_interval_hours }}">
+      </label>
+      <label class="field">
+        <span>Candidate batch size</span>
+        <input type="number" name="candidate_batch_size" min="1" max="200"
+               step="1" data-setting="candidate_batch_size"
+               value="{{ candidate_batch_size }}">
+      </label>
+    </div>
+    <label class="field">
+      <span>Probes per iteration</span>
+      <input type="number" name="probe_batch_per_loop" min="1" max="3"
+             step="1" data-setting="probe_batch_per_loop"
+             value="{{ probe_batch_per_loop }}">
+    </label>
+    <p class="hint">
+      At most 3 candidates are probed in one bworker iteration, one ffprobe
+      subprocess at a time. The contract caps this at 3 so a search cannot
+      monopolise the provider connection.
+    </p>
+  </section>
+
+  <div class="settings-savebar">
+    <button class="btn btn-primary" type="submit" id="series-settings-save">
+      {{ icon('floppy-disk') }} Save series settings
+    </button>
+    <span class="settings-status" id="series-settings-status" role="status"></span>
+  </div>
+</form>
+
+{% include "_task_policies.html" %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/settings_sections.js') }}"></script>
+{% endblock %}

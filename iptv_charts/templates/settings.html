@@ -1,124 +1,23 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon %}
 {% block title %}Settings · {{ app_name }}{% endblock %}
 
 {% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/settings_sections.css') }}">
 <div class="page-head">
   <div>
     <a class="crumb" href="{{ url_for('home') }}">← Home</a>
     <h1>Settings</h1>
     <p class="subtitle">
-      Player, metadata, naming, downloads and automation. All editable settings
-      are saved together with the single button at the bottom.
+      Metadata providers, refresh schedule, quality profiles, library scan and
+      backup. Player settings live on Playlists; naming and search defaults
+      live on the Movies and Series settings pages. Global fields save together
+      with the button at the bottom.
     </p>
   </div>
 </div>
 
 <form class="settings-form" id="settings-form" autocomplete="off">
-  <section class="settings-card" id="player-settings">
-    <h2>External player</h2>
-    <p class="hint">
-      {% if bridged %}
-        {% if bridge_alive %}
-          The player bridge is running, so these are the players installed on
-          <strong>the host</strong> — the container cannot see them itself.
-        {% else %}
-          The player bridge is <strong>not running</strong>, so nothing can be
-          started on the host right now. Start it with
-          <code>./scripts/player-bridge.sh --daemon</code>; the list below is
-          whatever it last reported.
-        {% endif %}
-      {% else %}
-        These are the players found on this machine.
-      {% endif %}
-    </p>
-
-    {% if bridge_outdated %}
-      <p class="note note-warn">
-        The bridge is running, but it predates this version and does not report
-        which players the host has — it will keep using the one it found when it
-        started. Restart it to choose:
-        <code>./scripts/player-bridge.sh --stop</code> then
-        <code>./scripts/player-bridge.sh --daemon</code>.
-      </p>
-    {% endif %}
-
-    <div class="choices" id="player-choices">
-      {% for found in players %}
-        <label class="choice">
-          <input type="radio" name="preferred_player" value="{{ found.id }}"
-                 {% if preferred == found.id %}checked{% endif %}>
-          <span class="choice-label">{{ found.label }}</span>
-        </label>
-      {% endfor %}
-
-      {% set offered = players|map(attribute='id')|list + ['custom', 'auto'] %}
-      {% if preferred not in offered %}
-        <label class="choice">
-          <input type="radio" name="preferred_player" value="{{ preferred }}" checked>
-          <span class="choice-label">Saved choice</span>
-          <span class="muted">{{ preferred }} — currently unavailable</span>
-        </label>
-      {% endif %}
-
-      <label class="choice">
-        <input type="radio" name="preferred_player" value="custom"
-               {% if preferred == 'custom' %}checked{% endif %}>
-        <span class="choice-label">Custom command</span>
-        <span class="muted">
-          {% if custom_ready %}the command below{% else %}none given yet{% endif %}
-        </span>
-      </label>
-
-      <label class="choice">
-        <input type="radio" name="preferred_player" value="auto"
-               {% if preferred == 'auto' %}checked{% endif %}>
-        <span class="choice-label">Automatic</span>
-        <span class="muted">
-          {% if players %}whichever is listed first{% else %}nothing detected{% endif %}
-        </span>
-      </label>
-    </div>
-
-    {% if not players and not custom_ready %}
-      <p class="note note-warn">
-        Nothing can play a stream externally yet. Install mpv or VLC, start the
-        player bridge if you are running in a container, or give a command
-        below.
-      </p>
-    {% endif %}
-  </section>
-
-  <section class="settings-card">
-    <h2>Custom command</h2>
-    <p class="hint">
-      Optional. When "Custom command" is selected this is run
-      <strong>instead of</strong> a detected player — on the host, with your
-      privileges, exactly as written.
-      {% if bridged %}
-        The bridge cannot check it from inside the container, so a typo shows
-        up when you press play.
-      {% endif %}
-    </p>
-
-    <div class="field">
-      <label for="player-command">Command</label>
-      <input id="player-command" name="player_command" type="text" spellcheck="false"
-             placeholder="mpv --title={title} --user-agent={user_agent} {url}"
-             value="{{ command }}">
-    </div>
-
-    <p class="hint">
-      Placeholders:
-      <code>{url}</code> the stream address,
-      <code>{title}</code>,
-      <code>{user_agent}</code>,
-      <code>{referrer}</code>.
-      The URL is appended at the end if the command never mentions it, and a
-      flag whose placeholder has no value is left out altogether. Nothing is
-      passed through a shell, so quotes only group arguments.
-    </p>
-  </section>
-
   <section class="settings-card" id="metadata-settings">
     <h2>Metadata providers</h2>
     <p class="hint">
@@ -161,113 +60,15 @@
     </div>
   </section>
 
-  <section class="settings-card" id="media-settings">
-    <h2>Media management</h2>
-    <p class="hint">
-      Downloads are written under <strong>{{ media_host_dir }}</strong>.
-      {% if media_dir_configured %}
-        Inside the container that is <code>{{ media_dir }}</code>, bind-mounted by
-        <code>setup.deploy.sh</code>.
-      {% else %}
-        Change the location with <code>IPTV_MEDIA_DIR</code> in
-        <code>setup.deploy.sh</code> (container) or
-        <code>IPTV_CHARTS_MEDIA_DIR</code> (dev).
-      {% endif %}
-    </p>
-    <dl class="meta-list">
-      <dt>Movies</dt><dd class="mono wrap-anywhere">{{ media_host_dir }}/Movies</dd>
-      <dt>Series</dt><dd class="mono wrap-anywhere">{{ media_host_dir }}/Series</dd>
-    </dl>
-    <div class="field-row">
-      <label class="field">
-        <span>Movie folder</span>
-        <input type="text" id="movie-folder-template" value="{{ templates.movie_folder }}">
-      </label>
-      <label class="field">
-        <span>Movie file</span>
-        <input type="text" id="movie-file-template" value="{{ templates.movie_file }}">
-      </label>
-    </div>
-    <div class="field-row">
-      <label class="field">
-        <span>Series folder</span>
-        <input type="text" id="series-folder-template" value="{{ templates.series_folder }}">
-      </label>
-      <label class="field">
-        <span>Season folder</span>
-        <input type="text" id="season-folder-template" value="{{ templates.season_folder }}">
-      </label>
-    </div>
-    <label class="field">
-      <span>Episode file</span>
-      <input type="text" id="episode-file-template" value="{{ templates.episode_file }}">
-    </label>
-    <p class="hint">
-      Placeholders: <code>{title}</code>, <code>{year}</code>,
-      <code>{resolution}</code>, <code>{source}</code>, <code>{quality}</code>,
-      <code>{season:00}</code>, <code>{episode:00}</code>, <code>{series}</code>,
-      <code>{episode_title}</code>. Each template is one path component; the
-      extension is chosen from the downloaded file. <code>{source}</code> and
-      <code>{quality}</code> are file tokens, not folder tokens.
-    </p>
-    <pre class="command-preview" id="media-preview" hidden></pre>
-  </section>
-
-  <section class="settings-card" id="download-settings">
-    <h2>Downloads and probing</h2>
-    <p class="hint">
-      Every candidate is inspected with ffprobe before it is downloaded. The
-      background worker processes exactly one job at a time — a playlist sync,
-      a probe/search pass or a download — so a season downloads one episode
-      after another and nothing competes for the provider's connection limit.
-      Playlists can still play in a browser while the worker is busy; those
-      short calls share the same per-playlist slot limit.
-    </p>
-    <div class="field-row">
-      <label class="field">
-        <span>Attempts per download</span>
-        <input type="number" id="download-attempts" min="1" max="10" value="{{ download_max_attempts }}">
-      </label>
-    </div>
-    <div class="field-row">
-      <label class="field">
-        <span>Probe cache (hours)</span>
-        <input type="number" id="probe-cache-hours" min="0" max="720" value="{{ probe_cache_hours }}">
-      </label>
-      <label class="field">
-        <span>Probe timeout (seconds)</span>
-        <input type="number" id="probe-timeout" min="5" max="120" value="{{ probe_timeout_seconds }}">
-      </label>
-      <label class="field">
-        <span>Probe candidates per search</span>
-        <input type="number" id="probe-max-candidates" min="1" max="20" value="{{ probe_max_candidates }}">
-      </label>
-      <label class="field">
-        <span>Probes per search run</span>
-        <input type="number" id="probe-search-budget" min="1" max="200" value="{{ probe_search_budget }}">
-      </label>
-    </div>
-    <p class="hint">
-      ffprobe: {% if ffprobe_available %}<span class="pill pill-ok">available</span>{% else %}<span class="pill pill-warn">not installed</span> — automatic downloads under profiles that require a probe will be refused.{% endif %}
-      &nbsp; ffmpeg: {% if ffmpeg_available %}<span class="pill pill-ok">available</span>{% else %}<span class="pill pill-warn">not installed</span> — direct files still download, HLS needs it.{% endif %}
-    </p>
-    <div class="settings-actions">
-      <button class="btn btn-ghost" type="button" id="probes-clear">Clear probe cache</button>
-    </div>
-  </section>
-
   <section class="settings-card" id="scheduler-settings">
-    <h2>Automation</h2>
+    <h2>Refresh schedule</h2>
     <p class="hint">
-      Search missing runs automatically, metadata is refreshed on a schedule, and
-      playlists can be refreshed before searches so new VODs are found. Set
-      playlist refresh to 0 to disable it.
+      Metadata is refreshed on a schedule so new releases, posters and episode
+      data appear without a manual refresh. Playlists can be refreshed before
+      searches so new VODs are found; set playlist refresh to 0 to disable it.
+      Movie and series search intervals are on their section pages.
     </p>
     <div class="field-row">
-      <label class="field">
-        <span>Search missing every (hours)</span>
-        <input type="number" id="search-interval" min="1" max="8760" step="0.5" value="{{ search_interval_hours }}">
-      </label>
       <label class="field">
         <span>Refresh metadata every (hours)</span>
         <input type="number" id="refresh-interval" min="1" max="8760" step="0.5" value="{{ refresh_interval_hours }}">
@@ -285,13 +86,30 @@
   </div>
 </form>
 
-<section class="settings-card" id="settings-preview-card" hidden>
-  <h2>What will run</h2>
-  <pre class="command-preview" id="settings-preview"></pre>
+<section class="settings-card" id="section-settings">
+  <h2>{{ icon('layer-group') }} Section settings</h2>
+  <p class="hint">
+    Player, naming, availability and search defaults belong to the section that
+    uses them. Nothing on this page silently changes those values.
+  </p>
+  <div class="settings-link-grid">
+    <a class="settings-link-card" href="/playlists#iptv-settings">
+      <strong>{{ icon('tv') }} IPTV settings</strong>
+      <span class="hint">External player, custom command, playlist stale-after.</span>
+    </a>
+    <a class="settings-link-card" href="/movies/settings">
+      <strong>{{ icon('film') }} Movie settings</strong>
+      <span class="hint">Naming, default profile, availability, search.</span>
+    </a>
+    <a class="settings-link-card" href="/series/settings">
+      <strong>{{ icon('tv') }} Series settings</strong>
+      <span class="hint">Naming, monitor defaults, search.</span>
+    </a>
+  </div>
 </section>
 
 <section class="settings-card" id="profiles-settings">
-  <h2>Quality profiles</h2>
+  <h2>{{ icon('sliders') }} Quality profiles</h2>
   <p class="hint">
     A profile decides which resolutions and sources are acceptable, what audio
     and subtitles are required, and when upgrades stop. Movies and series choose
@@ -302,7 +120,7 @@
 </section>
 
 <section class="settings-card" id="scan-settings">
-  <h2>Library scan</h2>
+  <h2>{{ icon('magnifying-glass') }} Library scan</h2>
   <p class="hint">
     Find files already in the media folders, match them to TMDB entries, and
     review the matches before importing them. A scan also detects files that
@@ -312,7 +130,7 @@
 </section>
 
 <section class="settings-card" id="backup-settings">
-  <h2>Backup and restore</h2>
+  <h2>{{ icon('box-archive') }} Backup and restore</h2>
   <p class="hint">
     The ZIP contains playlists, credentials, metadata tokens, the movie/series
     libraries, quality profiles, queue and history — but not the IPTV catalog,
