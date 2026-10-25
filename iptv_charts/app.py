@@ -13,9 +13,10 @@ from urllib.parse import urlsplit
 
 from flask import Flask, abort, g, render_template, request
 
-from . import (config, connections, db, items, jobs, metadata, naming, player,
-               sources, sync)
+from . import (bworker, config, connections, db, items, jobs, metadata, naming,
+               player, sources, sync)
 from .api import bp as api_bp
+from .bworker_api import bp as bworker_api_bp
 from .manager_api import bp as manager_api_bp
 from .manager_web import bp as manager_web_bp
 
@@ -86,6 +87,7 @@ def create_app() -> Flask:
     db.init_db()
     app.register_blueprint(api_bp)
     app.register_blueprint(manager_api_bp, url_prefix="/api")
+    app.register_blueprint(bworker_api_bp)
     app.register_blueprint(manager_web_bp)
 
     @app.before_request
@@ -230,8 +232,12 @@ def create_app() -> Flask:
     def health():
         conn = get_conn()
         found = player.resolve(conn)
+        bworker_health = bworker.status(conn)
+        activity = bworker_health.get("activity") or {}
         return {
-            "status": "ok",
+            # A paused bworker is alive on purpose; a dead one is not healthy,
+            # because syncs, downloads and automatic searches would sit forever.
+            "status": "ok" if bworker_health.get("alive") else "error",
             "version": __import__("iptv_charts").__version__,
             "data_dir": str(config.data_dir()),
             "db_path": str(config.db_path()),
@@ -246,6 +252,22 @@ def create_app() -> Flask:
             # running; surface that instead of leaving syncs queued forever.
             "worker": jobs.worker_status(conn),
             "worker_jobs": jobs.counts(conn),
+            "bworker": {
+                "alive": bool(bworker_health.get("alive")),
+                "paused": bool(bworker_health.get("paused")),
+                "status": bworker_health.get("status"),
+                "heartbeat_age": bworker_health.get("heartbeat_age"),
+                "current_work_id": bworker_health.get("current_work_id"),
+                "current_work_label": bworker_health.get("current_work_label"),
+                "current": bworker_health.get("current"),
+            },
+            "activity": {
+                "available": bool(activity.get("available")),
+                "degraded": bool(activity.get("degraded", True)),
+                "backend": activity.get("backend"),
+                "error": activity.get("error"),
+            },
+            "bworker_queue": bworker_health.get("queue"),
         }
 
     @app.route("/sources/<int:source_id>/browse")

@@ -10,3 +10,8 @@ Flask>=3.1,<4
 requests>=2.32,<3
 ijson>=3.3,<4
 waitress>=3.0,<4
+# WSGI server for the container image; nginx proxies to it on loopback.
+gunicorn>=23.0,<24
+# Valkey/Redis protocol client for the bworker activity log. The store degrades
+# gracefully when the sidecar is absent or unreachable.
+redis>=5.0,<6

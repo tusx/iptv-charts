@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
-"""Background worker entry point for IPTV Charts.
+"""Compatibility entry point for the old worker process name.
 
-This is the second process in the container. It owns every slow, provider
-facing or disk-writing operation the app performs: playlist syncs, ffprobe
-candidate searches, downloads/imports, scheduled searches, metadata refreshes
-and library scans. The web server only queues jobs and reads their status.
+0.8.0 renamed the background process to bworker, and the supported entry
+point is now ``python bworker.py``. This file stays so existing scripts that
+still launch ``worker.py`` keep working; it starts exactly the same loop.
 
-Run it beside the web server:
-
-    python worker.py
-
-The container supervises this process; ``setup.test.sh`` starts it for the
-local development loop. The worker is safe to stop at any time -- interrupted
-jobs are durable rows in SQLite and are requeued on the next start.
+The bworker owns every slow, provider-facing or disk-writing operation the app
+performs: playlist syncs, ffprobe candidate searches, downloads/imports,
+scheduled searches, metadata refreshes and library scans. The web server only
+queues jobs and reads their status. It is safe to stop at any time -- running
+work is durable in SQLite and is requeued on the next start.
 """
 
 from __future__ import annotations
 
 import sys
 
-from iptv_charts.worker import main
+from iptv_charts.bworker import main
 
 if __name__ == "__main__":
     sys.exit(main())

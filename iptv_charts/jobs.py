@@ -574,6 +574,29 @@ def counts(conn) -> dict[str, int]:
     return out
 
 
+def has_due(conn, *, now: int | None = None) -> bool:
+    """True when a queued job is due right now (used for bworker timing)."""
+    at = int(now if now is not None else _now())
+    row = conn.execute(
+        "SELECT 1 FROM worker_jobs "
+        "WHERE status = 'queued' AND available_at <= ? LIMIT 1",
+        (at,),
+    ).fetchone()
+    return row is not None
+
+
+def next_due_at(conn, *, now: int | None = None) -> int | None:
+    """Timestamp of the next queued job, or None when the queue is empty."""
+    at = int(now if now is not None else _now())
+    row = conn.execute(
+        "SELECT MIN(available_at) AS available_at FROM worker_jobs "
+        "WHERE status = 'queued'"
+    ).fetchone()
+    if row is None or row["available_at"] is None:
+        return None
+    return max(at, int(row["available_at"]))
+
+
 __all__ = [
     "ACTIVE",
     "JobCancelled",
@@ -591,7 +614,9 @@ __all__ = [
     "enqueue",
     "finish",
     "get",
+    "has_due",
     "heartbeat",
+    "next_due_at",
     "normalise",
     "recover",
     "recover_running",

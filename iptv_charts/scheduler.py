@@ -1,14 +1,20 @@
-"""Periodic library tasks and manual task runs.
+"""Periodic maintenance tasks and manual task runs.
 
 The scheduler no longer owns a thread. It has two small jobs:
 
 * ``enqueue_due`` reads ``task_state`` and inserts a ``worker_jobs`` row when a
-  periodic task is due; and
+  periodic maintenance task is due; and
 * ``run_task`` is the handler the single background worker calls.
 
-Because the worker runs one job at a time, two metadata refreshes or two search
-passes cannot overlap by construction. Task state is still persisted in
-``task_state`` so the Activity page can show the last and next run.
+Automatic library search is no longer a scheduler task. It is declarative
+bworker work (``bworker_work`` movie/episode rows), so there is exactly one
+search loop and it respects ``bworker_policies``. Periodic metadata and catalog
+refresh remain here because they are global tasks with no per-item state, and
+manual library scans remain triggerable.
+
+Because the worker runs one job at a time, two refreshes cannot overlap by
+construction. Task state is still persisted in ``task_state`` so the Activity
+page can show the last and next run.
 """
 
 from __future__ import annotations
@@ -18,14 +24,22 @@ import os
 import time
 
 from . import db, jobs, library, sync
+from . import bworker_store as bworker_store
 
 logger = logging.getLogger("iptv_charts.scheduler")
 
-TASK_NAMES = ("search_missing", "refresh_metadata", "refresh_catalog", "scan_library")
+#: ``search_missing`` deliberately left out: it is bworker work now. The
+#: migrated task_state row is kept for display/history, but it is never queued.
+TASK_NAMES = ("refresh_metadata", "refresh_catalog", "scan_library")
 PERIODIC = {
-    "search_missing": ("search_interval_hours", 6, 120),
     "refresh_metadata": ("refresh_interval_hours", 168, 600),
     "refresh_catalog": ("catalog_refresh_hours", 24, 300),
+}
+
+#: Periodic maintenance obeys the same per-work-type toggles as bworker work.
+POLICY_FOR_TASK = {
+    "refresh_metadata": "metadata_refresh",
+    "refresh_catalog": "playlist_sync",
 }
 
 _TASK_PRIORITY = 15
@@ -96,12 +110,16 @@ def _active(conn, name: str) -> dict | None:
 
 
 def enqueue_due() -> int:
-    """Queue periodic tasks that are due. Pure database work, no provider I/O.
+    """Queue periodic maintenance tasks that are due. No provider I/O.
 
-    The worker calls this before claiming a job. Deferring a search while a
-    sync is queued is deliberate: the task must not search a half-replaced
-    catalog. The worker's single-job rule means the sync (priority 20) runs
-    before the deferred task's next attempt.
+    The bworker calls this after its pause check and before claiming a job.
+    Deferring metadata refresh while a sync is queued is deliberate: it must not
+    run against a half-replaced catalog. The worker's single-job rule means the
+    sync (priority 20) runs before the deferred task's next attempt.
+
+    A disabled ``bworker_policies`` row suppresses its periodic task. The task
+    stays due so re-enabling it queues on the next loop; ``activity_cleanup``
+    is handled by the bworker itself and is always enabled.
     """
     if os.environ.get("IPTV_CHARTS_SCHEDULER", "").lower() in {"0", "false", "no", "off"}:
         return 0
@@ -111,13 +129,16 @@ def enqueue_due() -> int:
         _ensure_state(conn)
         now = int(time.time())
         rows = {row["name"]: row for row in conn.execute("SELECT * FROM task_state")}
-        # Catalog refresh first: if it queues syncs, the search below is
+        # Catalog refresh first: if it queues syncs, metadata refresh below is
         # deferred to the next pass rather than reading the old catalog.
-        for name in ("refresh_catalog", "search_missing", "refresh_metadata"):
+        for name in ("refresh_catalog", "refresh_metadata"):
             row = rows.get(name)
             if row is None or row["next_run"] is None or int(row["next_run"]) > now:
                 continue
-            if name in ("search_missing", "refresh_metadata") and sync.is_busy():
+            policy_type = POLICY_FOR_TASK.get(name)
+            if policy_type and not bworker_store.policy_enabled(conn, policy_type):
+                continue
+            if name == "refresh_metadata" and sync.is_busy():
                 _set_state(
                     conn, name, status="idle",
                     message="Deferred while a playlist sync is queued or running.",
@@ -140,57 +161,9 @@ def enqueue_due() -> int:
         conn.close()
 
 # ---------------------------------------------------------------------- tasks
-def _task_search_missing(conn, scope: str = "all") -> str:
-    if scope not in {"all", "movies", "series"}:
-        scope = "all"
-    budget = 100
-    searched_movies = queued_movies = 0
-    if scope in {"all", "movies"}:
-        movies = [
-            movie for movie in library.list_movies(conn, status="monitored")
-            if library.movie_needs_search(conn, movie)
-        ]
-        for movie in movies[:100]:
-            if budget <= 0:
-                break
-            try:
-                result = library.search_movie(conn, movie, reason="auto")
-                searched_movies += 1
-                if result.get("queued"):
-                    queued_movies += 1
-                    budget -= 1
-            except Exception as exc:
-                logger.warning("tasks: movie search failed for %s: %s", movie["title"], exc)
-
-    searched_series = queued_series = 0
-    if scope in {"all", "series"}:
-        series = [
-            item for item in library.list_series(conn, status="monitored")
-            if library.series_needs_search(conn, item)
-        ]
-        for item in series[:50]:
-            if budget <= 0:
-                break
-            try:
-                result = library.search_series(conn, item, reason="auto")
-                searched_series += 1
-                queued = int(result.get("queued") or 0)
-                if queued:
-                    queued_series += queued
-                    budget -= queued
-            except Exception as exc:
-                logger.warning("tasks: series search failed for %s: %s", item["title"], exc)
-
-    if scope == "movies":
-        return (f"Searched {searched_movies} movie(s); "
-                f"queued {queued_movies} download(s).")
-    if scope == "series":
-        return (f"Searched {searched_series} series; "
-                f"queued {queued_series} download(s).")
-    return (f"Searched {searched_movies} movie(s) and {searched_series} series; "
-            f"queued {queued_movies + queued_series} download(s).")
-
-
+# ``search_missing`` used to live here. It is now per-item bworker work; a
+# stale queued job from a pre-0.8 database is answered with a no-op in
+# ``run_task`` instead of starting a second search loop.
 def _task_refresh_metadata(conn) -> str:
     movies = library.list_movies(conn)
     series = library.list_series(conn)
@@ -243,7 +216,6 @@ def _task_scan_library(conn) -> str:
 
 
 TASK_FUNCS = {
-    "search_missing": _task_search_missing,
     "refresh_metadata": _task_refresh_metadata,
     "refresh_catalog": _task_refresh_catalog,
     "scan_library": _task_scan_library,
@@ -253,6 +225,18 @@ TASK_FUNCS = {
 # --------------------------------------------------------------------- runner
 def run_task(name: str, scope: str = "all") -> dict:
     """Execute one task. The worker calls this exactly once per job."""
+    if name == "search_missing":
+        # A job queued before the 0.8.0 upgrade must not start the old loop.
+        conn = db.connect()
+        try:
+            message = "Automatic search is owned by the bworker; nothing to do."
+            _set_state(conn, name, status="idle", message=message,
+                       finished=int(time.time()))
+        finally:
+            conn.close()
+        logger.info("tasks: ignored retired search_missing task")
+        return {"status": "done", "message": message,
+                "result": {"task": name, "state": "idle"}}
     if name not in TASK_NAMES:
         raise ValueError("Unknown task.")
     if scope not in {"all", "movies", "series"}:
@@ -265,9 +249,9 @@ def run_task(name: str, scope: str = "all") -> dict:
             _ensure_state(conn)
         # A manual trigger can arrive while a playlist sync is queued. The
         # worker is serial, but task jobs deliberately outrank sync jobs; do
-        # not let a search run against the catalog the sync is about to
-        # replace. Periodic tasks are deferred in enqueue_due already.
-        if name in ("search_missing", "refresh_metadata") and sync.is_busy():
+        # not let metadata refresh run against the catalog the sync is about
+        # to replace. Periodic tasks are deferred in enqueue_due already.
+        if name == "refresh_metadata" and sync.is_busy():
             message = "Deferred while a playlist sync is queued or running."
             _set_state(conn, name, status="idle", message=message,
                        finished=started, next_run=started + 300)
@@ -277,10 +261,7 @@ def run_task(name: str, scope: str = "all") -> dict:
         _set_state(conn, name, status="running", message="Running", started=started)
         logger.info("tasks: %s started", name)
         try:
-            if name == "search_missing":
-                message = TASK_FUNCS[name](conn, scope)
-            else:
-                message = TASK_FUNCS[name](conn)
+            message = TASK_FUNCS[name](conn)
             status = "idle"
         except Exception as exc:
             status = "error"
@@ -315,11 +296,14 @@ def stop(timeout: float = 3.0) -> None:
 
 
 def trigger(name: str, scope: str = "all") -> bool:
-    """Queue a task now. Returns False when that task is already queued/running.
+    """Queue a maintenance task now.
 
-    ``scope`` narrows Search missing to one section (``movies``/``series``); a
-    scoped run shares the same task slot so the worker still runs one at a time.
+    Returns False when that task is already queued/running. The retired
+    ``search_missing`` task raises ``ValueError`` instead of quietly creating
+    a competing search loop; automatic search is bworker work.
     """
+    if name == "search_missing":
+        raise ValueError("Automatic search is owned by the bworker.")
     if name not in TASK_NAMES:
         raise ValueError("Unknown task.")
     if scope not in {"all", "movies", "series"}:
@@ -329,17 +313,13 @@ def trigger(name: str, scope: str = "all") -> bool:
         _ensure_state(conn)
         if _active(conn, name) is not None:
             return False
-        payload = {"name": name}
-        if name == "search_missing" and scope != "all":
-            payload["scope"] = scope
         job = jobs.enqueue(
-            conn, "task", payload,
+            conn, "task", {"name": name},
             priority=40, dedupe_key=f"task:{name}",
         )
         if not job.get("_created"):
             return False
-        label = f"Queued ({scope})" if payload.get("scope") else "Queued"
-        _set_state(conn, name, status="queued", message=label)
+        _set_state(conn, name, status="queued", message="Queued")
         return True
     finally:
         conn.close()
