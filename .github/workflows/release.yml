@@ -1,0 +1,167 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Verify the tag matches the package version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          sys.path.insert(0, os.getcwd())
+          import iptv_charts
+
+          tag = os.environ.get("TAG", "").strip()
+          version = iptv_charts.__version__.strip()
+          expected = f"v{version}"
+          if tag != expected:
+              print(
+                  f"::error::tag {tag!r} does not match "
+                  f"iptv_charts.__version__ {version!r} (expected {expected!r})"
+              )
+              sys.exit(1)
+          print(f"tag {tag} matches iptv_charts.__version__ {version}")
+          PY
+
+      - name: Run every test suite
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          suites=(tests/*.py)
+          if (( ${#suites[@]} == 0 )); then
+              echo "::error::no test suites found under tests/"
+              exit 1
+          fi
+          ran=0
+          for suite in "${suites[@]}"; do
+              if [[ "$suite" == "tests/fixture_server.py" ]]; then
+                  continue
+              fi
+              echo "::group::$suite"
+              python "$suite"
+              echo "::endgroup::"
+              ran=$((ran + 1))
+          done
+          if (( ran == 0 )); then
+              echo "::error::no runnable test suites found"
+              exit 1
+          fi
+          echo "ran $ran test suites"
+
+      - name: Build the source archive and SHA-256 checksum
+        run: |
+          set -euo pipefail
+          version="$(python -c 'import iptv_charts; print(iptv_charts.__version__)')"
+          name="iptv-charts-${version}"
+          artifacts="${RUNNER_TEMP}/artifacts"
+          mkdir -p "$artifacts"
+          tar \
+            --exclude='./.git' \
+            --exclude='./.venv' \
+            --exclude='./data' \
+            --exclude='./cache' \
+            --exclude='./dist' \
+            --exclude='./.pytest_cache' \
+            --exclude='./__pycache__' \
+            --exclude='*/__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='*.egg-info' \
+            --exclude='*.db' \
+            --exclude='*.db-wal' \
+            --exclude='*.db-shm' \
+            -czf "${artifacts}/${name}.tar.gz" \
+            --transform "s|^\.$|${name}/|;s|^\./|${name}/|" \
+            -C "$GITHUB_WORKSPACE" .
+          (cd "$artifacts" && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          ls -lh "$artifacts"
+
+      - name: Prepare release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          version="$(python -c 'import iptv_charts; print(iptv_charts.__version__)')"
+          notes="${RUNNER_TEMP}/release-notes.md"
+          python - "$version" "$notes" <<'PY'
+          import pathlib
+          import sys
+
+          version = sys.argv[1]
+          destination = pathlib.Path(sys.argv[2])
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+
+          section = []
+          capture = False
+          for line in text.splitlines():
+              if line.startswith("## "):
+                  if capture:
+                      break
+                  heading = line[3:].strip().split()
+                  capture = bool(heading) and heading[0] == version
+                  continue
+              if capture:
+                  section.append(line)
+
+          notes = "\n".join(section).strip()
+          if not notes:
+              notes = f"IPTV Charts {version}"
+          destination.write_text(notes + "\n", encoding="utf-8")
+          print(f"wrote {len(notes)} characters to {destination}")
+          PY
+          head -n 20 "$notes"
+
+      - name: Create or update the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(python -c 'import iptv_charts; print(iptv_charts.__version__)')"
+          artifacts="${RUNNER_TEMP}/artifacts"
+          notes="${RUNNER_TEMP}/release-notes.md"
+          archive="${artifacts}/iptv-charts-${version}.tar.gz"
+          checksum="${archive}.sha256"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "updating existing release $TAG"
+              gh release edit "$TAG" \
+                  --title "IPTV Charts ${version}" \
+                  --notes-file "$notes"
+              gh release upload "$TAG" "$archive" "$checksum" --clobber
+          else
+              echo "creating release $TAG"
+              gh release create "$TAG" "$archive" "$checksum" \
+                  --title "IPTV Charts ${version}" \
+                  --notes-file "$notes"
+          fi
+          gh release view "$TAG" --json url,assets
