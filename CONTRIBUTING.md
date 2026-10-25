@@ -21,8 +21,8 @@ The container path additionally needs Podman and the system ffmpeg/ffprobe
 package:
 
 ```bash
-./setup.deploy.sh --build
-./setup.deploy.sh
+./build.deploy.sh --build
+./build.deploy.sh
 ```
 
 ## What to be careful about

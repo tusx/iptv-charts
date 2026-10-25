@@ -26,7 +26,7 @@
 #   ./scripts/player-bridge.sh --status     # is a bridge running?
 #   ./scripts/player-bridge.sh --stop       # stop a backgrounded bridge
 #
-# The queue directory must match what setup.deploy.sh mounts into the
+# The queue directory must match what build.deploy.sh mounts into the
 # container. Override with IPTV_CHARTS_PLAY_QUEUE_DIR if you changed it.
 
 set -euo pipefail

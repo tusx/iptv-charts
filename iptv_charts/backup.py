@@ -488,10 +488,9 @@ def _bworker_busy_reason(conn, *, now: int | None = None,
                          max_age: int = 30) -> str | None:
     """Why a restore must wait for bworker, or None when it is safe.
 
-    A paused bworker is safe: pause finishes the current unit before new work
-    starts, and that is the documented restore procedure. A bworker process
-    that is alive and not paused may claim a unit between the check and the
-    table replacement, so it must be refused.
+    A paused or idle bworker with no current work is safe: the restore holds
+    SQLite's writer, and the bworker cannot claim a unit while that transaction
+    is open. A unit actually running (or about to start) must finish first.
     """
     now = int(now or time.time())
     active = conn.execute(
@@ -511,7 +510,7 @@ def _bworker_busy_reason(conn, *, now: int | None = None,
     heartbeat = int(row["heartbeat_at"] or 0)
     stale = not heartbeat or now - heartbeat > int(max_age)
     status = str(row["status"] or "")
-    if not stale and not paused and status != "stopped":
+    if not stale and not paused and status in {"running", "starting"}:
         return "Bworker is running. Pause it before restoring a backup."
     return None
 

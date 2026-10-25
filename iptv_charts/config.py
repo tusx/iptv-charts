@@ -88,7 +88,7 @@ def media_dir() -> Path:
     """Root of the downloaded media library.
 
     In the container this is ``/media``, bind-mounted from a host folder by
-    setup.deploy.sh. In dev mode it defaults to ``~/Media/IPTV Charts`` so a
+    build.deploy.sh. In dev mode it defaults to ``~/Media/IPTV Charts`` so a
     download still lands somewhere sensible without extra configuration.
     """
     raw = os.environ.get("IPTV_CHARTS_MEDIA_DIR")

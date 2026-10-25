@@ -858,7 +858,7 @@ def test_restore_busy() -> None:
             data = backup.export_zip(conn)
             now = int(time.time())
             conn.execute(
-                "UPDATE bworker_state SET paused = 0, status = 'idle', "
+                "UPDATE bworker_state SET paused = 0, status = 'running', "
                 "heartbeat_at = ?, current_work_id = NULL WHERE id = 1",
                 (now,),
             )
