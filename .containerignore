@@ -1,17 +1,37 @@
 # Keep the build context small and free of machine-specific state.
-.venv/
+# Everything here is either recreated at build time, development-only, or
+# excluded so a source change cannot invalidate the dependency layer (the
+# application code is COPYed last).
+
+# Version control and the build definition itself.
 .git/
+.github/
 .gitignore
+Containerfile
+.containerignore
+
+# Python environments and caches.
+.venv/
 __pycache__/
 **/__pycache__/
 *.py[cod]
+*.egg-info/
 
-# Tests and tooling are not shipped in the image.
-tests/
-scripts/
-
-# Docs and local data
-*.md
+# Runtime state, logs and downloads accidentally left in the tree.
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+*.log
+*.tar.gz
+*.zip
+
+# Tests, docs, tooling and deploy scripts are not shipped in the image.
+tests/
+scripts/
+docs/
+*.md
+*.sh
+package.json
+package-lock.json
+flatpak/
