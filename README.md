@@ -384,7 +384,7 @@ reloading web process, and stops both on Ctrl+C.
 
 ```bash
 ./setup.test.sh              # start with auto-reload
-./setup.test.sh --check      # run the five core test suites and exit
+./setup.test.sh --check      # run the full test matrix and exit
 ./setup.test.sh --no-reload  # run without the reloader
 ./setup.test.sh --port 9000  # different port
 ```
@@ -588,16 +588,18 @@ identity so ID-first search does not scan the catalog.
 ./setup.test.sh --check
 ```
 
-That runs five core offline suites: `tests/smoke.py` (parsers, schema,
-migrations, queue, FTS, player, naming, probes, connections, request guards),
+That runs the full offline matrix through `tests/run_all.py`: every standalone
+suite under `tests/` in a deterministic order, each in its own process. The
+original core suites are `tests/smoke.py` (parsers, schema, migrations, queue,
+FTS, quality profiles, naming, probes, connections, request guards),
 `tests/integration.py` (real ingest against the local fixture provider),
 `tests/bridge.py` (real host bridge protocol), `tests/endtoend.py` (HTTP API and
 rendered pages via Flask's test client) and `tests/manager.py` (fake
-TMDB/TVDB/probes, matching, downloads/imports, scan, backup). The release
-workflow runs **every** `tests/*.py` suite except `tests/fixture_server.py`,
-including docs, profiles, bworker, settings sections, migration/backup,
+TMDB/TVDB/probes, matching, downloads/imports, scan, backup). The same runner
+also covers docs, profiles, bworker, settings sections, migration/backup,
 Explore, Import, storage, activity UI, stage history, container config and
-deploy/release scripts:
+deploy/release scripts. The release workflow runs **every** `tests/*.py` suite
+except `tests/fixture_server.py`:
 
 ```bash
 for test in tests/*.py; do

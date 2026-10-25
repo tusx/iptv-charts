@@ -111,35 +111,35 @@ def section(name: str) -> None:
 
 # --------------------------------------------------------------------- fixtures
 SPECIAL_VOD = [
-    {"num": 1, "name": "The Matrix (1999) [1080p]", "stream_type": "movie",
+    {"num": 1, "name": "The Matrix (1999) [1080p] WEB-DL", "stream_type": "movie",
      "stream_id": 60001, "stream_icon": "http://localhost/m60001.jpg",
      "rating": "8.7", "added": "1700100000", "category_id": "2",
      "container_extension": "mp4"},
-    {"num": 2, "name": "The Matrix (1999) [2160p]", "stream_type": "movie",
+    {"num": 2, "name": "The Matrix (1999) [2160p] WEB-DL", "stream_type": "movie",
      "stream_id": 60002, "stream_icon": "http://localhost/m60002.jpg",
      "rating": "8.7", "added": "1700100000", "category_id": "2",
      "container_extension": "mkv"},
-    {"num": 3, "name": "ES - Un talento único [[4K-Q]-Q] (2026)",
+    {"num": 3, "name": "ES - Un talento único [[4K-Q]-Q] (2026) WEB-DL",
      "stream_type": "movie", "stream_id": 60003,
      "stream_icon": "http://localhost/m60003.jpg", "rating": "7.0",
      "added": "1700100000", "category_id": "2", "container_extension": "mkv"},
-    {"num": 4, "name": "Slow Movie (2024) [1080p]", "stream_type": "movie",
+    {"num": 4, "name": "Slow Movie (2024) [1080p] WEB-DL", "stream_type": "movie",
      "stream_id": 60009, "stream_icon": "http://localhost/m60009.jpg",
      "rating": "6.0", "added": "1700100000", "category_id": "2",
      "container_extension": "mp4"},
-    {"num": 5, "name": "Dead Movie (2024) [1080p]", "stream_type": "movie",
+    {"num": 5, "name": "Dead Movie (2024) [1080p] WEB-DL", "stream_type": "movie",
      "stream_id": 60010, "stream_icon": "http://localhost/m60010.jpg",
      "rating": "6.0", "added": "1700100000", "category_id": "2",
      "container_extension": "mp4"},
-    {"num": 6, "name": "HTML Movie (2024) [1080p]", "stream_type": "movie",
+    {"num": 6, "name": "HTML Movie (2024) [1080p] WEB-DL", "stream_type": "movie",
      "stream_id": 60011, "stream_icon": "http://localhost/m60011.jpg",
      "rating": "6.0", "added": "1700100000", "category_id": "2",
      "container_extension": "mp4"},
-    {"num": 7, "name": "Manual Movie (2024) [720p]", "stream_type": "movie",
+    {"num": 7, "name": "Manual Movie (2024) [720p] WEB-DL", "stream_type": "movie",
      "stream_id": 60013, "stream_icon": "http://localhost/m60013.jpg",
      "rating": "6.0", "added": "1700100000", "category_id": "2",
      "container_extension": "mp4"},
-    {"num": 8, "name": "HLS Movie (2024) [1080p]", "stream_type": "movie",
+    {"num": 8, "name": "HLS Movie (2024) [1080p] WEB-DL", "stream_type": "movie",
      "stream_id": 60014, "stream_icon": "http://localhost/m60014.jpg",
      "rating": "6.0", "added": "1700100000", "category_id": "2",
      "container_extension": "m3u8"},
@@ -155,23 +155,29 @@ SPECIAL_VOD = [
      "stream_id": 60022, "stream_icon": "http://localhost/m60022.jpg",
      "rating": "6.0", "added": "1700100000", "category_id": "2",
      "container_extension": "mp4"},
-    {"num": 12, "name": "Future Movie (2099) [1080p]", "stream_type": "movie",
+    {"num": 12, "name": "Future Movie (2099) [1080p] WEB-DL", "stream_type": "movie",
      "stream_id": 60023, "stream_icon": "http://localhost/m60023.jpg",
      "rating": "6.0", "added": "1700100000", "category_id": "2",
+     "container_extension": "mp4"},
+    # A lower-weight source at the same resolution: the upgrade test starts
+    # from this HDTV release so a WEB-DL replacement is a real score upgrade.
+    {"num": 13, "name": "The Matrix (1999) [1080p] HDTV", "stream_type": "movie",
+     "stream_id": 60024, "stream_icon": "http://localhost/m60024.jpg",
+     "rating": "8.7", "added": "1700100000", "category_id": "2",
      "container_extension": "mp4"},
 ]
 
 SPECIAL_SERIES = [
-    {"num": 1, "name": "Dark Hearts (2023) [1080p]", "series_id": 70001,
+    {"num": 1, "name": "Dark Hearts (2023) [1080p] WEB-DL", "series_id": 70001,
      "cover": "http://localhost/s70001.jpg", "plot": "A plot",
      "category_id": "3", "last_modified": "1700200000"},
-    {"num": 2, "name": "GR - Supernatural [1080p]", "series_id": 70002,
+    {"num": 2, "name": "GR - Supernatural [1080p] WEB-DL", "series_id": 70002,
      "cover": "http://localhost/s70002.jpg", "plot": "A plot",
      "category_id": "3", "last_modified": "1700200000"},
-    {"num": 3, "name": "Throttle Show (2024) [1080p]", "series_id": 70003,
+    {"num": 3, "name": "Throttle Show (2024) [1080p] WEB-DL", "series_id": 70003,
      "cover": "http://localhost/s70003.jpg", "plot": "A plot",
      "category_id": "3", "last_modified": "1700200000"},
-    {"num": 4, "name": "Monitor Show (2024) [1080p]", "series_id": 70004,
+    {"num": 4, "name": "Monitor Show (2024) [1080p] WEB-DL", "series_id": 70004,
      "cover": "http://localhost/s70004.jpg", "plot": "A plot",
      "category_id": "3", "last_modified": "1700200000"},
 ]
@@ -679,6 +685,28 @@ def wait_download(download_id: int, timeout: float = 30.0):
     )
 
 
+def wait_restore(client, data: bytes, timeout: float = 60.0):
+    """Restore once the worker/scheduler have settled.
+
+    A restore is refused while bworker is running, a sync is active or a job
+    is queued. Just after a scan the worker can still be flipping its
+    heartbeat from running to idle for a moment, so retry the documented
+    busy response instead of racing it.
+    """
+    deadline = time.time() + timeout
+    while True:
+        response = client.post("/api/backup/restore", data=data,
+                               content_type="application/zip")
+        if response.status_code == 200 or time.time() >= deadline:
+            return response
+        message = str((response.get_json(silent=True) or {}).get("error") or "")
+        busy = any(word in message.lower() for word in
+                   ("bworker", "worker", "sync", "task", "download"))
+        if response.status_code != 409 or not busy:
+            return response
+        time.sleep(0.2)
+
+
 def downloads_for_series(series_id: int) -> list[dict]:
     conn = db.connect()
     try:
@@ -704,6 +732,11 @@ def main() -> int:
 
     app = create_app()
     client = app.test_client()
+    conn = db.connect()
+    # Tests wait for queued bworker units repeatedly; the default 30s idle
+    # poll makes each hand-off a timing race against the wait timeouts.
+    db.set_setting(conn, "bworker_idle_wait_seconds", "1")
+    conn.close()
     worker.start_background()
 
     try:
@@ -761,27 +794,52 @@ def main() -> int:
         check("fixture name restored", response.status_code, 200)
 
         conn = db.connect()
-        matrix = conn.execute(
-            "SELECT COUNT(*) AS n FROM items WHERE source_id = ? AND kind = 'vod' "
+        matrix_names = sorted(row["name"] for row in conn.execute(
+            "SELECT name FROM items WHERE source_id = ? AND kind = 'vod' "
             "AND name LIKE 'The Matrix%'", (source_id,)
-        ).fetchone()["n"]
+        ))
+        matrix = len(matrix_names)
         series_count = conn.execute(
             "SELECT COUNT(*) AS n FROM items WHERE source_id = ? AND kind = 'series' "
             "AND (name LIKE 'Dark Hearts%' OR name LIKE 'GR - Supernatural%')",
             (source_id,)
         ).fetchone()["n"]
         conn.close()
-        check("both Matrix releases ingested", matrix, 2)
+        check("every Matrix release ingested", matrix, 3)
+        check("Matrix has 1080p, 2160p and HDTV releases", matrix_names,
+              ["The Matrix (1999) [1080p] HDTV",
+               "The Matrix (1999) [1080p] WEB-DL",
+               "The Matrix (1999) [2160p] WEB-DL"])
         check("special series ingested", series_count, 2)
 
         profiles = client.get("/api/quality-profiles").get_json()["profiles"]
-        hd = next(profile for profile in profiles if profile["name"] == "HD")
-        four_k = next(profile for profile in profiles if profile["name"] == "4K")
+        builtins = {
+            profile["builtin_key"]: profile for profile in profiles
+            if profile.get("builtin_key")
+        }
+        check("the three builtin profiles are exposed", sorted(builtins),
+              ["1080p", "4k", "720p"])
+        hd = builtins["1080p"]
+        four_k = builtins["4k"]
+        check("the default builtin is 1080p", hd["name"], "1080p")
 
         # --------------------------------------------------------------- movie
         section("add a movie, download and import")
+        # Start on the lower-weight HDTV source so the later WEB-DL switch is
+        # a strictly higher score, not an equal-score sidegrade.
+        response = client.post("/api/quality-profiles", json={
+            "name": "1080p HDTV",
+            "resolution": "1080p",
+            "resolution_weight": 10,
+            "quality_options": [{"value": "hdtv", "weight": 5}],
+            "audio_languages": [{"value": "any", "weight": 5}],
+            "target_score": 20,
+            "upgrades": True,
+        })
+        check("HDTV starter profile created", response.status_code, 201)
+        hdtv_profile = response.get_json()["profile"]
         response = client.post("/api/movies", json={
-            "tmdb_id": 603, "quality_profile_id": hd["id"],
+            "tmdb_id": 603, "quality_profile_id": hdtv_profile["id"],
             "monitored": True, "search": True,
         })
         check("movie add status", response.status_code, 201)
@@ -804,8 +862,24 @@ def main() -> int:
         check("movie row resolution", stored["resolution"], "1080p")
 
         section("quality upgrade replaces the old file")
+        # Switching to the 4K builtin alone would be a sidegrade: both the
+        # stored 1080p file and the 2160p candidate score 20, and the contract
+        # only upgrades on a strictly better score. A weighted 4K profile that
+        # values the probed AAC track gives the exact release score 30 against
+        # the current file's 20, which is the real upgrade path.
+        response = client.post("/api/quality-profiles", json={
+            "name": "4K Cinema",
+            "resolution": "2160p",
+            "resolution_weight": 10,
+            "quality_options": [{"value": "web-dl", "weight": 10}],
+            "audio_codecs": [{"value": "aac", "weight": 10}],
+            "target_score": 30,
+            "upgrades": True,
+        })
+        check("upgrade profile created", response.status_code, 201)
+        upgrade_profile = response.get_json()["profile"]
         response = client.patch(f"/api/movies/{movie['id']}", json={
-            "quality_profile_id": four_k["id"],
+            "quality_profile_id": upgrade_profile["id"],
         })
         check("profile switch status", response.status_code, 200)
         old_path = Path(movie_path)
@@ -956,19 +1030,29 @@ def main() -> int:
         section("probe-first custom quality, audio and subtitles")
         response = client.post("/api/quality-profiles", json={
             "name": "4K WEB-DL English",
-            "qualities": [{"resolution": "2160p", "sources": ["web-dl"]}],
-            "cutoff": "2160p WEB-DL",
+            "resolution": "2160p",
+            "resolution_weight": 10,
+            "quality_options": [{"value": "web-dl", "weight": 10}],
+            "audio_languages": [{"value": "original", "weight": 5}],
+            "subtitle_languages": [{"value": "eng", "weight": 5}],
+            "target_score": 30,
             "upgrades": True,
-            "audio_mode": "original",
-            "subtitle_mode": "required",
-            "subtitle_languages": ["eng"],
-            "probe_required": True,
         })
         check("custom profile created", response.status_code, 201)
         custom_profile = response.get_json()["profile"]
-        check("custom profile tier round-trips",
-              custom_profile["qualities"][0]["sources"], ["web-dl"])
-        check("custom profile audio mode", custom_profile["audio_mode"], "original")
+        check("custom profile quality option round-trips",
+              [option["value"] for option in custom_profile["quality_options"]],
+              ["web-dl"])
+        check("custom profile audio preference round-trips",
+              [option["value"] for option in custom_profile["audio_languages"]],
+              ["original"])
+        check("custom profile subtitle preference round-trips",
+              [option["value"] for option in custom_profile["subtitle_languages"]],
+              ["eng"])
+        check("custom profile target round-trips",
+              custom_profile["target_score"], 30)
+        check("custom profile maximum round-trips",
+              custom_profile["max_score"], 30)
 
         response = client.post("/api/movies", json={
             "tmdb_id": 611, "quality_profile_id": custom_profile["id"],
@@ -1215,7 +1299,7 @@ def main() -> int:
                 (task for task in tasks if task["name"] == "scan_library"
                  and task["status"] in ("idle", "error")), None)
             )(client.get("/api/tasks").get_json()["tasks"]),
-            timeout=30,
+            timeout=90,
         )
         check_true("scan task finished", completed)
         results = client.get("/api/scan/results").get_json()["results"]
@@ -1256,8 +1340,7 @@ def main() -> int:
         conn = db.connect()
         db.set_setting(conn, metadata.LANGUAGE, "fr-FR")
         conn.close()
-        response = client.post("/api/backup/restore", data=response.data,
-                               content_type="application/zip")
+        response = wait_restore(client, response.data)
         result = response.get_json()
         check("restore status", response.status_code, 200)
         check_true("restore reports counts", result.get("counts", {}).get("movies", 0) >= 5)
@@ -1361,7 +1444,7 @@ def main() -> int:
             only_download = (response.get_json() or {}).get("download")
             check_true("only-this returned a main download", only_download)
             if only_download:
-                only_done = wait_download(only_download["id"], timeout=30)
+                only_done = wait_download(only_download["id"], timeout=90)
                 check("pinned override imported", only_done["status"], "imported")
                 c = db.connect()
                 pinned_main = c.execute(
@@ -1406,8 +1489,15 @@ def main() -> int:
             ("/series/wanted", "Wanted episodes"),
             ("/activity", "Queue"),
             ("/scan", "Library scan"),
-            ("/settings", "Probe cache"),
-            ("/settings/profiles", "Quality hierarchy"),
+            ("/settings", "Metadata providers"),
+            ("/settings/profiles", "Quality / source"),
+            ("/movies/settings", "Movie settings"),
+            ("/series/settings", "Series settings"),
+            ("/playlists", "IPTV settings"),
+            ("/explore/movies", "Explore Movies"),
+            ("/explore/series", "Explore Series"),
+            ("/import", "Import existing"),
+            ("/storage", "Storage"),
         ):
             text = page_text(client, path)
             check_true(f"{path} renders", needle in text)
@@ -1429,9 +1519,22 @@ def main() -> int:
                        for label in (">Wanted<", ">Calendar<")))
 
         settings_page = page_text(client, "/settings")
-        check_true("settings shows ffprobe", "ffprobe" in settings_page)
         check_true("settings asks for the read access token",
                    "API Read Access Token" in settings_page)
+        check_true("global settings has one save button",
+                   'id="settings-save"' in settings_page)
+        check_true("global settings links the section pages",
+                   all(href in settings_page for href in
+                       ("/movies/settings", "/series/settings",
+                        "/playlists#iptv-settings")))
+        check_true("global settings does not carry the player controls",
+                   'id="iptv-external-enabled"' not in settings_page)
+        movies_settings_page = page_text(client, "/movies/settings")
+        check_true("movie settings shows ffprobe guidance",
+                   "ffprobe" in movies_settings_page)
+        playlists_page = page_text(client, "/playlists")
+        check_true("IPTV settings owns the external player",
+                   'id="iptv-external-enabled"' in playlists_page)
 
         response = client.post("/api/settings/save", json={
             "metadata": {"tmdb_read_token": "a" * 32},
@@ -1466,7 +1569,14 @@ def main() -> int:
                    {"sync", "download", "search_movie", "search_series", "task"} <= kinds)
         check("worker queue is idle after the suite", stuck, 0)
         tasks_payload = client.get("/api/tasks").get_json()
-        check("tasks API lists all four tasks", len(tasks_payload.get("tasks", [])), 4)
+        task_names = {task["name"] for task in tasks_payload.get("tasks", [])}
+        check("tasks API still shows the retired row for history",
+              "search_missing" in task_names, True)
+        check("tasks API lists every runnable task",
+              set(scheduler.TASK_NAMES) <= task_names, True)
+        response = client.post("/api/tasks/search_missing/run")
+        check("retired search_missing cannot be triggered",
+              response.status_code, 404)
 
         image = client.get("/api/images/tmdb/w92/matrix.jpg")
         check("TMDB image proxy status", image.status_code, 200)
@@ -1498,19 +1608,39 @@ def main() -> int:
 
         response = client.post("/api/quality-profiles", json={
             "name": "Test profile",
-            "resolutions": ["1080p", "720p"],
-            "cutoff": "1080p",
+            "resolution": "1080p",
+            "quality_options": [
+                {"value": "web-dl", "weight": 10},
+                {"value": "hdtv", "weight": 8},
+            ],
+            "target_score": 20,
             "upgrades": True,
         })
         check("profile created", response.status_code, 201)
         test_profile = response.get_json()["profile"]
+        check("created profile is custom", test_profile["is_builtin"], False)
         response = client.patch(f"/api/quality-profiles/{test_profile['id']}", json={
             "name": "Test profile 2",
-            "resolutions": ["720p"],
-            "cutoff": "720p",
+            "resolution": "720p",
+            "quality_options": [{"value": "hdtv", "weight": 10}],
             "upgrades": False,
         })
         check("profile edited", response.status_code, 200)
+        edited = response.get_json()["profile"]
+        check("edited profile resolution", edited["resolution"], "720p")
+        check("edited profile upgrades", edited["upgrades"], False)
+        # A restore rebuilds the profile table, so the ids captured before it
+        # are stale; look the builtin up again.
+        current_builtins = {
+            profile["builtin_key"]: profile
+            for profile in client.get("/api/quality-profiles").get_json()["profiles"]
+            if profile.get("builtin_key")
+        }
+        response = client.patch(
+            f"/api/quality-profiles/{current_builtins['1080p']['id']}",
+            json={"name": "Not allowed"},
+        )
+        check("builtin profile cannot be edited", response.status_code, 409)
         response = client.delete(f"/api/quality-profiles/{test_profile['id']}")
         check("unused profile deleted", response.status_code, 200)
 

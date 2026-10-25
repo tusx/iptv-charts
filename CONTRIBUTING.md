@@ -10,7 +10,7 @@ provider and metadata APIs the user configures.
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ./setup.test.sh              # live dev server + worker, auto-reload
-./setup.test.sh --check      # all five test suites, no network
+./setup.test.sh --check      # full test matrix, no network
 ```
 
 The full check suite must pass before a change is merged. It uses local fixture
@@ -62,6 +62,7 @@ package:
 
 | Suite | What it protects |
 |---|---|
+| `tests/run_all.py` | Runs every standalone suite below in a deterministic order |
 | `tests/smoke.py` | Parsers, migrations, worker queue, FTS, quality/language/probe/connection units |
 | `tests/integration.py` | Ingest against the local fixture provider |
 | `tests/bridge.py` | The host player queue contract |

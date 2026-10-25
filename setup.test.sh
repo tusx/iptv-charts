@@ -9,7 +9,7 @@
 #
 # Usage:
 #   ./setup.test.sh                 # start with auto-reload
-#   ./setup.test.sh --check         # run the smoke tests and exit
+#   ./setup.test.sh --check         # run the full test matrix and exit
 #   ./setup.test.sh --no-reload     # run without the reloader
 #   ./setup.test.sh --port 9000     # use a different port
 #   ./setup.test.sh --open          # also open a browser tab on startup
@@ -79,24 +79,8 @@ fi
 
 # --------------------------------------------------------------------- checks
 if $check_only; then
-    echo "==> smoke tests (no network)"
-    "$venv/bin/python" "$root/tests/smoke.py" || exit 1
-
-    echo
-    echo "==> integration tests (local fixture server)"
-    "$venv/bin/python" "$root/tests/integration.py" || exit 1
-
-    echo
-    echo "==> bridge tests (queue protocol, against the real script)"
-    "$venv/bin/python" "$root/tests/bridge.py" || exit 1
-
-    echo
-    echo "==> end-to-end tests (HTTP API + rendered pages)"
-    "$venv/bin/python" "$root/tests/endtoend.py" || exit 1
-
-    echo
-    echo "==> manager tests (library, downloads, scan, backup)"
-    exec "$venv/bin/python" "$root/tests/manager.py"
+    echo "==> full test matrix (each suite runs in its own process)"
+    exec "$venv/bin/python" "$root/tests/run_all.py"
 fi
 
 # ----------------------------------------------------------------------- run

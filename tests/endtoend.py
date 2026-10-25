@@ -313,12 +313,14 @@ def main() -> int:
             check_true("external-player button hidden when there is none",
                        b'id="external-btn"' not in response.data)
 
-            # A machine with nothing installed is the case the settings page has
-            # to stay useful for: it is where the fix is entered.
-            response = client.get("/settings")
-            check("settings page renders with no players", response.status_code, 200)
-            check_true("and says what to do about it",
-                       b"Nothing can play a stream externally yet" in response.data)
+            # External playback is off by default, so a machine with nothing
+            # installed still gets a usable IPTV settings page: that is where
+            # the player is configured.
+            response = client.get("/playlists")
+            check("IPTV settings page renders with no players",
+                  response.status_code, 200)
+            check_true("and says external playback is off by default",
+                       b"Off by default" in response.data)
         finally:
             player_module.resolve = original_resolve
             player_module.available = original_available
@@ -331,21 +333,52 @@ def main() -> int:
         response = client.get("/settings")
         check("settings page returns 200", response.status_code, 200)
         settings_body = response.data
-        check_true("form rendered", b'id="settings-form"' in settings_body)
-        check_true("player choices rendered", b'id="player-choices"' in settings_body)
-        check_true("automatic offered", b'value="auto"' in settings_body)
-        check_true("custom command offered", b'value="custom"' in settings_body)
-        check_true("command field rendered", b'id="player-command"' in settings_body)
+        check_true("global form rendered", b'id="settings-form"' in settings_body)
         check_true("settings script linked", b"js/settings.js" in settings_body)
         check_true("settings asks for the read access token",
                    b"API Read Access Token" in settings_body)
+        check_true("one save button rendered", b'id="settings-save"' in settings_body)
+        check_true("per-section save buttons removed",
+                   b'id="metadata-save"' not in settings_body)
+        check_true("the global page no longer owns the player",
+                   b'id="player-command"' not in settings_body)
+        check_true("the global page links IPTV settings",
+                   b"/playlists#iptv-settings" in settings_body)
 
-        response = client.post("/api/settings", json={
-            "preferred_player": "custom",
-            "player_command": "mpv --title={title} {url}",
+        response = client.get("/playlists")
+        check("playlists page returns 200", response.status_code, 200)
+        playlists_body = response.data
+        check_true("IPTV settings form rendered",
+                   b'id="iptv-settings"' in playlists_body)
+        check_true("external player toggle rendered",
+                   b'id="iptv-external-enabled"' in playlists_body)
+        check_true("player choices rendered",
+                   b'id="iptv-player-choices"' in playlists_body)
+        check_true("custom command field rendered",
+                   b'id="iptv-player-command"' in playlists_body)
+        check_true("IPTV settings explains the default",
+                   b"Off by default" in playlists_body)
+        check_true("IPTV settings loads the section API",
+                   b'data-load-url="/api/settings/sections/iptv"' in playlists_body)
+
+        response = client.get("/api/settings/sections/iptv")
+        check("IPTV settings API returns 200", response.status_code, 200)
+        snapshot = response.get_json()
+        check("external playback is off by default",
+              snapshot["external_player_enabled"], False)
+        check("the default player preference is automatic",
+              snapshot["preferred_player"], "auto")
+
+        response = client.post("/api/settings/sections/iptv", json={
+            "player": {
+                "enabled": True,
+                "preferred_player": "custom",
+                "player_command": "mpv --title={title} {url}",
+            },
         })
         payload = response.get_json()
         check("saving succeeds", payload["ok"], True)
+        check("external playback enabled", payload["external_player_enabled"], True)
         check("the choice is recorded", payload["player"],
               {"id": "custom", "label": "Custom command"})
         # The response is the resolved command with placeholders filled in, so
@@ -353,40 +386,73 @@ def main() -> int:
         check("expanded exactly as it will run", payload["command"],
               ["mpv", "--title=Example stream", "http://example.com/stream.ts"])
 
-        body = client.get("/settings").data
-        check_true("the command round-trips", b"{title}" in body)
-        check_true("the choice round-trips", b'value="custom"' in body)
+        saved = client.get("/api/settings/sections/iptv").get_json()
+        check("the command round-trips", saved["player_command"],
+              "mpv --title={title} {url}")
+        check("the choice round-trips", saved["preferred_player"], "custom")
+        check("the custom player is offered as ready", saved["custom_ready"], True)
 
-        response = client.post("/api/settings", json={
-            "preferred_player": "custom", "player_command": 'mpv "unclosed',
+        response = client.post("/api/settings/sections/iptv", json={
+            "player": {
+                "enabled": True, "preferred_player": "custom",
+                "player_command": 'mpv "unclosed',
+            },
         })
         check("a command that cannot be parsed is refused", response.status_code, 400)
         check_true("with a readable reason",
                    b"cannot be parsed" in response.data)
 
-        response = client.post("/api/settings", json={"preferred_player": "vlc"})
+        response = client.post("/api/settings/sections/iptv", json={
+            "player": {"enabled": True, "preferred_player": "not-a-player"},
+        })
         check("an unknown player is refused", response.status_code, 400)
+
+        response = client.post("/api/settings/sections/iptv", json={
+            "player": {
+                "enabled": True, "preferred_player": "custom",
+                "player_command": "",
+            },
+        })
+        check("enabling custom without a command is refused",
+              response.status_code, 400)
+        check_true("and says what is missing",
+                   b"Give a command first" in response.data)
 
         # The queue decides what the host runs, so it has to be JSON-only and
         # same-origin: a form-encoded POST needs no preflight and any website
         # could aim one at loopback.
-        response = client.post("/api/settings", data={"player_command": "rm -rf /"})
+        response = client.post("/api/settings/sections/iptv",
+                               data={"player_command": "rm -rf /"})
         check("a form-encoded write is refused", response.status_code, 400)
-        response = client.post("/api/settings", json={"player_command": "rm -rf /"},
-                               headers={"Origin": "http://evil.example.com"})
+        response = client.post(
+            "/api/settings/sections/iptv",
+            json={"player": {"player_command": "rm -rf /"}},
+            headers={"Origin": "http://evil.example.com"},
+        )
         check("a cross-site write is refused", response.status_code, 403)
-        response = client.post("/api/settings", json={"player_command": "rm -rf /"},
-                               headers={"Sec-Fetch-Site": "cross-site"})
+        response = client.post(
+            "/api/settings/sections/iptv",
+            json={"player": {"player_command": "rm -rf /"}},
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
         check("so is one the browser labels cross-site", response.status_code, 403)
 
         # Put it back, so the rest of the run sees a clean slate.
-        client.post("/api/settings", json={
-            "preferred_player": "auto", "player_command": "",
+        response = client.post("/api/settings/sections/iptv", json={
+            "player": {
+                "enabled": False, "preferred_player": "auto",
+                "player_command": "",
+            },
         })
-        body = client.get("/settings").data
-        check_true("the command was cleared", b'id="player-command"' in body)
-        check_true("one save button rendered", b'id="settings-save"' in body)
-        check_true("per-section save buttons removed", b'id="metadata-save"' not in body)
+        check("external playback can be switched off", response.status_code, 200)
+        snapshot = client.get("/api/settings/sections/iptv").get_json()
+        check("the command was cleared", snapshot["player_command"], "")
+        check("the choice was reset", snapshot["preferred_player"], "auto")
+        check("external playback is off again",
+              snapshot["external_player_enabled"], False)
+        browse = client.get(f"/sources/{source_id}/browse")
+        check_true("the external-player button is hidden while playback is off",
+                   b'id="external-btn"' not in browse.data)
 
         section("unified settings save")
         response = client.post("/api/settings/save", json={
@@ -470,18 +536,32 @@ def main() -> int:
             (Path(tmp) / "play-bridge.alive").write_text("0")
             player_module._CANDIDATES = None
             try:
+                # External playback is off by default, so the bridge has to be
+                # switched on before its button can appear.
+                response = client.post("/api/settings/sections/iptv", json={
+                    "player": {"enabled": True},
+                })
+                check("external playback enabled for the bridge",
+                      response.status_code, 200)
                 response = client.get(f"/sources/{source_id}/browse")
                 check_true("the external-player button survives the upgrade",
                            b'id="external-btn"' in response.data)
-                response = client.get("/settings")
-                check_true("and the settings page says why the choice is limited",
-                           b"predates this version" in response.data)
+                snapshot = client.get(
+                    "/api/settings/sections/iptv"
+                ).get_json()
+                check("the IPTV settings API reports the old bridge",
+                      snapshot["bridge_outdated"], True)
+                check("the old bridge is alive", snapshot["bridge_alive"], True)
             finally:
                 if saved_queue is None:
                     os.environ.pop("IPTV_CHARTS_PLAY_QUEUE", None)
                 else:
                     os.environ["IPTV_CHARTS_PLAY_QUEUE"] = saved_queue
                 player_module._CANDIDATES = None
+        # Leave external playback off for the rest of the run.
+        client.post("/api/settings/sections/iptv", json={
+            "player": {"enabled": False},
+        })
 
         # ---------------------------------------------------------- re-sync all
         section("update all")

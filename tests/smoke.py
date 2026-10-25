@@ -741,7 +741,7 @@ def test_manager_foundations() -> None:
     check("WEB-DL source recognised",
           quality.parse_source("Movie (2024) [2160p] WEB-DL"), "web-dl")
     check("CAM source recognised",
-          quality.parse_source("Movie (2024) HDCAM"), "hdcam")
+          quality.parse_source("Movie (2024) HDCAM"), "cam")
     check("a title containing cam is not a CAM",
           quality.parse_source("Camelot (2024) [1080p]"), "unknown")
 
@@ -757,86 +757,200 @@ def test_manager_foundations() -> None:
             "size": 1000,
         }
 
+    # The 0.8.0 engine has one mandatory resolution and a weighted list of
+    # quality/source options. Lower resolutions are a fallback only when
+    # upgrades are enabled; higher ones are never eligible.
     profile = quality.Profile(
-        tiers=(
-            quality.Tier("1080p", "1080p"),
-            quality.Tier("720p", "720p"),
-            quality.Tier("480p", "480p"),
-            quality.Tier("unknown", "unknown"),
+        resolution="1080p",
+        resolution_weight=10,
+        quality_options=(
+            quality.Option("web-dl", "WEB-DL", 10),
+            quality.Option("bluray", "Blu-ray", 8),
         ),
-        cutoff_index=0,
+        target_score=20,
         upgrades=True,
     )
-    releases = [
-        {"resolution": "720p", "score": 0.9, "probe": probed("720p")},
-        {"resolution": "1080p", "score": 0.8, "probe": probed("1080p")},
-        {"resolution": "2160p", "score": 0.7, "probe": probed("2160p")},
-    ]
-    check("missing file takes best allowed",
-          quality.choose_release(releases, profile)["resolution"], "1080p")
-    check("below-cutoff file upgrades",
-          quality.choose_release(releases, profile, current="720p")["resolution"], "1080p")
-    check("cutoff stops upgrades",
-          quality.choose_release(releases, profile, current="1080p"), None)
-    no_upgrades = quality.Profile(
-        tiers=(quality.Tier("1080p", "1080p"), quality.Tier("720p", "720p")),
-        cutoff_index=0, upgrades=False,
-    )
-    check("upgrades disabled means no replacement",
-          quality.choose_release(releases, no_upgrades, current="720p"), None)
-    check("profile rejects an unknown resolution",
-          raises(quality.validate_profile, ["nonsense"], exc=ValueError), "raised")
 
-    validated = quality.validate_profile(
-        [
-            {"resolution": "2160p", "sources": ["web-dl"]},
-            {"resolution": "1080p", "sources": []},
+    def release(resolution, source, **extra):
+        return {"resolution": resolution, "source": source, "score": 1.0,
+                "probe": probed(resolution), **extra}
+
+    exact = release("1080p", "web-dl")
+    fallback = release("720p", "web-dl")
+    higher = release("2160p", "web-dl")
+    cam = release("1080p", "cam")
+    untagged = {"resolution": "1080p", "score": 1.0, "probe": probed("1080p")}
+
+    check("exact resolution is eligible", profile.allows(exact), True)
+    check("exact candidate meets the target",
+          profile.evaluate(exact)["target_met"], True)
+    check("lower resolution is an upgrade-eligible fallback",
+          profile.evaluate(fallback)["needs_upgrade"], True)
+    check("lower fallback does not meet the target",
+          profile.evaluate(fallback)["target_met"], False)
+    check("higher resolution is rejected", profile.allows(higher), False)
+    check("unselected source is rejected", profile.allows(cam), False)
+    check("untagged source is rejected", profile.allows(untagged), False)
+    check("missing file takes the exact target over a fallback",
+          quality.choose_release([fallback, exact], profile)["resolution"], "1080p")
+    no_upgrades = quality.Profile(
+        resolution="1080p", resolution_weight=10,
+        quality_options=(quality.Option("web-dl", "WEB-DL", 10),),
+        target_score=20, upgrades=False,
+    )
+    check("upgrades disabled rejects a lower fallback",
+          no_upgrades.allows(fallback), False)
+    check("upgrades disabled means no replacement",
+          quality.choose_release([fallback, exact], no_upgrades,
+                                 current="720p"), None)
+
+    # Optional sections add weight only when the probe shows a preferred
+    # track: a probed release can outscore a plain one and clear a higher
+    # target without any preference being a hard filter.
+    weighted = quality.Profile(
+        resolution="1080p", resolution_weight=10,
+        quality_options=(quality.Option("web-dl", "WEB-DL", 10),),
+        audio_codecs=(quality.Option("eac3", "E-AC-3", 6),),
+        target_score=26, upgrades=True,
+    )
+    eac3_exact = release("1080p", "web-dl", audio_codecs=["eac3"])
+    check("probe codec weight raises the score",
+          weighted.score(eac3_exact), 26)
+    check("plain release misses a target that needs the probe weight",
+          weighted.evaluate(exact)["target_met"], False)
+    check("probed release meets that target",
+          weighted.evaluate(eac3_exact)["target_met"], True)
+    current_fallback = {"resolution": "720p", "source": "web-dl",
+                        "media_info": probed("720p")}
+    upgraded = quality.choose_release(
+        [exact, eac3_exact, higher], weighted, current=current_fallback)
+    check("a strictly higher-scoring exact release replaces the fallback",
+          upgraded["audio_codecs"], ["eac3"])
+    check("a target-met current file stops upgrades",
+          quality.choose_release(
+              [eac3_exact], weighted,
+              current={"resolution": "1080p", "source": "web-dl",
+                       "audio_codecs": ["eac3"],
+                       "media_info": probed("1080p")}), None)
+    equal_score = quality.Profile(
+        resolution="1080p", resolution_weight=10,
+        quality_options=(quality.Option("web-dl", "WEB-DL", 10),),
+        target_score=20, upgrades=True,
+    )
+    check("an equal score is not an upgrade",
+          quality.choose_release([exact], equal_score, current=current_fallback),
+          None)
+    target_over_score = quality.Profile(
+        resolution="1080p", resolution_weight=10,
+        quality_options=(quality.Option("web-dl", "WEB-DL", 10),),
+        audio_codecs=(quality.Option("eac3", "E-AC-3", 6),),
+        target_score=20, upgrades=True,
+    )
+    chosen = quality.choose_release(
+        [release("720p", "web-dl", audio_codecs=["eac3"]), exact],
+        target_over_score,
+    )
+    check("a target-met exact release wins over a better-scoring fallback",
+          chosen["resolution"], "1080p")
+
+    # Audio/subtitle preferences are additive, not hard requirements: a
+    # release without them is still allowed, it just does not reach the target.
+    preferred = quality.Profile(
+        resolution="1080p", resolution_weight=10,
+        quality_options=(quality.Option("web-dl", "WEB-DL", 10),),
+        audio_languages=(quality.Option("original", "Original language", 5),),
+        subtitle_languages=(quality.Option("eng", "English", 5),),
+        target_score=30, upgrades=True,
+    )
+    without_tracks = release("1080p", "web-dl", audio_languages=["spa"])
+    with_tracks = release("1080p", "web-dl", audio_languages=["spa"],
+                          subtitle_languages=["eng"])
+    check("original-language audio adds weight",
+          preferred.score(without_tracks, "es"), 25)
+    check("required-language subtitle adds weight",
+          preferred.score(with_tracks, "es"), 30)
+    check("missing preferred tracks is still eligible",
+          preferred.allows(without_tracks, "es"), True)
+    check("preferred tracks are needed to meet the target",
+          preferred.evaluate(without_tracks, "es")["target_met"], False)
+    check("release with preferred tracks meets the target",
+          preferred.evaluate(with_tracks, "es")["target_met"], True)
+
+    validated = quality.validate_profile({
+        "name": "Cinema",
+        "resolution": "2160p",
+        "resolution_weight": 12,
+        "quality_options": [
+            {"value": "web-dl", "weight": 10},
+            {"value": "bluray", "weight": 8},
         ],
-        cutoff="2160p WEB-DL",
-        upgrades=True,
-        audio_mode="original",
-        subtitle_mode="required",
-        subtitle_languages=["original"],
-        probe_required=True,
-    )
-    check("custom quality tier stored", validated["qualities"][0]["name"], "2160p WEB-DL")
-    check("custom cutoff stored", validated["cutoff"], "2160p WEB-DL")
-    custom = quality.Profile(
-        tiers=(quality.Tier("2160p WEB-DL", "2160p", ("web-dl",)),
-               quality.Tier("1080p", "1080p")),
-        cutoff_index=0, upgrades=True, audio_mode="original",
-        subtitle_mode="required", subtitle_languages=("original",),
-        probe_required=True,
-    )
-    webdl = {
-        "resolution": "2160p", "source": "web-dl", "score": 1.0,
-        "probe": probed("2160p", ("spa",), ("spa",)),
-    }
-    cam = {
-        "resolution": "2160p", "source": "cam", "score": 1.0,
-        "probe": probed("2160p", ("spa",), ("spa",)),
-    }
-    check("WEB-DL satisfies source restriction", custom.allows(webdl, "es"), True)
-    check("CAM is rejected by a WEB-DL tier", custom.allows(cam, "es"), False)
-    check("original-language audio is enforced",
-          custom.check(webdl, "es")[0], True)
-    check("missing original audio is rejected",
-          custom.check({**webdl, "probe": probed("2160p", ("eng",), ("spa",))}, "es")[0],
-          False)
-    check("required original subtitle is enforced",
-          custom.check({**webdl, "probe": probed("2160p", ("spa",), ())}, "es")[0],
-          False)
-    check("probe is required for a probed profile",
-          custom.check({"resolution": "2160p", "source": "web-dl"}, "es")[0], False)
+        "audio_codecs": [{"value": "eac3", "weight": 5}],
+        "audio_languages": ["original"],
+        "target_score": 27,
+        "upgrades": True,
+    })
+    check("custom profile weight stored",
+          validated["quality_options"][0]["weight"], 10)
+    check("custom profile target stored", validated["target_score"], 27)
+    check("custom profile maximum computed", validated["max_score"], 32)
+    check("custom profile criteria is versioned",
+          validated["criteria"]["version"], 1)
+    check("custom profile audio codec stored",
+          validated["criteria"]["audio_codecs"],
+          [{"value": "eac3", "label": "E-AC-3 / Dolby Digital Plus", "weight": 5}])
+    check("profile rejects an unknown resolution",
+          raises(quality.validate_profile,
+                 {"resolution": "nonsense", "quality_options": ["web-dl"]},
+                 exc=ValueError), "raised")
+    check("profile requires a quality/source option",
+          raises(quality.validate_profile, {"resolution": "1080p"},
+                 exc=ValueError), "raised")
+    check("profile rejects duplicate options",
+          raises(quality.validate_profile,
+                 {"resolution": "1080p",
+                  "quality_options": ["web-dl", "web-dl"]}, exc=ValueError),
+          "raised")
+    check("profile rejects a maximum below the target floor",
+          raises(quality.validate_profile,
+                 {"resolution": "1080p", "resolution_weight": 5,
+                  "quality_options": [{"value": "web-dl", "weight": 5}]},
+                 exc=ValueError), "raised")
+    check("profile rejects a target below 20",
+          raises(quality.validate_profile,
+                 {"resolution": "1080p",
+                  "quality_options": ["web-dl"], "target_score": 19},
+                 exc=ValueError), "raised")
+
     from_row = quality.Profile.from_row({
+        "name": validated["name"],
+        "resolution": validated["resolution"],
+        "resolution_weight": validated["resolution_weight"],
+        "quality_options": json.dumps(validated["quality_options"]),
+        "criteria_json": validated["criteria_json"],
+        "target_score": validated["target_score"],
+        "upgrades": 1, "builtin_key": None, "is_builtin": 0, "revision": 1,
+    })
+    check("criteria round-trip keeps the audio codec",
+          [(option.value, option.weight) for option in from_row.audio_codecs],
+          [("eac3", 5)])
+    check("criteria round-trip keeps the audio language",
+          [(option.value, option.weight) for option in from_row.audio_languages],
+          [("original", 5)])
+    check("criteria round-trip keeps resolution and target",
+          (from_row.resolution, from_row.target_score, from_row.max_score),
+          ("2160p", 27, 32))
+    legacy_row = quality.Profile.from_row({
         "qualities": '[{"name":"2160p","resolution":"2160p","sources":[]}]',
         "resolutions": '["2160p"]', "cutoff": "2160p", "upgrades": 1,
         "audio_mode": "any", "audio_languages": "[]",
         "subtitle_mode": "required", "subtitle_languages": '["original"]',
         "probe_required": 1,
     })
-    check("original subtitle survives the database round-trip",
-          from_row.subtitle_languages, (languages.ORIGINAL,))
+    check("a legacy row still reads its resolution",
+          legacy_row.resolution, "2160p")
+    check("a legacy row still reads its subtitle preference",
+          [option.value for option in legacy_row.subtitle_languages],
+          [languages.ORIGINAL])
 
     section("languages, probes and connection limits")
     check("TMDB language folds to ffprobe code", languages.normalise("en"), "eng")
@@ -1104,6 +1218,28 @@ def test_manager_foundations() -> None:
         conn.execute("DROP TABLE IF EXISTS movie_alternates")
         conn.execute("ALTER TABLE sources DROP COLUMN connection_limit")
         conn.execute("ALTER TABLE quality_profiles DROP COLUMN qualities")
+        # Strip the v5 fields as well, so the migration is what restores them
+        # rather than schema.sql having created the fresh table with them.
+        conn.execute("DROP INDEX IF EXISTS idx_quality_profiles_builtin")
+        for column in ("builtin_key", "max_score", "target_score",
+                       "resolution_weight", "revision", "updated_at"):
+            conn.execute(f"ALTER TABLE quality_profiles DROP COLUMN {column}")
+        conn.execute("DROP INDEX IF EXISTS idx_items_kind_imdb")
+        conn.execute("ALTER TABLE items DROP COLUMN imdb_id")
+        for column in ("file_score", "candidate_batch_size",
+                       "probe_batch_size", "search_interval_hours"):
+            conn.execute(f"ALTER TABLE movies DROP COLUMN {column}")
+        conn.execute("ALTER TABLE series_episodes DROP COLUMN file_score")
+        for column in ("score", "score_details"):
+            conn.execute(f"ALTER TABLE downloads DROP COLUMN {column}")
+        conn.execute("DROP TABLE IF EXISTS bworker_policies")
+        conn.execute("DROP TABLE IF EXISTS bworker_state")
+        # A monitored movie with no profile yet: v5 must point it at the
+        # default 1080p builtin and seed its durable search work row.
+        conn.execute(
+            "INSERT INTO movies (tmdb_id, title, added_at, monitored) "
+            "VALUES (990001, 'Migration Fixture', 0, 1)"
+        )
         conn.execute("PRAGMA user_version = 0")
         conn.execute("DELETE FROM quality_profiles")
         conn.execute("DELETE FROM task_state")
@@ -1122,6 +1258,9 @@ def test_manager_foundations() -> None:
         movie_columns = {row["name"] for row in conn.execute(
             "PRAGMA table_info(movies)"
         )}
+        episode_columns = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(series_episodes)"
+        )}
         tables = {row["name"] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         )}
@@ -1134,6 +1273,43 @@ def test_manager_foundations() -> None:
         tiers = conn.execute(
             "SELECT COUNT(*) AS n FROM quality_profiles WHERE qualities IS NOT NULL"
         ).fetchone()["n"]
+        builtin_keys = {
+            row["builtin_key"] for row in conn.execute(
+                "SELECT builtin_key FROM quality_profiles"
+            )
+        }
+        criteria = [
+            json.loads(row["criteria_json"]) for row in conn.execute(
+                "SELECT criteria_json FROM quality_profiles"
+            )
+        ]
+        settings = {
+            row["key"]: row["value"] for row in conn.execute(
+                "SELECT key, value FROM settings"
+            )
+        }
+        policies = conn.execute(
+            "SELECT COUNT(*) AS n FROM bworker_policies"
+        ).fetchone()["n"]
+        policy_types = {
+            row["work_type"] for row in conn.execute(
+                "SELECT work_type FROM bworker_policies"
+            )
+        }
+        bworker_states = conn.execute(
+            "SELECT COUNT(*) AS n FROM bworker_state"
+        ).fetchone()["n"]
+        movie = conn.execute(
+            "SELECT quality_profile_id FROM movies WHERE tmdb_id = 990001"
+        ).fetchone()
+        default_profile = conn.execute(
+            "SELECT id FROM quality_profiles WHERE builtin_key = '1080p'"
+        ).fetchone()
+        work_keys = {
+            row["work_key"] for row in conn.execute(
+                "SELECT work_key FROM bworker_work"
+            )
+        }
         conn.close()
         check("migration adds the request_headers column", "request_headers" in columns, True)
         check("migration adds the connection limit", "connection_limit" in source_columns, True)
@@ -1141,12 +1317,29 @@ def test_manager_foundations() -> None:
         check("migration adds the worker cancel flag",
               "cancel_requested" in download_columns, True)
         check("migration adds the queue index", "idx_downloads_queue" in indexes, True)
-        check("migration adds quality tier fields",
+        check("migration keeps the legacy profile fields",
               {"qualities", "audio_mode", "subtitle_mode", "probe_required"}
               <= profile_columns, True)
+        check("migration adds the weighted profile fields",
+              {"builtin_key", "is_builtin", "resolution", "resolution_weight",
+               "target_score", "max_score", "revision", "updated_at",
+               "criteria_json"} <= profile_columns, True)
+        check("migration adds the item identity column", "imdb_id" in columns, True)
+        check("migration adds movie scoring and batch fields",
+              {"file_score", "candidate_batch_size", "probe_batch_size",
+               "search_interval_hours"} <= movie_columns, True)
+        check("migration adds the episode score", "file_score" in episode_columns, True)
+        check("migration adds download scores",
+              {"score", "score_details"} <= download_columns, True)
         check("migration creates the probe cache", "stream_probes" in tables, True)
         check("migration creates the worker queue", "worker_jobs" in tables, True)
         check("migration creates worker state", "worker_state" in tables, True)
+        check("migration creates the bworker work table", "bworker_work" in tables, True)
+        check("migration creates bworker events", "bworker_events" in tables, True)
+        check("migration creates bworker state", "bworker_state" in tables, True)
+        check("migration creates bworker policies", "bworker_policies" in tables, True)
+        check("migration creates bworker scanning tables",
+              {"bworker_scan", "bworker_candidates"} <= tables, True)
         check("migration adds movie candidate pin fields",
               {"candidate_source_id", "candidate_remote_id", "candidate_mode"}
               <= movie_columns, True)
@@ -1155,9 +1348,30 @@ def test_manager_foundations() -> None:
               "movie_alternates" in tables, True)
         check("migration creates the worker dedupe index",
               "idx_worker_jobs_dedupe" in indexes, True)
+        check("migration creates the builtin profile index",
+              "idx_quality_profiles_builtin" in indexes, True)
+        check("migration creates the catalogue identity indexes",
+              {"idx_items_kind_tmdb", "idx_items_kind_imdb"} <= indexes, True)
         check("schema version recorded", version, db.SCHEMA_VERSION)
-        check("migration seeds quality profiles", profiles, 2)
-        check("migration backfills quality tiers", tiers, 2)
+        check("migration seeds the three builtins", profiles, 3)
+        check("migration backfills legacy tier columns", tiers, 3)
+        check("migration seeds the canonical builtin keys", builtin_keys,
+              {"4k", "1080p", "720p"})
+        check("migration writes versioned criteria",
+              sorted({entry.get("version") for entry in criteria}), [1])
+        check("migration points the movie at the default profile",
+              movie["quality_profile_id"], default_profile["id"])
+        check("migration seeds durable movie work",
+              "movie:1:search" in work_keys, True)
+        check("migration seeds every bworker policy", policies,
+              len(db.DEFAULT_POLICIES))
+        check("migration seeds the movie search policy",
+              "movie_search" in policy_types, True)
+        check("migration seeds bworker singleton state", bworker_states, 1)
+        check("migration defaults the external player to off",
+              settings.get("external_player_enabled"), "0")
+        check("migration defaults the profile key",
+              settings.get("default_profile_key"), "1080p")
         check("migration seeds task state", tasks, 4)
 
 
