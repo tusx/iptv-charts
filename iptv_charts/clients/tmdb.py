@@ -32,6 +32,25 @@ IMAGE_SIZES = frozenset({"w92", "w154", "w185", "w342", "w500", "w780", "origina
 #: API Read Access Token, which is a JWT and is sent as a bearer token.
 _V3_KEY_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
+#: Explore discovery feeds. These are the values the Explore API and metadata
+#: cache accept; TMDB exposes each as a separate list endpoint.
+MOVIE_FEEDS = ("trending", "popular", "top_rated", "upcoming", "now_playing")
+SERIES_FEEDS = ("trending", "popular", "top_rated", "on_the_air", "airing_today")
+FEED_WINDOWS = ("day", "week")
+
+_MOVIE_FEED_PATHS = {
+    "popular": "/movie/popular",
+    "top_rated": "/movie/top_rated",
+    "upcoming": "/movie/upcoming",
+    "now_playing": "/movie/now_playing",
+}
+_SERIES_FEED_PATHS = {
+    "popular": "/tv/popular",
+    "top_rated": "/tv/top_rated",
+    "on_the_air": "/tv/on_the_air",
+    "airing_today": "/tv/airing_today",
+}
+
 
 class TMDBError(RuntimeError):
     """Raised for any failure talking to TMDB."""
@@ -269,6 +288,50 @@ class TMDBClient:
 
         raise TMDBError("TMDB request failed after a retry.")
 
+    # ------------------------------------------------------------------ feeds
+    def _feed(self, path: str, *, kind: str, media_type: str) -> list[dict]:
+        """Fetch one discovery list and normalise it like a search result.
+
+        ``kind`` is what ``normalise_summary`` uses to pick title/name and
+        release/first-air date; ``media_type`` is added so a client can tell a
+        movie feed result from a series result without knowing the endpoint it
+        came from. The extra key is additive: the rest of the summary shape is
+        exactly what search and details already return.
+        """
+        payload = self._get(path)
+        results = []
+        for raw in payload.get("results") or []:
+            if not isinstance(raw, dict) or not raw.get("id"):
+                continue
+            summary = normalise_summary(raw, kind=kind)
+            summary["media_type"] = str(raw.get("media_type") or media_type)
+            results.append(summary)
+        return results
+
+    def movie_feed(self, feed: str = "popular", window: str = "day") -> list[dict]:
+        """One movie discovery feed: trending, popular, top_rated, etc."""
+        if feed not in MOVIE_FEEDS:
+            raise ValueError(f"Unknown movie feed {feed!r}.")
+        if window not in FEED_WINDOWS:
+            raise ValueError(f"Unknown trending window {window!r}.")
+        if feed == "trending":
+            return self._feed(
+                f"/trending/movie/{window}", kind="movie", media_type="movie"
+            )
+        return self._feed(_MOVIE_FEED_PATHS[feed], kind="movie", media_type="movie")
+
+    def series_feed(self, feed: str = "popular", window: str = "day") -> list[dict]:
+        """One TV discovery feed: trending, popular, on_the_air, etc."""
+        if feed not in SERIES_FEEDS:
+            raise ValueError(f"Unknown series feed {feed!r}.")
+        if window not in FEED_WINDOWS:
+            raise ValueError(f"Unknown trending window {window!r}.")
+        if feed == "trending":
+            return self._feed(
+                f"/trending/tv/{window}", kind="tv", media_type="tv"
+            )
+        return self._feed(_SERIES_FEED_PATHS[feed], kind="tv", media_type="tv")
+
     # ------------------------------------------------------------------ search
     def search_movies(self, query: str, year: int | None = None) -> list[dict]:
         params: dict[str, Any] = {"query": query, "include_adult": "false"}
@@ -319,7 +382,10 @@ class TMDBClient:
 
 
 __all__ = [
+    "FEED_WINDOWS",
     "IMAGE_SIZES",
+    "MOVIE_FEEDS",
+    "SERIES_FEEDS",
     "TMDBClient",
     "TMDBError",
     "TMDBKeyError",

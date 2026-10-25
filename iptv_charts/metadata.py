@@ -37,7 +37,16 @@ DEFAULT_LANGUAGE = "en-US"
 
 SEARCH_TTL = 15 * 60
 DETAILS_TTL = 6 * 60 * 60
+#: Explore discovery lists change throughout the day, but not on every page
+#: load. Fifteen minutes keeps the page responsive without hammering TMDB.
+FEED_TTL = 15 * 60
 TVDB_TOKEN_KEY = "tvdb:token"
+
+#: Feed vocabularies, re-exported from the client so callers validate and
+#: cache against one definition.
+MOVIE_FEEDS = tmdb.MOVIE_FEEDS
+SERIES_FEEDS = tmdb.SERIES_FEEDS
+FEED_WINDOWS = tmdb.FEED_WINDOWS
 
 IMAGE_PATH_RE = re.compile(r"^/[A-Za-z0-9._-]+\.(?:jpe?g|png|webp)$", re.IGNORECASE)
 IMAGE_MAX_BYTES = 15 * 1024 * 1024
@@ -186,6 +195,49 @@ def series_details(conn, tmdb_id: int, *, refresh: bool = False) -> dict:
         details = client.series(tmdb_id)
     cache_set(conn, key, details)
     return details
+
+
+# ---------------------------------------------------------------------- feeds
+def _feed_key(kind: str, feed: str, window: str, lang: str) -> str:
+    return f"tmdb:{kind}:feed:{lang}:{feed}:{window}"
+
+
+def _feed(conn, kind: str, feed: str, window: str) -> list[dict]:
+    """Fetch one Explore feed, cached per language and trending window."""
+    allowed = MOVIE_FEEDS if kind == "movie" else SERIES_FEEDS
+    if feed not in allowed:
+        raise ValueError(f"Unknown {kind} feed {feed!r}.")
+    if window not in FEED_WINDOWS:
+        raise ValueError(f"Unknown trending window {window!r}.")
+
+    # Only trending has a window. Normalising the key here means asking for
+    # popular with window=week does not create a second, identical cache row.
+    if feed != "trending":
+        window = "day"
+
+    lang = language(conn)
+    key = _feed_key(kind, feed, window, lang)
+    cached = cache_get(conn, key, FEED_TTL)
+    if cached is not None:
+        return cached
+
+    with tmdb_client(conn) as client:
+        if kind == "movie":
+            results = client.movie_feed(feed, window=window)
+        else:
+            results = client.series_feed(feed, window=window)
+    cache_set(conn, key, results)
+    return results
+
+
+def movie_feed(conn, feed: str = "popular", window: str = "day") -> list[dict]:
+    """A cached movie discovery list for the Explore page."""
+    return _feed(conn, "movie", feed, window)
+
+
+def series_feed(conn, feed: str = "popular", window: str = "day") -> list[dict]:
+    """A cached series discovery list for the Explore page."""
+    return _feed(conn, "series", feed, window)
 
 
 # ----------------------------------------------------------------------- TVDB
@@ -361,8 +413,12 @@ def fetch_image(size: str, path: str) -> tuple[bytes, str]:
 
 
 __all__ = [
+    "FEED_TTL",
+    "FEED_WINDOWS",
     "LANGUAGE",
+    "MOVIE_FEEDS",
     "MetadataError",
+    "SERIES_FEEDS",
     "TMDB_KEY",
     "TMDB_LEGACY_KEY",
     "TVDB_KEY",
@@ -378,9 +434,11 @@ __all__ = [
     "image_url",
     "language",
     "movie_details",
+    "movie_feed",
     "search_movies",
     "search_series",
     "series_details",
+    "series_feed",
     "tmdb_client",
     "tmdb_token",
     "tvdb_client",

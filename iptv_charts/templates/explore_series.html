@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}Explore Series · {{ app_name }}{% endblock %}
+
+{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/explore.css') }}">
+<div id="explore-root"
+     data-kind="series"
+     data-playlist-kind="series"
+     data-default-feed="trending"
+     data-default-window="{{ default_window }}"
+     data-detail-base="{{ url_for('manager.series') }}/"
+     data-tmdb-configured="{{ '1' if tmdb_configured else '0' }}">
+
+  <section class="page-head">
+    <div>
+      <p class="crumb"><a href="{{ url_for('home') }}">← Home</a></p>
+      <h1>Explore Series</h1>
+      <p class="subtitle">
+        Trending, popular and currently airing series from TMDB. Find one in a
+        playlist or add it to your collection.
+      </p>
+    </div>
+    <div class="page-actions">
+      <a class="btn" href="{{ url_for('manager.series') }}">Series library</a>
+      <a class="btn btn-ghost" href="{{ url_for('explore.movies_page') }}">Explore Movies</a>
+    </div>
+  </section>
+
+  {% if not tmdb_configured %}
+    <div class="note note-warn">
+      Add a TMDB API Read Access Token on the
+      <a href="{{ settings_url }}#metadata-settings">settings page</a>
+      to browse Explore feeds.
+    </div>
+  {% endif %}
+
+  <div class="explore-toolbar">
+    <div class="explore-tabs" role="tablist" aria-label="Series feeds">
+      {% for value, label in feeds %}
+        <button class="explore-tab{% if loop.first %} is-active{% endif %}"
+                type="button" role="tab" data-feed="{{ value }}"
+                aria-selected="{{ 'true' if loop.first else 'false' }}">{{ label }}</button>
+      {% endfor %}
+    </div>
+    <div class="explore-window" id="explore-window">
+      <span class="explore-window-label">Trending</span>
+      <div class="explore-window-buttons" role="group" aria-label="Trending window">
+        <button class="explore-window-btn" type="button" data-window="day">Today</button>
+        <button class="explore-window-btn is-active" type="button" data-window="week">This week</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="explore-state" id="explore-state" role="status" aria-live="polite">
+    <p>Loading series…</p>
+  </div>
+  <div class="explore-grid" id="explore-grid" aria-live="polite" aria-busy="false"></div>
+
+  <dialog class="dialog dialog-wide explore-dialog" id="explore-dialog"
+          aria-labelledby="explore-dialog-title">
+    <div class="dialog-head">
+      <h2 id="explore-dialog-title">Series details</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+    </div>
+    <div class="dialog-body">
+      <div class="explore-detail">
+        <span class="poster-frame explore-detail-poster" id="explore-detail-poster"></span>
+        <div class="explore-detail-copy">
+          <h3 id="explore-detail-heading"></h3>
+          <p class="explore-detail-facts" id="explore-detail-facts"></p>
+          <p class="explore-detail-overview" id="explore-detail-overview"></p>
+          <p class="explore-library-note" id="explore-library-note" hidden>
+            Already in your library.
+            <a id="explore-library-link" href="{{ url_for('manager.series') }}">Open it</a>
+          </p>
+        </div>
+      </div>
+
+      <div class="explore-actions">
+        <section class="explore-action">
+          <h3>Search in a playlist</h3>
+          <p class="hint">Look for this title in one playlist's catalog. Searching is read-only.</p>
+          <label class="field">
+            <span>Playlist</span>
+            <select id="explore-source">
+              {% for source in sources %}
+                <option value="{{ source.id }}">{{ source.name }}</option>
+              {% else %}
+                <option value="">No playlists configured</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="field">
+            <span>Search text</span>
+            <input type="search" id="explore-playlist-query" placeholder="Series title"
+                   autocomplete="off" spellcheck="false">
+          </label>
+          <button class="btn btn-sm" type="button" id="explore-playlist-search"
+                  {% if not sources %}disabled{% endif %}>Search playlist</button>
+          <p class="explore-status" id="explore-playlist-status" role="status"></p>
+          <div class="explore-playlist-results" id="explore-playlist-results"></div>
+        </section>
+
+        <section class="explore-action">
+          <h3>Add to collection</h3>
+          <div id="explore-add-form">
+            <label class="field">
+              <span>Quality profile</span>
+              <select id="explore-profile" {% if not profiles %}disabled{% endif %}>
+                {% for profile in profiles %}
+                  <option value="{{ profile.id }}">{{ profile.name }}{% if profile.resolutions %} ({{ profile.resolutions|join(', ') }}){% endif %}</option>
+                {% else %}
+                  <option value="">No quality profiles</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="field">
+              <span>Monitor episodes</span>
+              <select id="explore-monitor-mode">
+                <option value="all" selected>All episodes (released and upcoming)</option>
+                <option value="future">Only upcoming episodes</option>
+                <option value="first">First season</option>
+                <option value="latest">Latest season</option>
+                <option value="none">None (metadata only)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>When a new season appears</span>
+              <select id="explore-monitor-new-seasons">
+                <option value="all" selected>Monitor all new episodes</option>
+                <option value="future">Monitor future episodes only</option>
+                <option value="none">Do not monitor new seasons</option>
+              </select>
+            </label>
+            <label class="check"><input type="checkbox" id="explore-monitored" checked> Monitored</label>
+            <label class="check"><input type="checkbox" id="explore-search-now" checked> Search and download now</label>
+            <button class="btn btn-primary btn-sm" type="button" id="explore-add-btn"
+                    {% if not profiles %}disabled{% endif %}>Add series</button>
+          </div>
+          <p class="explore-status" id="explore-add-status" role="status"></p>
+        </section>
+      </div>
+    </div>
+    <div class="dialog-foot">
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" type="button" data-close>Close</button>
+    </div>
+  </dialog>
+
+  {% if not profiles %}
+    <p class="note note-bad">
+      No quality profiles exist. Create one on the
+      <a href="{{ settings_url }}">settings page</a> before adding titles.
+    </p>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/explore.js') }}"></script>
+{% endblock %}
