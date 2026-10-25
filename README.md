@@ -254,7 +254,18 @@ A probed candidate can be pinned:
 
 Pins persist, scheduled searches honour them, and additional versions are
 listed with a size and Remove action. They import with an `[alternate]` suffix
-and never replace the main file. See
+and never replace the main file.
+
+Movies and series are added on dedicated pages (`/movies/add` and
+`/series/add`) with a TMDB search, profile and monitoring options, and a
+visible Added result. Manual search does not run until a query is entered and
+shows a spinner plus a warning that all playlist items are searched. The
+candidate browser sits beside Manual search. Movie and episode views also
+offer **ReFind candidates**, **Re-Probe all**, and **Remove downloaded file &
+re-find**. The movie detail page lists the latest scan decisions, including
+why a pending candidate was not probed. The live Activity feed records every
+candidate probe, skip and failure with timestamps and media facts; it keeps
+refreshing while the page is scrolled. See
 [`docs/MOVIE_CANDIDATES.md`](docs/MOVIE_CANDIDATES.md).
 
 ## Downloads, naming and library

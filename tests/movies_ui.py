@@ -559,6 +559,68 @@ def test_candidate_browser_api(movie_id: int) -> None:
           response.status_code == 200, str(response.status_code))
 
 
+def test_candidate_checks(movie_id: int) -> None:
+    section("candidate check reasons")
+    conn = connect()
+    try:
+        now = int(time.time())
+        source_id = int(conn.execute(
+            "INSERT INTO sources (name, kind, created_at) VALUES (?, 'm3u', ?)",
+            ("Checks fixture", now),
+        ).lastrowid)
+        conn.execute(
+            "DELETE FROM bworker_work WHERE entity_type = 'movie' AND entity_id = ?",
+            (movie_id,),
+        )
+        conn.execute(
+            "INSERT INTO bworker_work (work_key, work_type, entity_type, "
+            "entity_id, payload, enabled, stage, status, failure_count, "
+            "created_at, updated_at) VALUES (?, 'movie_search', 'movie', ?, "
+            "'{}', 1, 'searching_candidates', 'running', 0, ?, ?)",
+            (f"movie:{movie_id}:search", movie_id, now, now),
+        )
+        work_id = int(conn.execute(
+            "SELECT id FROM bworker_work WHERE work_key = ?",
+            (f"movie:{movie_id}:search",),
+        ).fetchone()["id"])
+        conn.execute(
+            "INSERT INTO bworker_scan (work_id, epoch, query_fingerprint, "
+            "status, cursor, exhausted, candidates_seen, candidates_matched, "
+            "matched_count, candidates_probed, created_at, updated_at) "
+            "VALUES (?, 'epoch', 'fingerprint', 'active', NULL, 0, 25, 25, "
+            "25, 3, ?, ?)", (work_id, now, now),
+        )
+        scan_id = int(conn.execute(
+            "SELECT id FROM bworker_scan WHERE work_id = ?", (work_id,),
+        ).fetchone()["id"])
+        conn.execute(
+            "INSERT INTO bworker_candidates (scan_id, work_id, source_id, "
+            "provider_kind, provider_remote_id, release_name, status, "
+            "created_at, updated_at) VALUES (?, ?, ?, 'vod', 'fixture-1', ?, "
+            "'pending', ?, ?)",
+            (scan_id, work_id, source_id, "Deferred Fixture 1080p", now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    page = render(movie_id)
+    check("candidate checks section renders",
+          'id="movie-candidate-checks"' in page, True)
+    check("candidate check explains a deferred candidate",
+          "Deferred Fixture 1080p" in page
+          and "probe batch limit" in page, True)
+    conn = connect()
+    try:
+        conn.execute(
+            "DELETE FROM bworker_work WHERE entity_type = 'movie' AND entity_id = ?",
+            (movie_id,),
+        )
+        conn.execute("DELETE FROM sources WHERE name = 'Checks fixture'")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_missing_movie() -> None:
     section("missing movie")
     response = CLIENT.get("/movies/999999")
@@ -577,6 +639,7 @@ def main() -> int:
         test_derived_states_and_fallback(movie_id)
         test_assets_and_responsive_css(movie_id)
         test_candidate_browser_api(movie_id)
+        test_candidate_checks(movie_id)
         test_missing_movie()
     finally:
         clear_stage(movie_id)
