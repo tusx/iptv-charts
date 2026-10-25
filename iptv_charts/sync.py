@@ -41,10 +41,10 @@ KINDS = ("live", "vod", "series")
 _ITEM_COLUMNS = (
     "(source_id, kind, remote_id, num, name, category_id, logo, epg_channel_id,"
     " container_ext, added_ts, tv_archive, rating, plot, genre, duration,"
-    " cast_list, director, release_date, youtube_trailer, tmdb_id,"
+    " cast_list, director, release_date, youtube_trailer, tmdb_id, imdb_id,"
     " request_headers)"
 )
-_ITEM_PLACEHOLDERS = "(" + ",".join("?" * 21) + ")"
+_ITEM_PLACEHOLDERS = "(" + ",".join("?" * 22) + ")"
 
 
 # ----------------------------------------------------------------------- jobs
@@ -746,6 +746,8 @@ def _sync_m3u(conn, source, job: Job) -> None:
                     "added_ts": None,
                     "tv_archive": None,
                     "category_remote_id": None,
+                    "tmdb_id": channel.tmdb_id,
+                    "imdb_id": channel.imdb_id,
                     "request_headers": _m3u_headers(channel),
                 },
                 category_id,
@@ -813,7 +815,7 @@ def _item_row(source_id: int, kind: str, item: dict, category_id: int | None) ->
         item.get("rating"), item.get("plot"), item.get("genre"),
         item.get("duration"), item.get("cast_list"), item.get("director"),
         item.get("release_date"), item.get("youtube_trailer"), item.get("tmdb_id"),
-        item.get("request_headers"),
+        item.get("imdb_id"), item.get("request_headers"),
     )
 
 

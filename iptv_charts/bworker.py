@@ -32,8 +32,8 @@ import time
 import traceback
 from typing import Any, Callable, Mapping
 
-from . import (activity_log, bworker_events, config, db, downloader, jobs,
-               library, scan, scheduler, sync)
+from . import (acquisition, activity_log, bworker_events, config, db,
+               downloader, jobs, library, scan, scheduler, sync)
 from . import bworker_store as store
 
 logger = logging.getLogger("iptv_charts.bworker")
@@ -641,29 +641,19 @@ def _work_movie_search(ctx: WorkContext) -> dict:
                   progress={"candidate_batch": _setting_int(
                       ctx.conn, "candidate_batch_size", 25, minimum=1,
                       maximum=100)})
-    result = library.search_movie(ctx.conn, movie, reason="auto")
-    download = result.get("download")
+    outcome = acquisition.run_movie_iteration(
+        ctx.conn, movie, work=ctx.work, reason="auto",
+        stop=lambda: ctx.cancelled,
+    )
+    stage = str(outcome.get("stage") or "searching_candidates")
+    message = str(outcome.get("message") or "Search finished.")
+    ctx.set_stage(stage, message, outcome.get("progress"))
+    download = outcome.get("download")
     if download:
-        download_id = int(download["id"])
-        ctx.set_download(download_id)
-        return _download_poll_outcome(ctx.conn, ctx, download_id, thing="movie")
-    interval = _search_interval_seconds(ctx.conn, ctx.work)
-    next_run = (ctx.now() + interval) if interval else None
-    queued = bool(result.get("queued"))
-    if queued:
-        ctx.set_stage("downloading", "Queued a download")
-        return {"status": "success", "stage": "downloading",
-                "message": str(result.get("message") or "Download queued."),
-                "next_run_at": ctx.now() + _poll_seconds(ctx.conn)}
-    if movie.get("file_path"):
-        stage = "awaiting_upgrade"
-        ctx.set_stage(stage, str(result.get("message") or "Checking upgrades"))
-    else:
-        stage = "no_candidates"
-        ctx.set_stage(stage, str(result.get("message") or "No candidates"))
-    return {"status": "success", "stage": stage,
-            "message": str(result.get("message") or "Search finished."),
-            "next_run_at": next_run}
+        ctx.set_download(int(download["id"]))
+        outcome["current_download_id"] = int(download["id"])
+    outcome.setdefault("status", "success")
+    return outcome
 
 
 def _work_series_search(ctx: WorkContext) -> dict:
@@ -719,24 +709,19 @@ def _work_episode_search(ctx: WorkContext) -> dict:
     label = (f"{series['title']} S{int(episode['season']):02d}"
              f"E{int(episode['episode']):02d}")
     ctx.set_stage("searching_candidates", f"Searching \"{label}\"")
-    result = library.search_series(ctx.conn, series, episode_id=episode_id,
-                                   reason="auto")
-    interval = _search_interval_seconds(ctx.conn, ctx.work)
-    next_run = (ctx.now() + interval) if interval else None
-    if int(result.get("queued") or 0) > 0:
-        ctx.set_stage("downloading", str(result.get("message") or "Download queued"))
-        return {"status": "success", "stage": "downloading",
-                "message": str(result.get("message") or "Download queued."),
-                "next_run_at": ctx.now() + _poll_seconds(ctx.conn)}
-    if episode.get("file_path"):
-        ctx.set_stage("awaiting_upgrade", str(result.get("message") or "Checking upgrades"))
-        stage = "awaiting_upgrade"
-    else:
-        ctx.set_stage("no_candidates", str(result.get("message") or "No candidates"))
-        stage = "no_candidates"
-    return {"status": "success", "stage": stage,
-            "message": str(result.get("message") or "Search finished."),
-            "next_run_at": next_run}
+    outcome = acquisition.run_episode_iteration(
+        ctx.conn, series, episode, work=ctx.work, reason="auto",
+        stop=lambda: ctx.cancelled,
+    )
+    stage = str(outcome.get("stage") or "searching_candidates")
+    message = str(outcome.get("message") or "Search finished.")
+    ctx.set_stage(stage, message, outcome.get("progress"))
+    download = outcome.get("download")
+    if download:
+        ctx.set_download(int(download["id"]))
+        outcome["current_download_id"] = int(download["id"])
+    outcome.setdefault("status", "success")
+    return outcome
 
 
 def _work_download(ctx: WorkContext) -> dict:

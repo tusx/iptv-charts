@@ -119,6 +119,11 @@ class Channel:
     duration: str | None = None
     radio: bool = False
 
+    #: Explicit provider ids when the playlist carries them. ``tvg-id`` is
+    #: often an EPG id, so it is only treated as IMDb when it has the tt form.
+    imdb_id: str | None = None
+    tmdb_id: str | None = None
+
     # Per-stream HTTP requirements. Many providers 403 without these, and mpv
     # ignores VLC's #EXTVLCOPT directives, so we extract them here and the
     # player module translates them into real mpv flags.
@@ -198,6 +203,30 @@ def _split_outside_quotes(text: str) -> tuple[str, str | None, str]:
         index += 1
 
     return text, None, ""
+
+
+_IMDB_ID_RE = re.compile(r"^(tt\d{5,12})$", re.IGNORECASE)
+_TMDB_ID_RE = re.compile(r"^\d{1,12}$")
+
+
+def _imdb_id_from_attrs(attrs: dict[str, str]) -> str | None:
+    for key in ("imdb-id", "imdb_id", "imdbid", "imdb"):
+        value = str(attrs.get(key) or "").strip()
+        match = _IMDB_ID_RE.match(value)
+        if match:
+            return match.group(1).lower()
+    # tvg-id normally identifies the EPG channel, not a movie. Accept it only
+    # in the unmistakable IMDb form.
+    match = _IMDB_ID_RE.match(str(attrs.get("tvg-id") or "").strip())
+    return match.group(1).lower() if match else None
+
+
+def _tmdb_id_from_attrs(attrs: dict[str, str]) -> str | None:
+    for key in ("tmdb-id", "tmdb_id", "tmdbid", "tmdb"):
+        value = str(attrs.get(key) or "").strip()
+        if _TMDB_ID_RE.match(value) and int(value) > 0:
+            return value
+    return None
 
 
 def _split_url_suffix(url: str) -> tuple[str, dict[str, str]]:
@@ -321,6 +350,8 @@ def parse_lines(lines: Iterable[str]) -> Iterator[Channel]:
             tvg_chno=pending.get("tvg-chno") or None,
             duration=pending_duration,
             radio=(pending.get("radio", "").lower() == "true"),
+            imdb_id=_imdb_id_from_attrs(pending),
+            tmdb_id=_tmdb_id_from_attrs(pending),
             user_agent=pending_headers.get("user_agent"),
             referrer=pending_headers.get("referrer"),
             headers=headers,

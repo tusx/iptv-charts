@@ -590,6 +590,10 @@ def search_movie(conn, movie: Mapping[str, Any], *, query: str | None = None,
                          (_now(), message, movie_id))
             conn.commit()
             return {"queued": False, "message": message, "release": pin}
+        from . import acquisition
+        evaluation = profile.evaluate(pin, movie.get("original_language"))
+        download = (acquisition.annotate_download(
+            conn, int(download["id"]), evaluation) or download)
         message = (
             f"Queued pinned {pin.get('quality_label') or pin.get('resolution') or 'release'} "
             f"from {pin.get('source_name')}."
@@ -600,19 +604,34 @@ def search_movie(conn, movie: Mapping[str, Any], *, query: str | None = None,
         logger.info("library: movie %s pinned -> download #%s", movie["title"], download["id"])
         return {"queued": True, "download": download, "release": pin, "message": message}
 
-    profile = _profile(conn, movie["quality_profile_id"])
-    candidates = matching.movie_candidates(
-        conn, movie, query_override=query, min_score=0.85 if not query else 0.45
+    if not query and reason == "auto":
+        from . import acquisition
+        outcome = acquisition.run_movie_iteration(conn, movie, reason=reason)
+        message = str(outcome.get("message") or "Search finished.")
+        conn.execute("UPDATE movies SET last_search_at = ?, search_message = ? "
+                     "WHERE id = ?", (_now(), message, movie_id))
+        conn.commit()
+        result: dict = {
+            "queued": bool(outcome.get("queued")),
+            "message": message,
+            "acquisition": outcome,
+        }
+        if outcome.get("download") is not None:
+            result["download"] = outcome["download"]
+            result["release"] = outcome.get("release")
+            logger.info("library: movie %s -> download #%s (acquisition)",
+                        movie["title"], outcome["download"].get("id"))
+            return with_alternate(result, outcome.get("release"))
+        return with_alternate(result)
+
+    from . import acquisition
+    search = acquisition.bounded_movie_search(
+        conn, movie, query=query, reason=reason,
+        min_score=0.85 if not query else 0.45,
     )
-    budget = [probe.search_budget(conn)]
-    annotated = _probe_movie_candidates(
-        conn, candidates, profile, movie.get("original_language"), budget=budget
-    ) if candidates else []
-    current = movie if movie.get("file_path") else None
-    choice = quality.choose_release(
-        annotated, profile, current=current,
-        original_language=movie.get("original_language"),
-    )
+    candidates = search["candidates"]
+    annotated = search["releases"]
+    choice = search["choice"]
     if choice is not None:
         # Candidate rows come from the catalog and may carry per-stream M3U
         # headers with provider tokens. They stay server-side.
@@ -659,6 +678,10 @@ def search_movie(conn, movie: Mapping[str, Any], *, query: str | None = None,
     download = downloader.enqueue_movie(
         conn, movie, choice, reason="upgrade" if upgrade else reason
     )
+    profile = _profile(conn, movie["quality_profile_id"])
+    evaluation = profile.evaluate(choice, movie.get("original_language"))
+    download = (acquisition.annotate_download(
+        conn, int(download["id"]), evaluation) or download)
     label = choice.get("quality_label") or choice.get("resolution") or "unknown"
     message = f"Queued {label} release from {choice['source_name']}."
     conn.execute("UPDATE movies SET last_search_at = ?, search_message = ? WHERE id = ?",
@@ -703,9 +726,13 @@ def grab_movie(conn, movie_id: int, source_id: int, remote_id: str,
     if not allowed:
         raise ValueError(f"This release is not allowed by the profile: {reason_text}")
     release["quality_label"] = _tier_label(profile, release)
-    from . import downloader
+    from . import acquisition, downloader
 
-    return downloader.enqueue_movie(conn, movie, release, reason=reason)
+    download = downloader.enqueue_movie(conn, movie, release, reason=reason)
+    evaluation = profile.evaluate(release, movie.get("original_language"))
+    download = (acquisition.annotate_download(
+        conn, int(download["id"]), evaluation) or download)
+    return download
 
 
 
@@ -1613,6 +1640,29 @@ def _probe_episode_releases(
 def search_series(conn, series: Mapping[str, Any], *, episode_id: int | None = None,
                   query: str | None = None, reason: str = "auto") -> dict:
     series_id = int(series["id"])
+    if episode_id is not None and not query and reason == "auto":
+        from . import acquisition
+        episode = get_episode(conn, int(episode_id))
+        if episode is None or int(episode["series_id"]) != series_id:
+            return {"queued": 0, "message": "That episode no longer exists."}
+        outcome = acquisition.run_episode_iteration(
+            conn, series, episode, reason=reason
+        )
+        message = str(outcome.get("message") or "Search finished.")
+        conn.execute("UPDATE series SET last_search_at = ?, search_message = ? "
+                     "WHERE id = ?", (_now(), message, series_id))
+        conn.commit()
+        result: dict = {
+            "queued": 1 if outcome.get("queued") else 0,
+            "message": message,
+            "acquisition": outcome,
+        }
+        if outcome.get("download") is not None:
+            result["download"] = outcome["download"]
+            result["release"] = outcome.get("release")
+            logger.info("library: series %s episode %s -> download #%s (acquisition)",
+                        series["title"], episode_id, outcome["download"].get("id"))
+        return result
     if not series.get("monitored") and episode_id is None:
         return {"queued": 0, "message": "This series is not monitored."}
     candidates = matching.series_candidates(
@@ -1769,10 +1819,15 @@ def grab_episode(conn, series_id: int, episode_id: int, source_id: int,
     release["quality_label"] = _tier_label(profile, release)
     if active_download(conn, episode_id=episode_id):
         raise ValueError("A download for this episode is already active.")
-    from . import downloader
+    from . import acquisition, downloader
 
-    return downloader.enqueue_episode(conn, series, episode, release,
-                                      release["provider_episode"], reason="manual")
+    download = downloader.enqueue_episode(conn, series, episode, release,
+                                          release["provider_episode"],
+                                          reason="manual")
+    evaluation = profile.evaluate(release, series.get("original_language"))
+    download = (acquisition.annotate_download(
+        conn, int(download["id"]), evaluation) or download)
+    return download
 
 
 # -------------------------------------------------------------- import/files

@@ -36,7 +36,10 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from typing import Any, Mapping
 from urllib.parse import quote
+
+from . import db
 
 #: Matches unicode word characters. Everything else is treated as a separator,
 #: which is what keeps arbitrary punctuation out of the FTS query.
@@ -186,6 +189,293 @@ def search_catalog(conn: sqlite3.Connection, kind: str, text: str, *,
         [*params, limit],
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+# --------------------------------------------------------------- identities
+#: Provider payloads are inconsistent: ids arrive as ints, numeric strings,
+#: empty placeholders or URLs. Only an unambiguous value is accepted -- an
+#: invented identity is worse than no identity because it silently wins over
+#: title matching.
+_TMDB_RE = re.compile(r"^\d{1,12}$")
+_IMDB_RE = re.compile(r"^(tt\d{5,12})$", re.IGNORECASE)
+
+
+def normalise_tmdb_id(value) -> str | None:
+    text = str(value or "").strip()
+    if not _TMDB_RE.match(text) or int(text) <= 0:
+        return None
+    return text
+
+
+def normalise_imdb_id(value) -> str | None:
+    match = _IMDB_RE.match(str(value or "").strip())
+    return match.group(1).lower() if match else None
+
+
+def identity_from_payload(payload) -> tuple[str | None, str | None]:
+    """Pull TMDB/IMDb ids out of a provider list or detail object.
+
+    Handles the shapes seen in the wild (``tmdb_id``/``tmdb``/``imdb_id``)
+    without attempting to derive an id from a title or a URL.
+    """
+    if not hasattr(payload, "get"):
+        return None, None
+    tmdb = None
+    for key in ("tmdb_id", "tmdb", "tmdbid", "themoviedb_id"):
+        tmdb = normalise_tmdb_id(payload.get(key))
+        if tmdb:
+            break
+    imdb = None
+    for key in ("imdb_id", "imdb", "imdbid"):
+        imdb = normalise_imdb_id(payload.get(key))
+        if imdb:
+            break
+    return tmdb, imdb
+
+
+def identity_match_mode(conn: sqlite3.Connection, kind: str, *,
+                        tmdb_id=None, imdb_id=None,
+                        source_id: int | None = None) -> tuple[str | None, str | None]:
+    """Resolve the highest-precedence identity that actually exists.
+
+    TMDB wins over IMDb, and IMDb wins over a title search. An id is only
+    chosen when at least one catalog row carries it, so a movie with ids the
+    provider never supplied still falls back to titles.
+    """
+    if kind not in ("live", "vod", "series"):
+        raise ValueError(f"Unknown item kind {kind!r}.")
+    tmdb = normalise_tmdb_id(tmdb_id)
+    imdb = normalise_imdb_id(imdb_id)
+    clauses = ["kind = ?"]
+    params: list = [kind]
+    if source_id is not None:
+        clauses.append("source_id = ?")
+        params.append(int(source_id))
+    where = " AND ".join(clauses)
+    if tmdb:
+        row = conn.execute(
+            f"SELECT 1 FROM items WHERE {where} AND tmdb_id = ? LIMIT 1",
+            [*params, tmdb],
+        ).fetchone()
+        if row is not None:
+            return "tmdb", tmdb
+    if imdb:
+        row = conn.execute(
+            f"SELECT 1 FROM items WHERE {where} AND imdb_id = ? LIMIT 1",
+            [*params, imdb],
+        ).fetchone()
+        if row is not None:
+            return "imdb", imdb
+    return None, None
+
+
+_CATALOG_COLUMNS = (
+    "i.id, i.source_id, i.kind, i.remote_id, i.name, i.logo, "
+    "i.container_ext, i.request_headers, i.added_ts, i.tmdb_id, i.imdb_id, "
+    "s.name AS source_name, s.kind AS source_kind"
+)
+
+
+def identity_catalog(conn: sqlite3.Connection, kind: str, match_kind: str,
+                     value: str, *, limit: int = 200,
+                     source_id: int | None = None) -> list[dict]:
+    """Catalog rows with an exact provider id (no OFFSET, bounded)."""
+    if match_kind not in ("tmdb", "imdb"):
+        raise ValueError(f"Unknown identity match kind {match_kind!r}.")
+    column = "i.tmdb_id" if match_kind == "tmdb" else "i.imdb_id"
+    params: list = [kind, str(value)]
+    clause = ""
+    if source_id is not None:
+        clause = " AND i.source_id = ?"
+        params.append(int(source_id))
+    rows = conn.execute(
+        f"""
+        SELECT {_CATALOG_COLUMNS}
+        FROM items i CROSS JOIN sources s
+        WHERE i.kind = ? AND {column} = ? AND s.id = i.source_id{clause}
+        ORDER BY i.id
+        LIMIT ?
+        """,
+        [*params, max(1, min(int(limit), 500))],
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def catalog_page(conn: sqlite3.Connection, kind: str, *,
+                 after_item_id: int | None = None,
+                 tmdb_id=None, imdb_id=None,
+                 text_queries: list[str] | tuple[str, ...] | None = None,
+                 source_id: int | None = None,
+                 limit: int = 100) -> dict:
+    """One keyset page of the whole catalog for the acquisition pipeline.
+
+    Every selector uses ``i.id > cursor ORDER BY i.id``; OFFSET never appears.
+    Identity selectors and title/FTS selectors may be combined, but the engine
+    uses one family at a time so ID matches can win outright. Rows are merged
+    and deduplicated by item id, then truncated to ``limit``.
+    """
+    if kind not in ("live", "vod", "series"):
+        raise ValueError(f"Unknown item kind {kind!r}.")
+    limit = max(1, min(int(limit), 500))
+    cursor = max(0, int(after_item_id or 0))
+    rows_by_id: dict[int, dict] = {}
+    selectors = 0
+    short_selectors = 0
+
+    def collect(sql: str, params: list) -> bool:
+        nonlocal selectors, short_selectors
+        selectors += 1
+        found = conn.execute(sql, params).fetchall()
+        if len(found) < limit:
+            short_selectors += 1
+        for row in found:
+            rows_by_id.setdefault(int(row["id"]), dict(row))
+        return len(found)
+
+    base_params = [kind, cursor]
+    source_clause = ""
+    if source_id is not None:
+        source_clause = " AND i.source_id = ?"
+    tmdb = normalise_tmdb_id(tmdb_id)
+    if tmdb:
+        params = [*base_params, *( [int(source_id)] if source_id is not None else []), tmdb, limit]
+        collect(
+            f"""
+            SELECT {_CATALOG_COLUMNS}
+            FROM items i CROSS JOIN sources s
+            WHERE i.kind = ? AND i.id > ?{source_clause}
+              AND i.tmdb_id = ? AND s.id = i.source_id
+            ORDER BY i.id LIMIT ?
+            """,
+            params,
+        )
+    imdb = normalise_imdb_id(imdb_id)
+    if imdb:
+        params = [*base_params, *( [int(source_id)] if source_id is not None else []), imdb, limit]
+        collect(
+            f"""
+            SELECT {_CATALOG_COLUMNS}
+            FROM items i CROSS JOIN sources s
+            WHERE i.kind = ? AND i.id > ?{source_clause}
+              AND i.imdb_id = ? AND s.id = i.source_id
+            ORDER BY i.id LIMIT ?
+            """,
+            params,
+        )
+
+    for text in text_queries or ():
+        fts = fts_query(str(text or ""))
+        if not fts:
+            continue
+        params = [fts, kind, cursor]
+        if source_id is not None:
+            params.append(int(source_id))
+        params.append(limit)
+        collect(
+            f"""
+            SELECT {_CATALOG_COLUMNS}
+            FROM items_fts f CROSS JOIN items i CROSS JOIN sources s
+            WHERE items_fts MATCH ? AND i.id = f.rowid AND i.kind = ?
+              AND i.id > ?{source_clause} AND s.id = i.source_id
+            ORDER BY i.id LIMIT ?
+            """,
+            params,
+        )
+
+    ordered = [rows_by_id[key] for key in sorted(rows_by_id)][:limit]
+    next_cursor = int(ordered[-1]["id"]) if ordered else (str(cursor) if cursor else None)
+    exhausted = not rows_by_id or (
+        short_selectors == selectors and len(rows_by_id) < limit
+    )
+    if not selectors:
+        exhausted = True
+    return {
+        "items": ordered,
+        "cursor": str(next_cursor) if next_cursor is not None else None,
+        "exhausted": exhausted,
+        "limit": limit,
+        "selectors": selectors,
+    }
+
+
+def apply_detail_identity(conn: sqlite3.Connection, item_id: int, *,
+                          tmdb_id=None, imdb_id=None) -> bool:
+    """Fill missing identity columns from a detail payload. Never overwrites."""
+    tmdb = normalise_tmdb_id(tmdb_id)
+    imdb = normalise_imdb_id(imdb_id)
+    if not tmdb and not imdb:
+        return False
+    row = conn.execute(
+        "SELECT tmdb_id, imdb_id FROM items WHERE id = ?", (int(item_id),)
+    ).fetchone()
+    if row is None:
+        return False
+    current_tmdb = normalise_tmdb_id(row["tmdb_id"])
+    current_imdb = normalise_imdb_id(row["imdb_id"])
+    new_tmdb = current_tmdb or tmdb
+    new_imdb = current_imdb or imdb
+    if new_tmdb == current_tmdb and new_imdb == current_imdb:
+        return False
+    conn.execute(
+        "UPDATE items SET tmdb_id = ?, imdb_id = ? WHERE id = ?",
+        (new_tmdb, new_imdb, int(item_id)),
+    )
+    conn.commit()
+    return True
+
+
+def enrich_item_identity(conn: sqlite3.Connection, item: Mapping[str, Any], *,
+                         acquire_timeout: float = 2.0) -> tuple[str | None, str | None]:
+    """Best-effort detail lookup for one Xtream item missing ids.
+
+    Called at most once per item per process by the acquisition pipeline. The
+    connection-limit acquire is short and a busy playlist simply leaves the
+    item as it was; enrichment must never fail a search.
+    """
+    from . import connections
+    from .clients import xtream
+
+    source = db.get_one(conn, "SELECT * FROM sources WHERE id = ?",
+                        (int(item["source_id"]),))
+    if source is None or source["kind"] != "xtream":
+        return None, None
+    kind = str(item["kind"])
+    if kind not in ("vod", "series"):
+        return None, None
+    tmdb = normalise_tmdb_id(item.get("tmdb_id"))
+    imdb = normalise_imdb_id(item.get("imdb_id"))
+    if tmdb and imdb:
+        return tmdb, imdb
+    try:
+        extra = json.loads(source["request_headers"] or "{}")
+    except (TypeError, ValueError):
+        extra = {}
+    try:
+        with connections.acquire(
+            conn, int(item["source_id"]), purpose="Identity metadata",
+            timeout=acquire_timeout,
+        ):
+            client = xtream.XtreamClient(
+                source["base_url"], source["username"], source["password"],
+                user_agent=extra.get("user_agent"),
+                referrer=extra.get("referrer"),
+                headers=extra.get("headers"),
+            )
+            try:
+                if kind == "vod":
+                    payload = client.vod_info(str(item["remote_id"]))
+                else:
+                    payload = client.series_info(str(item["remote_id"]))
+            finally:
+                client.close()
+    except connections.ConnectionBusy:
+        return None, None
+    except Exception:
+        return None, None
+    found_tmdb, found_imdb = xtream.detail_identity(payload)
+    apply_detail_identity(conn, int(item["id"]), tmdb_id=found_tmdb,
+                          imdb_id=found_imdb)
+    return found_tmdb or tmdb, found_imdb or imdb
 
 
 def categories_for(conn: sqlite3.Connection, source_id: int,
@@ -395,12 +685,20 @@ __all__ = [
     "DEFAULT_SORT",
     "PlaybackUnavailable",
     "SORTS",
+    "apply_detail_identity",
     "build_episode_url",
     "build_stream_url",
+    "catalog_page",
     "categories_for",
     "counts_by_kind",
+    "enrich_item_identity",
     "fts_query",
     "guess_media_type",
+    "identity_catalog",
+    "identity_from_payload",
+    "identity_match_mode",
+    "normalise_imdb_id",
+    "normalise_tmdb_id",
     "query_items",
     "resolve_series_episode",
     "search_catalog",

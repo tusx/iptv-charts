@@ -518,6 +518,59 @@ class XtreamClient:
         self.close()
 
 
+def _identity_id(value: Any) -> str | None:
+    """Return an unambiguous id, or None for placeholders and junk."""
+    text = _clean(value)
+    return text.strip() if text else None
+
+
+def _tmdb_id(value: Any) -> str | None:
+    text = _identity_id(value)
+    return text if text and text.isdigit() and int(text) > 0 else None
+
+
+def _imdb_id(value: Any) -> str | None:
+    text = _identity_id(value)
+    if text is None:
+        return None
+    lowered = text.lower()
+    if lowered.startswith("tt") and lowered[2:].isdigit() and len(lowered) >= 7:
+        return lowered
+    return None
+
+
+def _payload_identity(payload: Any) -> tuple[str | None, str | None]:
+    if not isinstance(payload, dict):
+        return None, None
+    tmdb = None
+    for key in ("tmdb_id", "tmdb", "tmdbid", "themoviedb_id"):
+        tmdb = _tmdb_id(payload.get(key))
+        if tmdb:
+            break
+    imdb = None
+    for key in ("imdb_id", "imdb", "imdbid"):
+        imdb = _imdb_id(payload.get(key))
+        if imdb:
+            break
+    return tmdb, imdb
+
+
+def detail_identity(payload: dict) -> tuple[str | None, str | None]:
+    """TMDB/IMDb ids from a get_vod_info/get_series_info response.
+
+    Panels variously place them in ``info``, ``movie_data`` or at the top
+    level. Only explicit ids are accepted; nothing is derived from a title.
+    """
+    if not isinstance(payload, dict):
+        return None, None
+    tmdb, imdb = _payload_identity(payload)
+    for key in ("info", "movie_data", "series_data"):
+        found_tmdb, found_imdb = _payload_identity(payload.get(key))
+        tmdb = tmdb or found_tmdb
+        imdb = imdb or found_imdb
+    return tmdb, imdb
+
+
 def normalise_stream(kind: str, raw: dict) -> dict:
     """Map a raw panel stream object onto our item columns.
 
@@ -542,6 +595,13 @@ def normalise_stream(kind: str, raw: dict) -> dict:
         logo = _clean(raw.get("cover")) or _clean(raw.get("stream_icon"))
         container = None
 
+    tmdb_id, imdb_id = _payload_identity(raw)
+    # Some panels nest the ids one level down even in the list payload.
+    for key in ("info", "movie_data", "series_data"):
+        nested_tmdb, nested_imdb = _payload_identity(raw.get(key))
+        tmdb_id = tmdb_id or nested_tmdb
+        imdb_id = imdb_id or nested_imdb
+
     return {
         "remote_id": remote_id,
         "name": name or "",
@@ -556,6 +616,8 @@ def normalise_stream(kind: str, raw: dict) -> dict:
         "rating": None,  # only present in detail responses
         "plot": None,
         "genre": None,
+        "tmdb_id": tmdb_id,
+        "imdb_id": imdb_id,
     }
 
 
@@ -564,6 +626,7 @@ __all__ = [
     "XtreamAuthError",
     "XtreamClient",
     "XtreamError",
+    "detail_identity",
     "normalise_base_url",
     "normalise_stream",
 ]

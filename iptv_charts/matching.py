@@ -124,6 +124,77 @@ def aliases_from_row(row: Mapping[str, Any]) -> list[str]:
     )
 
 
+def identity_match_mode(conn, row: Mapping[str, Any],
+                        kind: str) -> tuple[str | None, str | None]:
+    """Resolve TMDB -> IMDb -> title precedence for a library row.
+
+    An id only wins when the catalog actually contains it. This is the single
+    entry point used by both the manual candidate lists and the paged engine.
+    """
+    keys = row.keys() if hasattr(row, "keys") else row
+    tmdb = row["tmdb_id"] if "tmdb_id" in keys else None
+    imdb = row["imdb_id"] if "imdb_id" in keys else None
+    return items.identity_match_mode(conn, kind, tmdb_id=tmdb, imdb_id=imdb)
+
+
+def classify_catalog_row(
+    row: Mapping[str, Any],
+    *,
+    kind: str,
+    titles: Iterable[str],
+    year: int | None,
+    match_kind: str | None,
+    min_score: float,
+    identity_value: str | None = None,
+) -> dict | None:
+    """Decide whether one catalog row matches, and return its release facts.
+
+    ``match_kind`` is ``tmdb``/``imdb`` for an identity scan or ``title`` for
+    the fallback. Identity rows are authoritative; a movie row whose name is
+    clearly an episode is still skipped because M3U playlists mix episodes
+    into their VOD listing.
+    """
+    keys = row.keys() if hasattr(row, "keys") else row
+    parsed = parse_name(str(row["name"] or ""))
+    if kind == "vod" and parsed.is_episode:
+        return None
+
+    if match_kind in ("tmdb", "imdb"):
+        field = "tmdb_id" if match_kind == "tmdb" else "imdb_id"
+        value = row[field] if field in keys else None
+        if identity_value is not None:
+            normalise = (items.normalise_tmdb_id if match_kind == "tmdb"
+                         else items.normalise_imdb_id)
+            if normalise(value) != normalise(identity_value):
+                return None
+        match_score = 1.0
+    else:
+        match_kind = "title"
+        match_score = score_name(parsed, titles, year)
+        if match_score < min_score:
+            return None
+
+    return {
+        "parsed_title": parsed.title_variants[0] if parsed.title_variants else "",
+        "candidate_year": parsed.year,
+        "resolution": parsed.resolution,
+        "source": parsed.source,
+        "score": match_score,
+        "match_kind": match_kind,
+        "match_score": match_score,
+    }
+
+
+def _candidate_sort_key(candidate: Mapping[str, Any]) -> tuple:
+    priority = {"tmdb": 0, "imdb": 1, "title": 2}
+    return (
+        priority.get(str(candidate.get("match_kind") or "title"), 2),
+        -float(candidate.get("match_score") or candidate.get("score") or 0.0),
+        quality.RANK.get(candidate.get("resolution"), len(quality.RESOLUTIONS)),
+        str(candidate.get("name") or "").casefold(),
+    )
+
+
 def _extract_year(name: str) -> tuple[int | None, tuple[int, int] | None]:
     """Return (year, span to remove), preferring a parenthesised year."""
     matches = list(_YEAR_BRACKETED_RE.finditer(name))
@@ -288,31 +359,33 @@ def movie_candidates(
     min_score: float = 0.45,
     limit: int = 200,
 ) -> list[dict]:
-    """Provider VODs that plausibly correspond to one library movie."""
+    """Provider VODs that correspond to one library movie.
+
+    A free-text query keeps the user's intent and searches titles. Otherwise
+    TMDB is tried, then IMDb, and only when neither exists in the catalog does
+    the title/year/alternative-title fallback run.
+    """
     titles = aliases_from_row(movie_row)
     year = movie_row["year"] if "year" in movie_row.keys() else None
+    mode, value = (None, None)
+    if not query_override:
+        mode, value = identity_match_mode(conn, movie_row, "vod")
+    if mode:
+        rows = items.identity_catalog(conn, "vod", mode, str(value), limit=limit)
+    else:
+        rows = _catalog_rows(conn, "vod", titles,
+                             query_override=query_override, limit=limit)
     out: list[dict] = []
-    for row in _catalog_rows(conn, "vod", titles, query_override=query_override, limit=limit):
-        parsed = parse_name(row["name"])
-        if parsed.is_episode:
-            # M3U playlists represent series episodes as plain VOD rows.
+    for row in rows:
+        classified = classify_catalog_row(
+            row, kind="vod", titles=titles, year=year,
+            match_kind=mode or "title", min_score=min_score,
+            identity_value=value,
+        )
+        if classified is None:
             continue
-        score = score_name(parsed, titles, year)
-        if score < min_score:
-            continue
-        out.append({
-            **row,
-            "parsed_title": parsed.title_variants[0] if parsed.title_variants else "",
-            "candidate_year": parsed.year,
-            "resolution": parsed.resolution,
-            "source": parsed.source,
-            "score": score,
-        })
-    out.sort(key=lambda candidate: (
-        -candidate["score"],
-        quality.RANK.get(candidate["resolution"], len(quality.RESOLUTIONS)),
-        candidate["name"].casefold(),
-    ))
+        out.append({**row, **classified})
+    out.sort(key=_candidate_sort_key)
     return out
 
 
@@ -327,25 +400,25 @@ def series_candidates(
     """Provider series rows that plausibly correspond to one library series."""
     titles = aliases_from_row(series_row)
     year = series_row["year"] if "year" in series_row.keys() else None
+    mode, value = (None, None)
+    if not query_override:
+        mode, value = identity_match_mode(conn, series_row, "series")
+    if mode:
+        rows = items.identity_catalog(conn, "series", mode, str(value), limit=limit)
+    else:
+        rows = _catalog_rows(conn, "series", titles,
+                             query_override=query_override, limit=limit)
     out: list[dict] = []
-    for row in _catalog_rows(conn, "series", titles, query_override=query_override, limit=limit):
-        parsed = parse_name(row["name"])
-        score = score_name(parsed, titles, year)
-        if score < min_score:
+    for row in rows:
+        classified = classify_catalog_row(
+            row, kind="series", titles=titles, year=year,
+            match_kind=mode or "title", min_score=min_score,
+            identity_value=value,
+        )
+        if classified is None:
             continue
-        out.append({
-            **row,
-            "parsed_title": parsed.title_variants[0] if parsed.title_variants else "",
-            "candidate_year": parsed.year,
-            "resolution": parsed.resolution,
-            "source": parsed.source,
-            "score": score,
-        })
-    out.sort(key=lambda candidate: (
-        -candidate["score"],
-        quality.RANK.get(candidate["resolution"], len(quality.RESOLUTIONS)),
-        candidate["name"].casefold(),
-    ))
+        out.append({**row, **classified})
+    out.sort(key=_candidate_sort_key)
     return out
 
 
@@ -360,7 +433,9 @@ def episode_marker(name: str) -> tuple[int, int] | None:
 __all__ = [
     "ParsedName",
     "aliases_from_row",
+    "classify_catalog_row",
     "episode_marker",
+    "identity_match_mode",
     "movie_candidates",
     "parse_name",
     "score_name",
