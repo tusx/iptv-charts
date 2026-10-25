@@ -598,14 +598,11 @@ rendered pages via Flask's test client) and `tests/manager.py` (fake
 TMDB/TVDB/probes, matching, downloads/imports, scan, backup). The same runner
 also covers docs, profiles, bworker, settings sections, migration/backup,
 Explore, Import, storage, activity UI, stage history, container config and
-deploy/release scripts. The release workflow runs **every** `tests/*.py` suite
-except `tests/fixture_server.py`:
+deploy/release scripts. CI and the release workflow run the same matrix through
+the aggregate runner:
 
 ```bash
-for test in tests/*.py; do
-  case "$test" in tests/fixture_server.py) continue ;; esac
-  .venv/bin/python "$test" || exit 1
-done
+.venv/bin/python tests/run_all.py
 ```
 
 No suite touches the internet. `tests/fixture_server.py` can also be run

@@ -20,8 +20,9 @@ Triggered only by pushing a `v*` tag. It runs one job with `contents: write`:
 
 1. Checks out the tagged commit and installs `requirements.txt`.
 2. Verifies `v<__version__>` equals `github.ref_name`.
-3. Runs every `tests/*.py` suite (except `tests/fixture_server.py`, which is a
-   fixture process, not a suite).
+3. Runs the full offline test matrix through `tests/run_all.py`, which discovers
+   every standalone suite and skips support modules such as
+   `tests/fixture_server.py`.
 4. Builds `iptv-charts-<version>.tar.gz` with a single
    `iptv-charts-<version>/` root, excluding `.git`, `.venv`, `data`, `cache`,
    `dist`, `__pycache__`, `*.pyc`, `*.egg-info` and SQLite files.

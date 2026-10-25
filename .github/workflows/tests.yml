@@ -24,17 +24,5 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Smoke tests
-        run: python tests/smoke.py
-
-      - name: Integration tests
-        run: python tests/integration.py
-
-      - name: Bridge protocol tests
-        run: python tests/bridge.py
-
-      - name: End-to-end tests
-        run: python tests/endtoend.py
-
-      - name: Manager tests
-        run: python tests/manager.py
+      - name: Run every test suite
+        run: python tests/run_all.py

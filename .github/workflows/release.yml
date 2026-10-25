@@ -56,29 +56,7 @@ jobs:
           PY
 
       - name: Run every test suite
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          suites=(tests/*.py)
-          if (( ${#suites[@]} == 0 )); then
-              echo "::error::no test suites found under tests/"
-              exit 1
-          fi
-          ran=0
-          for suite in "${suites[@]}"; do
-              if [[ "$suite" == "tests/fixture_server.py" ]]; then
-                  continue
-              fi
-              echo "::group::$suite"
-              python "$suite"
-              echo "::endgroup::"
-              ran=$((ran + 1))
-          done
-          if (( ran == 0 )); then
-              echo "::error::no runnable test suites found"
-              exit 1
-          fi
-          echo "ran $ran test suites"
+        run: python tests/run_all.py
 
       - name: Build the source archive and SHA-256 checksum
         run: |
