@@ -819,47 +819,113 @@ def scan_import_all():
 
 
 # ------------------------------------------------------------------- profiles
-def _profile_values(payload: dict) -> dict:
-    raw_qualities = payload.get("qualities")
-    if raw_qualities is None:
-        raw_qualities = payload.get("resolutions")
-    return quality.validate_profile(
-        raw_qualities,
-        payload.get("cutoff"),
-        _bool(payload.get("upgrades"), True),
-        audio_mode=payload.get("audio_mode", "any"),
-        audio_languages=payload.get("audio_languages"),
-        subtitle_mode=payload.get("subtitle_mode", "any"),
-        subtitle_languages=payload.get("subtitle_languages"),
-        probe_required=_bool(payload.get("probe_required"), True),
+_PROFILE_FIELDS = (
+    "resolution", "resolution_weight", "quality_options", "video_codecs",
+    "audio_codecs", "audio_languages", "audio_channels", "subtitle_formats",
+    "subtitle_languages", "upgrades",
+)
+_BUILTIN_NAMES = frozenset(
+    spec["name"].casefold() for spec in db.BUILTIN_PROFILES
+)
+
+
+def _default_profile_key(conn) -> str:
+    return str(
+        db.get_setting(conn, "default_profile_key", db.DEFAULT_PROFILE_KEY)
+        or db.DEFAULT_PROFILE_KEY
     )
 
 
-def _store_profile(conn, profile_id: int, values: dict) -> None:
-    resolutions = list(dict.fromkeys(
-        tier["resolution"] for tier in values["qualities"]
-    ))
+def _profile_values(payload: dict, row=None) -> dict:
+    """Validate a create/update payload, merging an existing profile on PATCH."""
+    current = quality.Profile.from_row(row).to_payload() if row is not None else {}
+    data = {
+        "name": str(
+            payload.get("name") or current.get("name") or ""
+        ).strip()[:80],
+    }
+    for key in _PROFILE_FIELDS:
+        if key in payload:
+            data[key] = payload[key]
+        elif key in current:
+            data[key] = current[key]
+    if "target_score" in payload:
+        data["target_score"] = payload["target_score"]
+    elif current:
+        # An update that changes weights but omits the target keeps the
+        # current target; validation still requires it to fit the new maximum.
+        data["target_score"] = current["target_score"]
+    return quality.validate_profile(data)
+
+
+def _name_taken(conn, name: str, exclude_id: int | None = None) -> bool:
+    if name.casefold() in _BUILTIN_NAMES:
+        return True
+    sql = "SELECT id FROM quality_profiles WHERE lower(name) = lower(?)"
+    params: list = [name]
+    if exclude_id is not None:
+        sql += " AND id <> ?"
+        params.append(int(exclude_id))
+    return db.get_one(conn, sql + " LIMIT 1", tuple(params)) is not None
+
+
+def _legacy_columns(values: dict) -> tuple:
+    return (
+        json.dumps([values["resolution"]]),
+        1 if values["upgrades"] else 0,
+        json.dumps(quality.legacy_quality_list(values)),
+    )
+
+
+def _store_profile(conn, profile_id: int, values: dict, name: str) -> None:
+    resolutions, upgrades, qualities = _legacy_columns(values)
     conn.execute(
-        "UPDATE quality_profiles SET qualities = ?, resolutions = ?, cutoff = ?, "
-        "upgrades = ?, audio_mode = ?, audio_languages = ?, subtitle_mode = ?, "
-        "subtitle_languages = ?, probe_required = ? WHERE id = ?",
+        "UPDATE quality_profiles SET name = ?, resolutions = ?, cutoff = NULL, "
+        "upgrades = ?, qualities = ?, audio_mode = 'any', audio_languages = '[]', "
+        "subtitle_mode = 'any', subtitle_languages = '[]', probe_required = 1, "
+        "resolution = ?, resolution_weight = ?, target_score = ?, max_score = ?, "
+        "revision = revision + 1, updated_at = ?, criteria_json = ? WHERE id = ?",
         (
-            json.dumps(values["qualities"]), json.dumps(resolutions),
-            values["cutoff"], 1 if values["upgrades"] else 0,
-            values["audio_mode"], json.dumps(values["audio_languages"]),
-            values["subtitle_mode"], json.dumps(values["subtitle_languages"]),
-            1 if values["probe_required"] else 0, int(profile_id),
+            name, resolutions, upgrades, qualities,
+            values["resolution"], int(values["resolution_weight"]),
+            int(values["target_score"]), int(values["max_score"]),
+            int(time.time()), values["criteria_json"], int(profile_id),
         ),
     )
+
+
+def _profile_summaries(conn) -> list[dict]:
+    default_key = _default_profile_key(conn)
+    builtins = {
+        spec["builtin_key"]: index
+        for index, spec in enumerate(db.BUILTIN_PROFILES)
+    }
+    profiles = [
+        quality.profile_summary(row, default_key=default_key)
+        for row in conn.execute("SELECT * FROM quality_profiles")
+    ]
+    profiles.sort(key=lambda profile: (
+        0,
+        builtins.get(profile.get("builtin_key"), len(builtins)),
+        profile["name"].casefold(),
+    ) if profile.get("is_builtin") else (
+        1, 0, profile["name"].casefold(),
+    ))
+    if profiles and not any(profile.get("is_default") for profile in profiles):
+        fallback = quality.find_default_profile(profiles, default_key)
+        if isinstance(fallback, dict):
+            fallback["is_default"] = True
+    return profiles
 
 
 @bp.get("/quality-profiles")
 def quality_profiles():
     conn = _conn()
-    rows = [quality.profile_summary(row) for row in conn.execute(
-        "SELECT * FROM quality_profiles ORDER BY id"
-    )]
-    return jsonify({"ok": True, "profiles": rows})
+    return jsonify({
+        "ok": True,
+        "profiles": _profile_summaries(conn),
+        "default_profile_key": _default_profile_key(conn),
+    })
 
 
 @bp.post("/quality-profiles")
@@ -871,30 +937,37 @@ def create_profile():
         if not name:
             return _fail("Give the profile a name.")
         values = _profile_values(payload)
-        resolutions = list(dict.fromkeys(
-            tier["resolution"] for tier in values["qualities"]
-        ))
+        if _name_taken(conn, name):
+            return _fail("A profile with that name already exists.", 409)
+        resolutions, upgrades, qualities = _legacy_columns(values)
+        now = int(time.time())
         try:
             cursor = conn.execute(
                 "INSERT INTO quality_profiles "
                 "(name, resolutions, cutoff, upgrades, qualities, audio_mode, "
-                "audio_languages, subtitle_mode, subtitle_languages, probe_required, "
-                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "audio_languages, subtitle_mode, subtitle_languages, "
+                "probe_required, created_at, resolution, resolution_weight, "
+                "target_score, max_score, revision, updated_at, criteria_json) "
+                "VALUES (?, ?, NULL, ?, ?, 'any', '[]', 'any', '[]', 1, ?, ?, ?, ?, ?, 1, ?, ?)",
                 (
-                    name, json.dumps(resolutions), values["cutoff"],
-                    1 if values["upgrades"] else 0,
-                    json.dumps(values["qualities"]), values["audio_mode"],
-                    json.dumps(values["audio_languages"]), values["subtitle_mode"],
-                    json.dumps(values["subtitle_languages"]),
-                    1 if values["probe_required"] else 0, int(time.time()),
+                    name, resolutions, upgrades, qualities, now,
+                    values["resolution"], int(values["resolution_weight"]),
+                    int(values["target_score"]), int(values["max_score"]),
+                    now, values["criteria_json"],
                 ),
             )
             conn.commit()
         except sqlite3.IntegrityError:
+            conn.rollback()
             return _fail("A profile with that name already exists.", 409)
         row = db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?",
                          (cursor.lastrowid,))
-        return jsonify({"ok": True, "profile": quality.profile_summary(row)}), 201
+        return jsonify({
+            "ok": True,
+            "profile": quality.profile_summary(
+                row, default_key=_default_profile_key(conn)
+            ),
+        }), 201
     except Exception as exc:
         return _error(exc)
 
@@ -904,34 +977,32 @@ def edit_profile(profile_id: int):
     conn = _conn()
     try:
         payload = _payload()
-        row = db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?", (profile_id,))
+        row = db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?",
+                         (profile_id,))
         if row is None:
             return _fail("That profile no longer exists.", 404)
-        current = quality.profile_summary(row)
+        if row["is_builtin"]:
+            return _fail("Built-in profiles cannot be edited.", 409)
+        values = _profile_values(payload, row)
         name = str(payload.get("name") or row["name"]).strip()[:80]
-        values = _profile_values({
-            "qualities": payload.get("qualities", current["qualities"]),
-            "cutoff": payload.get("cutoff", current["cutoff"]),
-            "upgrades": payload.get("upgrades", current["upgrades"]),
-            "audio_mode": payload.get("audio_mode", current["audio_mode"]),
-            "audio_languages": payload.get("audio_languages", current["audio_languages"]),
-            "subtitle_mode": payload.get("subtitle_mode", current["subtitle_mode"]),
-            "subtitle_languages": payload.get(
-                "subtitle_languages", current["subtitle_languages"]
-            ),
-            "probe_required": payload.get("probe_required", current["probe_required"]),
-        })
+        if not name:
+            return _fail("Give the profile a name.")
+        if _name_taken(conn, name, exclude_id=profile_id):
+            return _fail("A profile with that name already exists.", 409)
         try:
-            conn.execute("UPDATE quality_profiles SET name = ? WHERE id = ?",
-                         (name, profile_id))
-            _store_profile(conn, profile_id, values)
+            _store_profile(conn, profile_id, values, name)
             conn.commit()
         except sqlite3.IntegrityError:
             conn.rollback()
             return _fail("A profile with that name already exists.", 409)
         updated = db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?",
                              (profile_id,))
-        return jsonify({"ok": True, "profile": quality.profile_summary(updated)})
+        return jsonify({
+            "ok": True,
+            "profile": quality.profile_summary(
+                updated, default_key=_default_profile_key(conn)
+            ),
+        })
     except Exception as exc:
         return _error(exc)
 
@@ -939,9 +1010,12 @@ def edit_profile(profile_id: int):
 @bp.delete("/quality-profiles/<int:profile_id>")
 def delete_profile(profile_id: int):
     conn = _conn()
-    row = db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?", (profile_id,))
+    row = db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?",
+                     (profile_id,))
     if row is None:
         return _fail("That profile no longer exists.", 404)
+    if row["is_builtin"]:
+        return _fail("Built-in profiles cannot be deleted.", 409)
     used = db.get_one(
         conn,
         "SELECT (SELECT COUNT(*) FROM movies WHERE quality_profile_id = ?) + "

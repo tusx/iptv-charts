@@ -2,13 +2,14 @@
 {% block title %}Quality profiles · {{ app_name }}{% endblock %}
 
 {% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/profiles.css') }}">
 <section class="page-head">
   <div>
     <p class="crumb"><a href="{{ url_for('settings') }}">Settings</a> / Quality profiles</p>
     <h1>Quality profiles</h1>
     <p class="subtitle">
-      Choose the quality hierarchy, which sources are acceptable, and what the
-      stream probe must find before a download is allowed.
+      Each profile requires one resolution and at least one quality/source.
+      Optional weights refine the score; they never reject a release on their own.
     </p>
   </div>
   <div class="page-actions">
@@ -17,56 +18,89 @@
 </section>
 <p class="hint" id="profile-status" role="status"></p>
 
-<div class="table-wrap">
-  <table class="data-table">
-    <thead>
-      <tr>
-        <th>Name</th>
-        <th>Quality hierarchy (best first)</th>
-        <th>Audio</th>
-        <th>Subtitles</th>
-        <th>Cutoff</th>
-        <th>Used by</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for profile in profiles %}
-        <tr>
-          <td><strong>{{ profile.name }}</strong></td>
-          <td>
-            {% for tier in profile.qualities %}
-              <span class="quality-chip">{{ tier.name }}</span>{% if not loop.last %} <span class="muted">→</span> {% endif %}
-            {% endfor %}
-          </td>
-          <td>
-            {% if profile.audio_mode == 'original' %}Original language
-            {% elif profile.audio_mode == 'single' %}Single track
-            {% elif profile.audio_mode == 'multi' %}Multiple tracks
-            {% else %}Any{% endif %}
-            {% if profile.audio_languages %}
-              <span class="muted small">({{ profile.audio_languages|join(', ') }})</span>
+<div class="profile-grid">
+  {% for profile in profiles %}
+    <article class="profile-card{% if profile.is_default %} is-default{% endif %}"
+             data-profile-card="{{ profile.id }}">
+      <header class="profile-card-head">
+        <div>
+          <h2>{{ profile.name }}</h2>
+          <p class="profile-badges">
+            {% if profile.is_builtin %}
+              <span class="badge badge-lock">Built-in · Locked</span>
+            {% else %}
+              <span class="badge">Custom</span>
             {% endif %}
-          </td>
-          <td>
-            {% if profile.subtitle_mode == 'required' %}Required
-            {% elif profile.subtitle_mode == 'none' %}Not allowed
-            {% else %}Any{% endif %}
-            {% if profile.subtitle_languages %}
-              <span class="muted small">({{ profile.subtitle_languages|join(', ') }})</span>
+            {% if profile.is_default %}
+              <span class="badge badge-default">Default</span>
             {% endif %}
-          </td>
-          <td>{{ profile.cutoff or '—' }}</td>
-          <td>{{ usage.get(profile.id, 0) }}</td>
-          <td class="row-actions">
+            <span class="badge badge-quiet">Revision {{ profile.revision }}</span>
+          </p>
+        </div>
+        {% if not profile.is_builtin %}
+          <div class="row-actions">
             <button class="btn btn-sm" type="button" data-edit-profile="{{ profile.id }}">Edit</button>
             <button class="btn btn-sm btn-danger" type="button" data-delete-profile="{{ profile.id }}"
-                    {% if usage.get(profile.id, 0) or profiles|length <= 1 %}disabled{% endif %}>Delete</button>
-          </td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+                    {% if usage.get(profile.id, 0) %}disabled title="Reassign its movies and series first"{% endif %}>Delete</button>
+          </div>
+        {% endif %}
+      </header>
+
+      <dl class="profile-facts">
+        <div>
+          <dt>Resolution</dt>
+          <dd>{{ profile.resolution or 'None' }} <span class="weight">+{{ profile.resolution_weight }}</span></dd>
+        </div>
+        <div>
+          <dt>Target / Max</dt>
+          <dd><strong>{{ profile.target_score }}</strong> / {{ profile.max_score }}</dd>
+        </div>
+        <div>
+          <dt>Upgrades</dt>
+          <dd>{{ 'On' if profile.upgrades else 'Off' }}</dd>
+        </div>
+        <div>
+          <dt>Used by</dt>
+          <dd>{{ usage.get(profile.id, 0) }}</dd>
+        </div>
+      </dl>
+
+      <div class="profile-section-block">
+        <h3>Quality / source <span class="muted small">required</span></h3>
+        <div class="quality-chips">
+          {% for option in profile.quality_options %}
+            <span class="quality-chip">{{ option.label }} <span class="weight">+{{ option.weight }}</span></span>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="profile-section-block">
+        <h3>Optional weights</h3>
+        {% set has_optional = [] %}
+        {% for section in schema.sections %}
+          {% set choices = profile[section.key] %}
+          {% if choices %}
+            {% set _ = has_optional.append(section.key) %}
+            <p class="profile-optional-row">
+              <span class="muted">{{ section.label }}:</span>
+              {% for option in choices %}
+                <span class="quality-chip">{{ option.label }} <span class="weight">+{{ option.weight }}</span></span>
+              {% endfor %}
+            </p>
+          {% endif %}
+        {% endfor %}
+        {% if not has_optional %}
+          <p class="muted small">None. The score is the mandatory base only.</p>
+        {% endif %}
+      </div>
+
+      {% if profile.is_builtin %}
+        <p class="profile-lock-note">
+          Built-in defaults are read-only. Create a custom profile if you need different weights.
+        </p>
+      {% endif %}
+    </article>
+  {% endfor %}
 </div>
 
 <dialog class="dialog dialog-wide" id="profile-dialog">
@@ -77,76 +111,75 @@
   <div class="dialog-body profile-editor">
     <label class="field">
       <span>Name</span>
-      <input type="text" id="profile-name" maxlength="80" placeholder="4K WEB-DL">
+      <input type="text" id="profile-name" maxlength="80" placeholder="1080p WEB-DL">
     </label>
+
+    <div class="field-row profile-resolution-row">
+      <label class="field">
+        <span>Required resolution</span>
+        <select id="profile-resolution"></select>
+      </label>
+      <label class="field field-narrow">
+        <span>Resolution weight</span>
+        <input type="number" id="profile-resolution-weight" min="1" max="1000" step="1" value="10">
+      </label>
+    </div>
 
     <div class="field">
-      <span>Quality hierarchy <small class="muted">— best first. A source restriction applies to that tier only.</small></span>
-      <div class="tier-list" id="profile-tiers"></div>
-      <button class="btn btn-sm" type="button" id="profile-add-tier">Add quality tier</button>
+      <span>Quality / source options <small class="muted">— at least one; best first</small></span>
+      <div class="option-list" id="profile-quality-list"></div>
+      <div class="option-add-row">
+        <select id="profile-quality-select" aria-label="Add quality/source option"></select>
+        <button class="btn btn-sm" type="button" id="profile-quality-add">Add quality</button>
+      </div>
+      <p class="hint">Move options with the arrow buttons or drag a row. The best matching source adds its weight.</p>
     </div>
 
-    <div class="field-row">
+    <div class="optional-sections">
+      {% for section in schema.sections %}
+        <details class="profile-optional" data-section="{{ section.key }}">
+          <summary>
+            <span>{{ section.label }}</span>
+            <span class="muted small" data-section-count="{{ section.key }}">None</span>
+          </summary>
+          <div class="optional-body">
+            <div class="option-list" data-option-list="{{ section.key }}"></div>
+            <div class="option-add-row">
+              <select data-option-select="{{ section.key }}" aria-label="Add {{ section.label }} option"></select>
+              <button class="btn btn-sm" type="button" data-option-add="{{ section.key }}">Add option</button>
+            </div>
+            <p class="hint">
+              {% if section.kind == 'exclusive' %}
+                Only the best matching option in this section adds its weight.
+              {% else %}
+                Each unique matching option adds its weight.
+              {% endif %}
+            </p>
+          </div>
+        </details>
+      {% endfor %}
+    </div>
+
+    <div class="field-row profile-score-row">
       <label class="field">
-        <span>Upgrade until (cutoff)</span>
-        <select id="profile-cutoff"></select>
+        <span>Target score <small class="muted">— minimum for complete</small></span>
+        <input type="number" id="profile-target" min="20" step="1" value="20">
       </label>
-      <label class="check check-tall">
-        <input type="checkbox" id="profile-upgrades" checked>
-        Allow upgrades when a better release appears
-      </label>
+      <div class="field field-narrow">
+        <span>Maximum score</span>
+        <strong class="profile-max" id="profile-max-score">20</strong>
+      </div>
     </div>
-
-    <fieldset class="profile-fieldset">
-      <legend>Audio</legend>
-      <div class="field-row">
-        <label class="field">
-          <span>Requirement</span>
-          <select id="profile-audio-mode">
-            <option value="any">Any audio</option>
-            <option value="original">Original language audio</option>
-            <option value="single">Single audio track</option>
-            <option value="multi">Multiple audio tracks</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Also require a language <small class="muted">(any of)</small></span>
-          <select id="profile-audio-languages" multiple size="5"></select>
-        </label>
-      </div>
-    </fieldset>
-
-    <fieldset class="profile-fieldset">
-      <legend>Subtitles</legend>
-      <div class="field-row">
-        <label class="field">
-          <span>Requirement</span>
-          <select id="profile-subtitle-mode">
-            <option value="any">Any / do not care</option>
-            <option value="required">Subtitles required</option>
-            <option value="none">No subtitle tracks</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Required language <small class="muted">(any of)</small></span>
-          <select id="profile-subtitle-languages" multiple size="5"></select>
-        </label>
-      </div>
-      <p class="hint">
-        Language checks use embedded stream tags reported by ffprobe. Burned-in
-        subtitles cannot be detected. “Original” follows the movie/series original language.
-      </p>
-    </fieldset>
+    <p class="score-line" id="profile-score-line">Target 20 / Max 20</p>
+    <p class="hint">
+      A lower-resolution fallback can be eligible but never counts as complete.
+      When the target is met at the exact resolution, no upgrade is queued.
+    </p>
 
     <label class="check">
-      <input type="checkbox" id="profile-probe-required" checked>
-      Require a successful stream probe before automatic download
+      <input type="checkbox" id="profile-upgrades" checked>
+      Allow a lower-resolution fallback while a better release is unavailable
     </label>
-    <p class="hint">
-      Probing uses ffprobe on the provider URL. The download starts only when the
-      real resolution, source and stream tracks satisfy this profile. Probing
-      counts against the playlist connection limit.
-    </p>
     <p class="hint" id="profile-dialog-status" role="status"></p>
   </div>
   <div class="dialog-foot">
@@ -154,18 +187,14 @@
     <button class="btn btn-primary" type="button" id="profile-save">Save profile</button>
   </div>
 </dialog>
-
-<script>
-  window.PROFILES = {{ profiles|tojson }};
-  window.RESOLUTIONS = {{ resolutions|tojson }};
-  window.SOURCES = {{ sources|tojson }};
-  window.LANGUAGES = {{ languages|tojson }};
-  window.AUDIO_MODES = {{ audio_modes|tojson }};
-  window.SUBTITLE_MODES = {{ subtitle_modes|tojson }};
-</script>
 {% endblock %}
 
 {% block scripts %}
+<script>
+  window.PROFILE_SCHEMA = {{ schema|tojson }};
+  window.PROFILES = {{ profiles|tojson }};
+  window.DEFAULT_PROFILE_KEY = {{ default_profile_key|tojson }};
+</script>
 <script src="{{ url_for('static', filename='js/manager.js') }}"></script>
 <script src="{{ url_for('static', filename='js/profiles.js') }}"></script>
 {% endblock %}

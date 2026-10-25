@@ -185,7 +185,33 @@ def series_templates(conn) -> dict[str, str]:
 
 
 def default_profile_id(conn) -> int | None:
-    row = db.get_one(conn, "SELECT id FROM quality_profiles ORDER BY id LIMIT 1")
+    """The profile new movies/series use, from ``default_profile_key``.
+
+    The 0.8.0 default is the builtin 1080p profile. Older code chose the
+    lowest row id; that happened to be 1080p on a fresh v5 database but was
+    wrong on upgraded or repaired databases, so read the setting and fall back
+    defensively instead.
+    """
+    key = str(
+        db.get_setting(conn, "default_profile_key", db.DEFAULT_PROFILE_KEY)
+        or db.DEFAULT_PROFILE_KEY
+    ).strip()
+    for candidate in dict.fromkeys((key, db.DEFAULT_PROFILE_KEY)):
+        row = db.get_one(
+            conn, "SELECT id FROM quality_profiles WHERE builtin_key = ?",
+            (candidate,),
+        )
+        if row is not None:
+            return int(row["id"])
+    row = db.get_one(
+        conn,
+        "SELECT id FROM quality_profiles WHERE is_builtin = 1 "
+        "ORDER BY CASE builtin_key WHEN '1080p' THEN 0 ELSE 1 END, id LIMIT 1",
+    )
+    if row is None:
+        row = db.get_one(
+            conn, "SELECT id FROM quality_profiles ORDER BY id LIMIT 1"
+        )
     return int(row["id"]) if row else None
 
 

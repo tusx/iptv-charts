@@ -8,7 +8,7 @@ from datetime import date, timedelta
 
 from flask import Blueprint, abort, g, redirect, render_template, request, url_for
 
-from . import config, db, languages, library, metadata, quality, scan, scheduler
+from . import config, db, library, metadata, quality, scan, scheduler
 
 bp = Blueprint("manager", __name__)
 
@@ -20,11 +20,36 @@ def _conn():
 
 
 def _profiles(conn) -> list[dict]:
-    return [
-        quality.profile_summary(row) for row in conn.execute(
-            "SELECT * FROM quality_profiles ORDER BY id"
-        )
+    """Profiles in display order, with the configured default marked.
+
+    Builtins come first (4K, 1080p, 720p), then custom profiles. Add and
+    import dialogs preselect the ``is_default`` row, which is the one named by
+    ``settings.default_profile_key`` rather than the lowest id.
+    """
+    default_key = str(
+        db.get_setting(conn, "default_profile_key", db.DEFAULT_PROFILE_KEY)
+        or db.DEFAULT_PROFILE_KEY
+    )
+    builtins = {
+        spec["builtin_key"]: index
+        for index, spec in enumerate(db.BUILTIN_PROFILES)
+    }
+    profiles = [
+        quality.profile_summary(row, default_key=default_key)
+        for row in conn.execute("SELECT * FROM quality_profiles")
     ]
+    profiles.sort(key=lambda profile: (
+        0,
+        builtins.get(profile.get("builtin_key"), len(builtins)),
+        profile["name"].casefold(),
+    ) if profile.get("is_builtin") else (
+        1, 0, profile["name"].casefold(),
+    ))
+    if profiles and not any(profile.get("is_default") for profile in profiles):
+        fallback = quality.find_default_profile(profiles, default_key)
+        if isinstance(fallback, dict):
+            fallback["is_default"] = True
+    return profiles
 
 
 def _media_context() -> dict:
@@ -375,7 +400,7 @@ def _cutoff_movies(conn) -> list[dict]:
         "ORDER BY title COLLATE NOCASE"
     ):
         profile = profiles.get(row["quality_profile_id"])
-        if profile and profile.upgrades and not profile.cutoff_met(row["resolution"]):
+        if profile and profile.upgrades and not profile.cutoff_met(row):
             item = dict(row)
             item["poster"] = metadata.image_url("w92", item.get("poster_path"))
             out.append(item)
@@ -399,7 +424,7 @@ def _cutoff_episodes(conn) -> list[dict]:
         """
     ):
         profile = series_profiles.get(row["series_id"])
-        if profile and profile.upgrades and not profile.cutoff_met(row["resolution"]):
+        if profile and profile.upgrades and not profile.cutoff_met(row):
             out.append(dict(row))
     return out
 
@@ -494,11 +519,11 @@ def profiles_page():
         "profiles.html",
         profiles=profiles,
         usage=usage,
-        resolutions=quality.RESOLUTIONS,
-        sources=quality.SOURCE_CHOICES,
-        audio_modes=quality.AUDIO_MODES,
-        subtitle_modes=quality.SUBTITLE_MODES,
-        languages=languages.COMMON_LANGUAGES,
+        schema=quality.builder_schema(),
+        default_profile_key=str(
+            db.get_setting(conn, "default_profile_key", db.DEFAULT_PROFILE_KEY)
+            or db.DEFAULT_PROFILE_KEY
+        ),
     )
 
 

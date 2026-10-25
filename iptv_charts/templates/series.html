@@ -79,7 +79,7 @@
         <span>Quality profile</span>
         <select id="series-profile">
           {% for profile in profiles %}
-            <option value="{{ profile.id }}">{{ profile.name }} ({{ profile.resolutions|join(', ') }})</option>
+            <option value="{{ profile.id }}" {% if profile.is_default %}selected{% endif %}>{{ profile.name }} ({{ profile.resolutions|join(', ') }})</option>
           {% endfor %}
         </select>
       </label>
