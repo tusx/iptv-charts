@@ -4,7 +4,7 @@
   'use strict';
 
   const {
-    $, get, post, patch, del, setStatus, debounce, element, open, close, feedback,
+    $, $$, get, post, patch, del, setStatus, debounce, element, open, close, feedback,
   } = Manager;
 
   const movieId = window.MOVIE_ID;
@@ -19,7 +19,84 @@
   const candidateFilterStatus = $('#candidate-filter-status');
   let releaseToken = 0;
 
-  async function action(button, fn, message) {
+  // ------------------------------------------------------- stage / history
+  // Both panels are server-rendered, so the tabs only reveal markup that is
+  // already on the page: switching never leaves an empty card while fetching.
+  const stageTabs = $$('[data-stage-tab]');
+  const stagePanels = $$('[data-stage-panel]');
+
+  function activateStageTab(name, focus = false) {
+    stageTabs.forEach((tab) => {
+      const active = tab.dataset.stageTab === name;
+      tab.classList.toggle('is-active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+      tab.tabIndex = active ? 0 : -1;
+      if (active && focus) tab.focus();
+    });
+    stagePanels.forEach((panel) => {
+      panel.hidden = panel.dataset.stagePanel !== name;
+    });
+  }
+
+  stageTabs.forEach((tab) => {
+    tab.addEventListener('click', () => activateStageTab(tab.dataset.stageTab));
+    tab.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      const index = stageTabs.indexOf(tab);
+      const next = event.key === 'ArrowRight'
+        ? stageTabs[(index + 1) % stageTabs.length]
+        : stageTabs[(index - 1 + stageTabs.length) % stageTabs.length];
+      activateStageTab(next.dataset.stageTab, true);
+    });
+  });
+  if (window.location.hash === '#movie-stage-history') {
+    activateStageTab('history');
+  }
+
+  $('#movie-stage-refresh')?.addEventListener('click', () => window.location.reload());
+
+  // A04 may expose /api/movies/<id>/stage. When it is present the server
+  // renders MOVIE_STAGE_URL; poll it and reload only when the durable stage,
+  // status, score, progress or newest event actually changed. Without the
+  // endpoint the server-rendered card plus the action reloads are the refresh
+  // path, and no request is made.
+  if (window.MOVIE_STAGE_URL) {
+    let signature = window.MOVIE_STAGE_SIGNATURE || '';
+    const stageSignature = (data) => {
+      if (!data || typeof data !== 'object') return '';
+      const context = typeof data.stage === 'string'
+        ? data
+        : (data.stage_context || data.context || data.data || {});
+      const events = context.events || [];
+      const progress = context.progress || {};
+      const work = context.work || {};
+      return [
+        context.stage || work.stage || '',
+        context.status || work.status || '',
+        context.message || '',
+        context.best_score ?? work.best_score ?? '',
+        progress.text || '',
+        events.length ? (events[0].id || '') : '',
+      ].join('|');
+    };
+    window.setInterval(async () => {
+      if (document.hidden) return;
+      try {
+        const data = await get(window.MOVIE_STAGE_URL);
+        const next = stageSignature(data);
+        if (next && next !== signature) {
+          signature = next;
+          window.location.reload();
+        }
+      } catch (error) {
+        // Keep the server render; a missing endpoint or a transient read
+        // error must never make the detail page spin or go blank.
+      }
+    }, 15000);
+  }
+
+  async function action(button, fn, message, { reload = false } = {}) {
     const original = button.textContent;
     button.disabled = true;
     button.textContent = 'Working…';
@@ -27,7 +104,7 @@
     try {
       const result = await fn();
       setStatus(status, result?.message || message, 'ok');
-      if (result?.queued || result?.download) {
+      if (reload || result?.queued || result?.download) {
         window.setTimeout(() => window.location.reload(), 700);
       }
     } catch (error) {
@@ -39,11 +116,13 @@
   }
 
   $('#movie-search-now')?.addEventListener('click', (event) => {
-    action(event.currentTarget, () => post(`/api/movies/${movieId}/search`), 'Search finished.');
+    action(event.currentTarget, () => post(`/api/movies/${movieId}/search`),
+      'Search finished.', { reload: true });
   });
 
   $('#movie-refresh')?.addEventListener('click', (event) => {
-    action(event.currentTarget, () => post(`/api/movies/${movieId}/refresh`), 'Metadata refreshed.');
+    action(event.currentTarget, () => post(`/api/movies/${movieId}/refresh`),
+      'Metadata refreshed.', { reload: true });
   });
 
   $('#movie-edit-form')?.addEventListener('submit', async (event) => {
@@ -288,6 +367,132 @@
     });
 
     row.append(main, badge, grab);
+    return row;
+  }
+
+  // ------------------------------------------------------- manual metadata
+  const metadataDialog = $('#movie-metadata-dialog');
+  const metadataQuery = $('#movie-metadata-query');
+  const metadataYear = $('#movie-metadata-year');
+  const metadataStatus = $('#movie-metadata-status');
+  const metadataResults = $('#movie-metadata-results');
+  let metadataToken = 0;
+
+  function openManualMetadata() {
+    if (!metadataDialog) return;
+    open(metadataDialog);
+    if (!metadataResults.childElementCount) searchMetadata();
+  }
+
+  $('#movie-manual-metadata')?.addEventListener('click', openManualMetadata);
+  $('#movie-metadata-search')?.addEventListener('click', () => searchMetadata());
+  metadataQuery?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      searchMetadata();
+    }
+  });
+  metadataYear?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      searchMetadata();
+    }
+  });
+  const debouncedMetadataSearch = debounce(() => searchMetadata(), 450);
+  metadataQuery?.addEventListener('input', debouncedMetadataSearch);
+
+  async function searchMetadata() {
+    const query = metadataQuery.value.trim();
+    if (!query) {
+      setStatus(metadataStatus, 'Type a title to search TMDB.', 'bad');
+      metadataQuery.focus();
+      return;
+    }
+    const request = ++metadataToken;
+    const year = metadataYear.value.trim();
+    const params = new URLSearchParams({ q: query });
+    if (year) params.set('year', year);
+    metadataResults.replaceChildren(element('p', 'muted', 'Searching TMDB…'));
+    setStatus(metadataStatus, '');
+    try {
+      const data = await get(
+        `/api/import/metadata/movies/${movieId}/search?${params.toString()}`);
+      if (request !== metadataToken) return;
+      metadataResults.replaceChildren();
+      if (!data.results.length) {
+        metadataResults.append(element('p', 'muted',
+          'No TMDB matches. Try a different title or clear the year.'));
+        return;
+      }
+      data.results.forEach((result) => metadataResults.append(
+        renderMetadataResult(result)));
+    } catch (error) {
+      if (request !== metadataToken) return;
+      metadataResults.replaceChildren();
+      setStatus(metadataStatus, error.message, 'bad');
+    }
+  }
+
+  function renderMetadataResult(result) {
+    const row = element('article', 'metadata-result');
+    const posterBox = element('div', 'metadata-poster');
+    if (result.poster) {
+      const image = document.createElement('img');
+      image.src = result.poster;
+      image.alt = '';
+      image.loading = 'lazy';
+      posterBox.append(image);
+    } else {
+      posterBox.append(element('span', 'poster-fallback',
+        (result.title || result.name || '?').slice(0, 1).toUpperCase()));
+    }
+
+    const body = element('div', 'metadata-result-body');
+    const title = result.title || result.name || 'Untitled';
+    body.append(element('strong', '', `${title}${result.year ? ` (${result.year})` : ''}`));
+    const bits = [];
+    if (result.original_title && result.original_title !== title) {
+      bits.push(result.original_title);
+    }
+    if (result.kind) bits.push(result.kind === 'movie' ? 'Movie' : 'Series');
+    if (bits.length) body.append(element('span', 'muted small', bits.join(' · ')));
+    if (result.overview) {
+      body.append(element('p', 'metadata-overview', result.overview));
+    }
+    const isCurrent = result.in_library
+      && Number(result.library_id) === Number(movieId);
+    if (result.in_library && !isCurrent) {
+      body.append(element('span', 'queue-error small',
+        `Already in the library as “${result.library_title}”.`));
+    } else if (isCurrent) {
+      body.append(element('span', 'hint',
+        'This is the current TMDB identity; using it refreshes the metadata.'));
+    }
+
+    const use = element('button', 'btn btn-primary btn-sm', isCurrent ? 'Refresh' : 'Use this');
+    use.type = 'button';
+    use.disabled = Boolean(result.in_library && !isCurrent);
+    if (use.disabled) {
+      use.title = 'That TMDB item is already attached to another library entry.';
+    }
+    use.addEventListener('click', async () => {
+      use.disabled = true;
+      use.textContent = 'Applying…';
+      try {
+        const applied = await post(`/api/import/metadata/movies/${movieId}`, {
+          tmdb_id: result.tmdb_id,
+        });
+        setStatus(metadataStatus,
+          applied.warning || 'Metadata updated. Reloading…', 'ok');
+        window.setTimeout(() => window.location.reload(), 700);
+      } catch (error) {
+        setStatus(metadataStatus, error.message, 'bad');
+        use.disabled = false;
+        use.textContent = isCurrent ? 'Refresh' : 'Use this';
+      }
+    });
+
+    row.append(posterBox, body, use);
     return row;
   }
 

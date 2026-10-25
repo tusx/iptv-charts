@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% from "_macros.html" import poster, status_badge, progress, library_nav %}
+{% from "_macros.html" import poster, status_badge, progress, library_nav, icon %}
 {% block title %}{{ movie.title }} · {{ app_name }}{% endblock %}
 
 {% block content %}
-<section class="detail-page">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/movie_detail.css') }}">
+<section class="detail-page movie-detail-page">
   <p class="crumb"><a href="{{ url_for('manager.movies') }}">Movies</a> / {{ movie.title }}</p>
   {{ library_nav('movies', 'library') }}
 
@@ -34,10 +35,14 @@
         {% endif %}
       </div>
       <div class="detail-actions">
-        <button class="btn btn-primary" id="movie-search-now" type="button">Search now</button>
-        <button class="btn" id="movie-manual-search" type="button">Manual search</button>
-        <button class="btn btn-ghost" id="movie-refresh" type="button">Refresh metadata</button>
-        <button class="btn btn-danger" id="movie-delete" type="button">Delete</button>
+        <button class="btn btn-primary" id="movie-search-now" type="button">{{ icon('magnifying-glass') }} Search now</button>
+        <button class="btn" id="movie-manual-search" type="button">{{ icon('list-check') }} Manual search</button>
+        <button class="btn btn-ghost" id="movie-refresh" type="button">{{ icon('rotate') }} Refresh metadata</button>
+        <button class="btn btn-ghost" id="movie-manual-metadata" type="button"
+                {% if not tmdb_configured %}disabled title="Add a TMDB token on the settings page first"{% endif %}>
+          {{ icon('pen-to-square') }} Manual metadata
+        </button>
+        <button class="btn btn-danger" id="movie-delete" type="button">{{ icon('trash-can') }} Delete</button>
       </div>
       <p class="hint" id="movie-action-status" role="status"></p>
       {% if movie.search_message %}
@@ -46,10 +51,136 @@
     </div>
   </div>
 
+  {# -------------------------------------------------------- current stage #}
+  <section class="detail-panel movie-stage-card" id="movie-stage-card"
+           data-stage="{{ stage.stage }}"
+           data-stage-status="{{ stage.status }}"
+           data-stage-signature="{{ stage.signature }}">
+    <div class="stage-head">
+      <div class="stage-head-main">
+        <p class="stage-eyebrow">{{ icon('tower-broadcast') }} Current stage</p>
+        <div class="stage-title-row">
+          <span class="badge stage-state stage-tone-{{ stage.state.tone }}" id="movie-stage-state">{{ stage.state.label }}</span>
+          <span class="badge stage-tone-{{ stage.status_tone or 'muted' }}" id="movie-stage-status">{{ stage.status_label }}</span>
+          {% if stage.work_type_label %}<span class="hint">{{ stage.work_type_label }}</span>{% endif %}
+        </div>
+        {% if stage.message %}
+          <p class="stage-message" id="movie-stage-message">{{ stage.message }}</p>
+        {% endif %}
+        {% if stage.paused %}
+          <p class="stage-banner" role="status">
+            {{ icon('pause') }} The bworker is paused. This movie keeps its stage and resumes when the worker resumes.
+          </p>
+        {% endif %}
+      </div>
+      <div class="stage-head-meta">
+        <span class="hint">Started {{ format_age(stage.started_at) }}</span>
+        <span class="hint">Updated {{ format_age(stage.updated_at) }}</span>
+        <button class="btn btn-sm btn-ghost" type="button" id="movie-stage-refresh">{{ icon('rotate') }} Refresh</button>
+      </div>
+    </div>
+
+    <div class="stage-tabs" role="tablist" aria-label="Movie work and history">
+      <button class="stage-tab is-active" type="button" role="tab"
+              id="movie-stage-tab-current" aria-selected="true"
+              aria-controls="movie-stage-panel-current" data-stage-tab="current">Current</button>
+      <button class="stage-tab" type="button" role="tab"
+              id="movie-stage-tab-history" aria-selected="false" tabindex="-1"
+              aria-controls="movie-stage-panel-history" data-stage-tab="history">
+        History <span class="stage-tab-count">{{ stage.events|length }}</span>
+      </button>
+    </div>
+
+    <div role="tabpanel" id="movie-stage-panel-current"
+         aria-labelledby="movie-stage-tab-current" data-stage-panel="current">
+      <div class="stage-metrics">
+        <div class="stage-metric">
+          <span>Stage</span>
+          <strong>{{ stage.label }}</strong>
+        </div>
+        <div class="stage-metric">
+          <span>Unit status</span>
+          <strong>{{ stage.status_label }}</strong>
+        </div>
+        <div class="stage-metric">
+          <span>Best score</span>
+          <strong>{{ stage.best_score if stage.best_score is not none else '—' }}</strong>
+        </div>
+        <div class="stage-metric">
+          <span>Target / max</span>
+          <strong>
+            {{ stage.target_score if stage.target_score is not none else '—' }}
+            / {{ stage.max_score if stage.max_score is not none else '—' }}
+          </strong>
+        </div>
+        <div class="stage-metric">
+          <span>Quality profile</span>
+          <strong>{{ stage.profile_name }}</strong>
+        </div>
+        <div class="stage-metric">
+          <span>Next run</span>
+          <strong>{{ stage.next_run_text or '—' }}</strong>
+        </div>
+      </div>
+
+      {% if stage.progress %}
+        <div class="stage-progress-row">
+          <div class="stage-progress" role="progressbar" aria-label="Current work progress"
+               aria-valuemin="0" aria-valuemax="100"
+               {% if stage.progress.percent is not none %}aria-valuenow="{{ stage.progress.percent }}"{% endif %}>
+            <span class="stage-progress-bar{% if stage.progress.indeterminate %} is-indeterminate{% endif %}"
+                  style="width: {{ stage.progress.percent or 0 }}%"></span>
+          </div>
+          <span class="hint" id="movie-stage-progress">
+            {% if stage.progress.kind == 'candidates' %}Batch/probe progress: {% endif %}
+            {{ stage.progress.text }}
+          </span>
+        </div>
+      {% else %}
+        <p class="hint">No batch, probe or download progress to report yet.</p>
+      {% endif %}
+
+      {% if stage.failure_count %}
+        <p class="queue-error small">
+          {{ stage.failure_count }} failed attempt{{ '' if stage.failure_count == 1 else 's' }}
+          {% if stage.work and stage.work.last_error %} · {{ stage.work.last_error }}{% endif %}
+        </p>
+      {% endif %}
+      <p class="hint stage-footnote">
+        Stage, score and progress come from the bworker's durable work row and are
+        rendered before the page loads. The actions above refresh them.
+      </p>
+    </div>
+
+    <div role="tabpanel" id="movie-stage-panel-history"
+         aria-labelledby="movie-stage-tab-history" data-stage-panel="history" hidden>
+      {% if stage.events %}
+        <ol class="stage-history" id="movie-stage-history">
+          {% for event in stage.events %}
+            <li class="stage-history-item" data-history-event>
+              <div class="stage-history-main">
+                <span class="badge stage-tone-{{ event.status_tone }}">{{ event.status_label }}</span>
+                <span class="badge stage-tone-{{ event.stage_tone }}">{{ event.stage_label }}</span>
+                <span class="stage-history-message">{{ event.message or 'No message' }}</span>
+              </div>
+              <div class="stage-history-meta">
+                {% if event.progress %}<span class="hint">{{ event.progress.text }}</span>{% endif %}
+                <time>{{ format_age(event.created_at) }}</time>
+              </div>
+            </li>
+          {% endfor %}
+        </ol>
+      {% else %}
+        <p class="muted">No bworker events yet. Stage changes will appear here, newest first (15 kept).</p>
+      {% endif %}
+    </div>
+  </section>
+
+  {# --------------------------------------------------- source candidates #}
   <section class="candidate-section" id="candidate-section">
     <div class="section-head">
       <div>
-        <h2>Source candidates</h2>
+        <h2>{{ icon('satellite-dish') }} Source candidates</h2>
         <p class="hint">
           {{ candidate_total }} catalog match{{ '' if candidate_total == 1 else 'es' }} ·
           {{ candidate_probed }} probed with ffprobe. Pin one version to override the
@@ -201,118 +332,130 @@
     <p class="hint" id="candidate-action-status" role="status"></p>
   </section>
 
-  <div class="detail-columns">
-    <section class="detail-panel">
-      <h2>File</h2>
-      {% if movie.file_path %}
-        <dl class="meta-list">
-          <dt>Path</dt><dd class="mono wrap-anywhere">{{ movie.file_path }}</dd>
-          <dt>Size</dt><dd>{{ (movie.file_size / 1048576)|round(1) if movie.file_size else 'Unknown' }} MiB</dd>
-          <dt>Quality</dt>
-          <dd>
-            {{ movie.quality_label or movie.resolution or 'Unknown' }}
-            {% if movie.source %}<span class="muted"> · {{ movie.source }}</span>{% endif %}
-          </dd>
-          <dt>Audio</dt>
-          <dd>{{ movie.audio_languages|join(', ') or 'Unknown' }}
-            {% if movie.media.audio_track_count %}<span class="muted"> · {{ movie.media.audio_track_count }} track(s)</span>{% endif %}
-          </dd>
-          <dt>Subtitles</dt>
-          <dd>{{ movie.subtitle_languages|join(', ') or 'None detected' }}</dd>
-          {% if movie.media.video_codec %}
-            <dt>Video</dt>
-            <dd>{{ movie.media.video_codec }}{% if movie.media.hdr and movie.media.hdr != 'SDR' %} · {{ movie.media.hdr }}{% endif %}</dd>
-          {% endif %}
-          <dt>Imported</dt><dd>{{ format_age(movie.imported_at) }}</dd>
-        </dl>
-      {% else %}
-        <p class="muted">No file on disk yet.</p>
-      {% endif %}
+  {# --------------------------------------------------- file / edit cards #}
+  <div class="movie-detail-grid">
+    <div class="movie-detail-main">
+      <section class="detail-panel movie-detail-card" id="movie-file-card">
+        <h2>{{ icon('file-video') }} File &amp; downloads</h2>
+        {% if movie.file_path %}
+          <dl class="meta-list">
+            <dt>Path</dt><dd class="mono wrap-anywhere">{{ movie.file_path }}</dd>
+            <dt>Size</dt><dd>{{ (movie.file_size / 1048576)|round(1) if movie.file_size else 'Unknown' }} MiB</dd>
+            <dt>Quality</dt>
+            <dd>
+              {{ movie.quality_label or movie.resolution or 'Unknown' }}
+              {% if movie.source %}<span class="muted"> · {{ movie.source }}</span>{% endif %}
+            </dd>
+            <dt>Audio</dt>
+            <dd>{{ movie.audio_languages|join(', ') or 'Unknown' }}
+              {% if movie.media.audio_track_count %}<span class="muted"> · {{ movie.media.audio_track_count }} track(s)</span>{% endif %}
+            </dd>
+            <dt>Subtitles</dt>
+            <dd>{{ movie.subtitle_languages|join(', ') or 'None detected' }}</dd>
+            {% if movie.media.video_codec %}
+              <dt>Video</dt>
+              <dd>{{ movie.media.video_codec }}{% if movie.media.hdr and movie.media.hdr != 'SDR' %} · {{ movie.media.hdr }}{% endif %}</dd>
+            {% endif %}
+            {% if movie.file_score is not none %}
+              <dt>File score</dt><dd>{{ movie.file_score }} / {{ stage.target_score if stage.target_score is not none else '—' }} target</dd>
+            {% endif %}
+            <dt>Imported</dt><dd>{{ format_age(movie.imported_at) }}</dd>
+          </dl>
+        {% else %}
+          <p class="muted">No file on disk yet. The bworker searches and downloads according to the profile and availability above.</p>
+        {% endif %}
 
-      {% for download in downloads %}
-        <div class="download-panel">
-          <div class="download-panel-head">
-            <strong>
-              {{ download.status|title }}
-              {% if download.mode == 'alternate' %}· Additional version{% else %}· Main file{% endif %}
-            </strong>
-            <span class="muted">{{ download.release_name }}</span>
+        {% for download in downloads %}
+          <div class="download-panel">
+            <div class="download-panel-head">
+              <strong>
+                {{ download.status|title }}
+                {% if download.mode == 'alternate' %}· Additional version{% else %}· Main file{% endif %}
+              </strong>
+              <span class="muted">{{ download.release_name }}</span>
+            </div>
+            {{ progress(download) }}
+            <button class="btn btn-sm btn-danger" data-cancel-download="{{ download.id }}" type="button">Cancel download</button>
           </div>
-          {{ progress(download) }}
-          <button class="btn btn-sm btn-danger" data-cancel-download="{{ download.id }}" type="button">Cancel download</button>
-        </div>
-      {% endfor %}
+        {% endfor %}
+      </section>
 
-      <h2>Additional versions</h2>
-      {% if alternates %}
-        <div class="alternate-list">
-          {% for alternate in alternates %}
-            <article class="alternate-row">
-              <div class="alternate-main">
-                <strong>{{ alternate.quality_label or alternate.resolution or 'Release' }}</strong>
-                <span class="muted">{{ alternate.name or 'Pinned candidate' }}</span>
-                <span class="mono wrap-anywhere small">{{ alternate.file_path }}</span>
-              </div>
-              <span class="alternate-size">
-                {{ (alternate.file_size / 1048576)|round(1) if alternate.file_size else 'Unknown' }} MiB
-              </span>
-              <button class="btn btn-sm btn-ghost" type="button"
-                      data-delete-alternate="{{ alternate.id }}">Remove</button>
-            </article>
-          {% endfor %}
-        </div>
-      {% else %}
-        <p class="muted">No additional pinned versions. Choose “Also download” on a candidate to keep one alongside the main file.</p>
-      {% endif %}
-
-      <h2>Edit</h2>
-      <form id="movie-edit-form" class="stack-form">
-        <label class="check">
-          <input type="checkbox" id="movie-monitored-edit" {% if movie.monitored %}checked{% endif %}>
-          Monitored
-        </label>
-        <label class="field">
-          <span>Quality profile</span>
-          <select id="movie-profile-edit">
-            {% for profile in profiles %}
-              <option value="{{ profile.id }}" {% if profile.id == movie.quality_profile_id %}selected{% endif %}>
-                {{ profile.name }} ({{ profile.resolutions|join(', ') }})
-              </option>
+      <section class="detail-panel movie-detail-card" id="movie-alternates-card">
+        <h2>{{ icon('layer-group') }} Additional versions</h2>
+        {% if alternates %}
+          <div class="alternate-list">
+            {% for alternate in alternates %}
+              <article class="alternate-row">
+                <div class="alternate-main">
+                  <strong>{{ alternate.quality_label or alternate.resolution or 'Release' }}</strong>
+                  <span class="muted">{{ alternate.name or 'Pinned candidate' }}</span>
+                  <span class="mono wrap-anywhere small">{{ alternate.file_path }}</span>
+                </div>
+                <span class="alternate-size">
+                  {{ (alternate.file_size / 1048576)|round(1) if alternate.file_size else 'Unknown' }} MiB
+                </span>
+                <button class="btn btn-sm btn-ghost" type="button"
+                        data-delete-alternate="{{ alternate.id }}">Remove</button>
+              </article>
             {% endfor %}
-          </select>
-        </label>
-        <label class="field">
-          <span>Download when</span>
-          <select id="movie-availability-edit">
-            <option value="released" {% if movie.minimum_availability == 'released' %}selected{% endif %}>Released</option>
-            <option value="in_cinemas" {% if movie.minimum_availability == 'in_cinemas' %}selected{% endif %}>In cinemas / release date reached</option>
-            <option value="announced" {% if movie.minimum_availability == 'announced' %}selected{% endif %}>Announced (search immediately)</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Queue priority</span>
-          <input type="number" id="movie-priority-edit" min="-100" max="100" step="1" value="{{ movie.priority or 0 }}">
-        </label>
-        <button class="btn" type="submit">Save</button>
-        <span class="hint" id="movie-edit-status" role="status"></span>
-      </form>
-    </section>
+          </div>
+        {% else %}
+          <p class="muted">No additional pinned versions. Choose “Also download” on a candidate to keep one alongside the main file.</p>
+        {% endif %}
+      </section>
+    </div>
 
-    <aside class="detail-side">
-      <h2>History</h2>
-      {% if history %}
-        <ul class="history-list">
-          {% for event in history %}
-            <li>
-              <span class="badge badge-{{ event.event }}">{{ event.event|title }}</span>
-              <span>{{ event.message or '' }}</span>
-              <time>{{ format_age(event.created_at) }}</time>
-            </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        <p class="muted">Nothing has happened yet.</p>
-      {% endif %}
+    <aside class="movie-detail-side">
+      <section class="detail-panel movie-detail-card" id="movie-edit-card">
+        <h2>{{ icon('sliders') }} Edit</h2>
+        <form id="movie-edit-form" class="stack-form">
+          <label class="check">
+            <input type="checkbox" id="movie-monitored-edit" {% if movie.monitored %}checked{% endif %}>
+            Monitored
+          </label>
+          <label class="field">
+            <span>Quality profile</span>
+            <select id="movie-profile-edit">
+              {% for profile in profiles %}
+                <option value="{{ profile.id }}" {% if profile.id == movie.quality_profile_id %}selected{% endif %}>
+                  {{ profile.name }} ({{ profile.resolutions|join(', ') }})
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="field">
+            <span>Download when</span>
+            <select id="movie-availability-edit">
+              <option value="released" {% if movie.minimum_availability == 'released' %}selected{% endif %}>Released</option>
+              <option value="in_cinemas" {% if movie.minimum_availability == 'in_cinemas' %}selected{% endif %}>In cinemas / release date reached</option>
+              <option value="announced" {% if movie.minimum_availability == 'announced' %}selected{% endif %}>Announced (search immediately)</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Queue priority</span>
+            <input type="number" id="movie-priority-edit" min="-100" max="100" step="1" value="{{ movie.priority or 0 }}">
+          </label>
+          <button class="btn" type="submit">Save</button>
+          <span class="hint" id="movie-edit-status" role="status"></span>
+        </form>
+      </section>
+
+      <section class="detail-panel movie-detail-card" id="movie-history-card">
+        <h2>{{ icon('clock-rotate-left') }} Library history</h2>
+        {% if history %}
+          <ul class="history-list">
+            {% for event in history %}
+              <li>
+                <span class="badge badge-{{ event.event }}">{{ event.event|title }}</span>
+                <span>{{ event.message or '' }}</span>
+                <time>{{ format_age(event.created_at) }}</time>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="muted">Nothing has happened yet.</p>
+        {% endif %}
+      </section>
     </aside>
   </div>
 </section>
@@ -328,6 +471,37 @@
     </div>
     <p class="hint" id="movie-release-status" role="status"></p>
     <div class="release-list" id="movie-release-list"></div>
+  </div>
+  <div class="dialog-foot">
+    <span class="spacer"></span>
+    <button class="btn btn-ghost" type="button" data-close>Close</button>
+  </div>
+</dialog>
+
+<dialog class="dialog dialog-wide" id="movie-metadata-dialog">
+  <div class="dialog-head">
+    <h2>Manual metadata</h2>
+    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <div class="dialog-body">
+    <p class="hint">
+      Search TMDB and replace the title, year, overview, poster and release data.
+      The file, download state, quality profile, monitoring choice and history stay unchanged.
+    </p>
+    <div class="dialog-options">
+      <label class="field">
+        <span>Title</span>
+        <input type="search" id="movie-metadata-query" value="{{ movie.title }}" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Year <small class="muted">optional</small></span>
+        <input type="number" id="movie-metadata-year" min="1888" max="2100"
+               value="{{ movie.year or '' }}" placeholder="Any">
+      </label>
+      <button class="btn" type="button" id="movie-metadata-search">Search TMDB</button>
+    </div>
+    <p class="hint" id="movie-metadata-status" role="status"></p>
+    <div class="metadata-results" id="movie-metadata-results"></div>
   </div>
   <div class="dialog-foot">
     <span class="spacer"></span>
@@ -352,6 +526,8 @@
 
 <script>
   window.MOVIE_ID = {{ movie.id }};
+  window.MOVIE_STAGE_SIGNATURE = {{ stage.signature|tojson }};
+  {% if stage.stage_api_url %}window.MOVIE_STAGE_URL = {{ stage.stage_api_url|tojson }};{% endif %}
 </script>
 {% endblock %}
 

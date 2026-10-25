@@ -1,0 +1,285 @@
+/* Movie detail: card layout and the bworker stage/history panel.
+ *
+ * Everything uses the app's dark-first colour tokens from app.css, so the
+ * page follows the active theme without a second palette. No external fonts
+ * or assets; Font Awesome is vendored and loaded by base.html. */
+
+.movie-detail-page { max-width: 1180px; }
+
+/* The stage card sits between the hero and the candidate card. */
+.movie-stage-card {
+  margin-bottom: 20px;
+  min-width: 0;
+}
+
+.stage-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.stage-head-main { min-width: 0; flex: 1 1 340px; }
+
+.stage-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 8px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.stage-eyebrow .fa-solid { color: var(--accent); }
+
+.stage-title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.stage-title-row .hint { margin: 0; }
+
+.stage-state {
+  font-size: 13px;
+  padding: 3px 10px;
+}
+
+.stage-message {
+  margin: 9px 0 0;
+  color: var(--fg-muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.stage-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 8px 11px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg-raised));
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.stage-banner .fa-solid { color: var(--warn); }
+
+.stage-head-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  text-align: right;
+  flex: 0 0 auto;
+}
+.stage-head-meta .btn { margin-top: 5px; }
+
+/* Tone classes shared by the state, unit-status and event badges. */
+.stage-tone-active { color: var(--accent); border-color: var(--accent); }
+.stage-tone-waiting { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 70%, var(--border)); }
+.stage-tone-success { color: var(--ok); border-color: var(--ok); }
+.stage-tone-warning { color: var(--warn); border-color: var(--warn); }
+.stage-tone-danger { color: var(--bad); border-color: var(--bad); }
+.stage-tone-muted { color: var(--fg-faint); border-color: var(--border); }
+
+.stage-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 16px 0 14px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+}
+.stage-tab {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 570;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.stage-tab:hover { color: var(--fg); background: var(--bg-hover); }
+.stage-tab.is-active { color: var(--accent-fg); background: var(--accent); }
+.stage-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.stage-tab-count {
+  display: inline-block;
+  min-width: 1.4em;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  font-size: 11px;
+  text-align: center;
+}
+
+.stage-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.stage-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+}
+.stage-metric span {
+  color: var(--fg-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.stage-metric strong {
+  font-size: 13px;
+  font-weight: 620;
+  overflow-wrap: anywhere;
+}
+
+.stage-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.stage-progress-row .hint { margin: 0; }
+.stage-progress {
+  position: relative;
+  flex: 1 1 240px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.stage-progress-bar {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+.stage-progress-bar.is-indeterminate {
+  width: 35% !important;
+  animation: movie-stage-slide 1.4s ease-in-out infinite;
+}
+@keyframes movie-stage-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(320%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-progress-bar.is-indeterminate { animation: none; width: 100% !important; opacity: 0.45; }
+}
+
+.stage-footnote { margin-top: 12px; }
+
+.stage-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.stage-history-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 2px;
+  border-top: 1px solid var(--border);
+}
+.stage-history-item:first-child { border-top: 0; }
+.stage-history-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+.stage-history-message {
+  flex: 1 1 100%;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.stage-history-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex: 0 0 auto;
+  color: var(--fg-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.stage-history-meta .hint { margin: 0; }
+
+/* Two-column card grid below the candidates: file/alternates on the left,
+   edit/library history on the right. Stacks on narrow screens. */
+.movie-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 20px;
+  align-items: start;
+}
+.movie-detail-main,
+.movie-detail-side {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+.movie-detail-side { position: sticky; top: 72px; }
+.movie-detail-card { margin: 0; }
+.movie-detail-card h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.movie-detail-card h2 .fa-solid { color: var(--fg-faint); font-size: 13px; }
+
+/* Candidate section heading icon (the card styling comes from app.css). */
+.candidate-section .section-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.candidate-section .section-head h2 .fa-solid { color: var(--fg-faint); font-size: 14px; }
+
+/* The manual metadata dialog reuses the existing metadata-result styles. */
+#movie-metadata-dialog .dialog-options .field { flex: 1 1 220px; }
+#movie-metadata-dialog .dialog-options .btn { align-self: end; }
+
+@media (max-width: 860px) {
+  .movie-detail-grid { grid-template-columns: 1fr; }
+  .movie-detail-side { position: static; }
+  .stage-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stage-head-meta { align-items: flex-start; text-align: left; }
+}
+
+@media (max-width: 480px) {
+  .stage-metrics { grid-template-columns: 1fr; }
+  .stage-tabs { width: 100%; justify-content: center; }
+  .stage-history-item { flex-direction: column; gap: 4px; }
+  .stage-history-meta { align-items: flex-start; flex-direction: row; gap: 8px; }
+}

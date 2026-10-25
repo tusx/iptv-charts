@@ -4,11 +4,22 @@ from __future__ import annotations
 
 import calendar as calendar_module
 import json
+import time
 from datetime import date, timedelta
 
-from flask import Blueprint, abort, g, redirect, render_template, request, url_for
+from flask import (Blueprint, abort, current_app, g, redirect, render_template,
+                   request, url_for)
+from werkzeug.routing import BuildError
 
-from . import config, db, library, metadata, quality, scan, scheduler
+from . import bworker_store, config, db, library, metadata, quality, scan, scheduler
+
+# The item stage/history module is owned by the bworker feature. Import it
+# defensively so the movie page still renders (from the SQL fallback below)
+# when this checkout predates that module.
+try:  # pragma: no cover - the import succeeds on the release branch
+    from . import bworker_events
+except ImportError:  # pragma: no cover
+    bworker_events = None
 
 bp = Blueprint("manager", __name__)
 
@@ -204,6 +215,470 @@ def _history_for(conn, *, movie_id: int | None = None,
     return [dict(row) for row in rows]
 
 
+# ------------------------------------------------------- item stage/history
+# The movie detail page renders the current bworker stage plus the durable
+# last-15 event history server-side. bworker_events owns the canonical view;
+# the fallback keeps the page usable if that module is not present yet, and a
+# direct-read helper below is deliberately read-only: the web process never
+# claims or advances bworker work.
+
+_STAGE_FALLBACK_LABELS = {
+    "pending": ("Pending", "muted"),
+    "waiting_availability": ("Waiting for availability", "waiting"),
+    "waiting_air": ("Waiting for air", "waiting"),
+    "search": ("Searching", "active"),
+    "searching_candidates": ("Searching candidates", "active"),
+    "probing": ("Probing", "active"),
+    "downloading": ("Downloading", "active"),
+    "verifying": ("Verifying", "active"),
+    "renaming": ("Renaming", "active"),
+    "moving": ("Moving", "active"),
+    "awaiting_upgrade": ("Awaiting upgrade", "waiting"),
+    "complete": ("Complete", "success"),
+    "no_candidates": ("No candidates", "warning"),
+    "failed": ("Failed", "danger"),
+    "paused": ("Paused", "warning"),
+    "skipped": ("Skipped", "muted"),
+}
+
+_WORK_FALLBACK_LABELS = {
+    "pending": ("Pending", "secondary", "waiting"),
+    "running": ("Running", "primary", "active"),
+    "retry": ("Retry scheduled", "warning", "warning"),
+    "failed_stopped": ("Stopped after failures", "danger", "danger"),
+    "disabled": ("Disabled", "secondary", "muted"),
+    "complete": ("Complete", "success", "success"),
+}
+
+_EVENT_FALLBACK_LABELS = {
+    "started": ("Started", "info", "active"),
+    "progress": ("In progress", "primary", "active"),
+    "succeeded": ("Succeeded", "success", "success"),
+    "failed": ("Failed", "danger", "danger"),
+    "skipped": ("Skipped", "secondary", "muted"),
+    "info": ("Info", "secondary", "muted"),
+}
+
+_WORK_PRIORITY = {
+    "running": 0, "retry": 1, "failed_stopped": 2,
+    "pending": 3, "complete": 4, "disabled": 5,
+}
+
+_STAGE_API_RULE = "/api/movies/<int:movie_id>/stage"
+
+
+def _stage_api_url(movie_id: int) -> str | None:
+    """The per-movie stage JSON endpoint, when A04's route is installed.
+
+    Looking the rule up by its path avoids depending on the blueprint's
+    endpoint name. No route is registered in this build, so the template
+    omits the polling hook and the existing action reloads remain the refresh
+    path.
+    """
+    try:
+        rules = list(current_app.url_map.iter_rules())
+    except RuntimeError:
+        return None
+    for rule in rules:
+        if rule.rule == _STAGE_API_RULE:
+            try:
+                return url_for(rule.endpoint, movie_id=int(movie_id))
+            except BuildError:
+                return None
+    return None
+
+
+def _number(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number else None  # reject NaN
+
+
+def _bytes_label(value) -> str:
+    number = _number(value)
+    if number is None or number <= 0:
+        return "0 B"
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    for index, unit in enumerate(units):
+        if number < 1024 or index == len(units) - 1:
+            if unit == "B" or number >= 10 or number.is_integer():
+                return f"{number:.0f} {unit}"
+            return f"{number:.1f} {unit}"
+        number /= 1024
+    return "0 B"
+
+
+def _quantity(value) -> str:
+    number = _number(value)
+    return "?" if number is None else f"{number:g}"
+
+
+def _progress_view(progress, download=None) -> dict | None:
+    """Normalise event/download progress into a bar + readable label."""
+    if isinstance(download, dict) and download:
+        done = _number(download.get("bytes_done"))
+        total = _number(download.get("bytes_total"))
+        percent = _number(download.get("percent"))
+        if percent is None and done is not None and total:
+            percent = done / total * 100
+        if percent is not None:
+            percent = max(0.0, min(100.0, percent))
+        if percent is not None and total:
+            text = f"{percent:.0f}% · {_bytes_label(done)} / {_bytes_label(total)}"
+        elif percent is not None:
+            text = f"{percent:.0f}%"
+        elif done:
+            text = f"{_bytes_label(done)} downloaded"
+        else:
+            text = "Download in progress"
+        return {
+            "percent": None if percent is None else round(percent, 1),
+            "text": text,
+            "indeterminate": percent is None,
+            "kind": "download",
+            "status": download.get("status"),
+        }
+
+    if not isinstance(progress, dict) or not progress:
+        return None
+    done = _number(progress.get("done"))
+    total = _number(progress.get("total"))
+    percent = _number(progress.get("percent"))
+    fraction = _number(progress.get("fraction"))
+    if percent is None and fraction is not None:
+        percent = fraction * 100
+    if percent is None and done is not None and total:
+        percent = done / total * 100
+    if percent is not None:
+        percent = max(0.0, min(100.0, percent))
+    download_ish = any(
+        key in progress for key in ("bytes_done", "bytes_total", "fraction")
+    )
+    if done is not None and total:
+        if download_ish:
+            text = f"{percent:.0f}% · {_bytes_label(done)} / {_bytes_label(total)}" \
+                if percent is not None else \
+                f"{_bytes_label(done)} / {_bytes_label(total)}"
+        else:
+            text = f"{_quantity(done)} / {_quantity(total)}"
+            if percent is not None:
+                text += f" · {percent:.0f}%"
+    elif percent is not None:
+        text = f"{percent:.0f}%"
+    else:
+        text = str(progress.get("message") or "Working")
+    kind = "download" if download_ish else (
+        "candidates" if total is not None and total <= 1000 else "progress")
+    return {
+        "percent": None if percent is None else round(percent, 1),
+        "text": text,
+        "indeterminate": percent is None,
+        "kind": kind,
+        "status": progress.get("stage") or progress.get("phase"),
+    }
+
+
+def _in_label(timestamp) -> str | None:
+    """A short forward-looking label for ``next_run_at``."""
+    value = _number(timestamp)
+    if value is None:
+        return None
+    delta = int(value) - int(time.time())
+    if delta <= 0:
+        return "now"
+    for limit, divisor, unit in (
+        (90, 1, "second"),
+        (3600, 60, "minute"),
+        (86400, 3600, "hour"),
+        (2592000, 86400, "day"),
+    ):
+        if delta < limit:
+            amount = max(1, delta // divisor)
+            return f"in {amount} {unit}{'s' if amount != 1 else ''}"
+    days = delta // 86400
+    return f"in {days} days"
+
+
+def _stage_event_view(event: dict) -> dict:
+    item = dict(event)
+    item["progress"] = _progress_view(item.get("progress"))
+    return item
+
+
+def _sql_movie_stage_context(conn, movie_id: int) -> dict | None:
+    """Direct-SQL fallback for the movie stage card (bworker_events absent)."""
+    movie = library.get_movie(conn, movie_id)
+    if movie is None:
+        return None
+    works = [
+        dict(row) for row in conn.execute(
+            "SELECT * FROM bworker_work WHERE entity_type = 'movie' "
+            "AND entity_id = ? ORDER BY id", (int(movie_id),)
+        )
+    ]
+    work = min(
+        works,
+        key=lambda row: (
+            _WORK_PRIORITY.get(str(row.get("status") or ""), 9),
+            -(int(row.get("updated_at") or 0)),
+            -int(row.get("id") or 0),
+        ),
+        default=None,
+    )
+    raw_events = [
+        dict(row) for row in conn.execute(
+            "SELECT * FROM bworker_events WHERE entity_type = 'movie' "
+            "AND entity_id = ? ORDER BY id DESC LIMIT 15", (int(movie_id),)
+        )
+    ]
+    events = []
+    for row in raw_events:
+        stage_label, stage_tone = _STAGE_FALLBACK_LABELS.get(
+            str(row.get("stage") or ""), (str(row.get("stage") or "Unknown"), "muted"))
+        status_label, status_badge, status_tone = _EVENT_FALLBACK_LABELS.get(
+            str(row.get("status") or ""), ("Info", "secondary", "muted"))
+        events.append({
+            **row,
+            "stage_label": stage_label, "stage_tone": stage_tone,
+            "stage_badge": "secondary",
+            "status_label": status_label, "status_badge": status_badge,
+            "status_tone": status_tone,
+            "progress": _decode_json(row.get("progress")),
+        })
+
+    download = None
+    download_id = work.get("current_download_id") if work else None
+    if download_id:
+        row = conn.execute("SELECT * FROM downloads WHERE id = ?",
+                           (int(download_id),)).fetchone()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM downloads WHERE movie_id = ? AND status IN "
+            "('queued', 'downloading', 'importing') ORDER BY id DESC LIMIT 1",
+            (int(movie_id),),
+        ).fetchall()
+        row = rows[0] if rows else None
+    if row is not None:
+        item = dict(row)
+        total = item.get("bytes_total")
+        done = int(item.get("bytes_done") or 0)
+        fraction = (done / total) if total else None
+        download = {
+            "id": int(item["id"]), "status": item.get("status"),
+            "mode": item.get("mode"), "title": item.get("title"),
+            "bytes_done": done, "bytes_total": total,
+            "fraction": fraction,
+            "percent": round(fraction * 100, 1) if fraction is not None else None,
+        }
+
+    if work is not None:
+        stage = str(work.get("stage") or "pending")
+    elif events:
+        stage = str(events[0].get("stage") or "pending")
+    elif movie.get("file_path"):
+        stage = "complete"
+    elif not movie.get("monitored"):
+        stage = "skipped"
+    else:
+        stage, _next = bworker_store.movie_initial_stage(movie)
+    label, stage_tone = _STAGE_FALLBACK_LABELS.get(
+        stage, (stage.replace("_", " ").title() or "Unknown", "muted"))
+    if work is not None:
+        status = str(work.get("status") or "pending")
+        status_label, status_badge, status_tone = _WORK_FALLBACK_LABELS.get(
+            status, ("Unknown", "secondary", "muted"))
+    elif events:
+        status = str(events[0].get("status") or "info")
+        status_label, status_badge, status_tone = _EVENT_FALLBACK_LABELS.get(
+            status, ("Info", "secondary", "muted"))
+    elif movie.get("file_path"):
+        status = "complete"
+        status_label, status_badge, status_tone = _WORK_FALLBACK_LABELS["complete"]
+    elif not movie.get("monitored"):
+        status = "disabled"
+        status_label, status_badge, status_tone = _WORK_FALLBACK_LABELS["disabled"]
+    else:
+        status = "pending"
+        status_label, status_badge, status_tone = _WORK_FALLBACK_LABELS["pending"]
+    message = None
+    if work is not None and str(work.get("status") or "") in (
+            "retry", "failed_stopped"):
+        message = work.get("last_error")
+    if not message and events:
+        message = events[0].get("message")
+    progress = _decode_json(events[0].get("progress")) if events else None
+    best_score = work.get("best_score") if work is not None else None
+    public_work = None
+    if work is not None:
+        public_work = {
+            "id": work.get("id"), "work_key": work.get("work_key"),
+            "work_type": work.get("work_type"),
+            "stage": stage, "stage_label": label, "stage_tone": stage_tone,
+            "status": status, "status_label": status_label,
+            "status_badge": status_badge, "status_tone": status_tone,
+            "failure_count": work.get("failure_count"),
+            "next_run_at": work.get("next_run_at"),
+            "best_score": best_score,
+            "last_error": work.get("last_error"),
+            "message": message,
+            "started_at": work.get("started_at"),
+            "finished_at": work.get("finished_at"),
+            "updated_at": work.get("updated_at"),
+        }
+    return {
+        "stage": stage, "label": label,
+        "status": status, "status_label": status_label,
+        "status_badge": status_badge, "status_tone": status_tone,
+        "status_source": "work" if work is not None else "derived",
+        "message": message,
+        "progress": progress,
+        "best_score": best_score if best_score is not None else movie.get("file_score"),
+        "file_score": movie.get("file_score"),
+        "next_run_at": work.get("next_run_at") if work is not None else None,
+        "work": public_work,
+        "works": [],
+        "download": download,
+        "events": events,
+    }
+
+
+def _decode_json(value):
+    if isinstance(value, (dict, list)):
+        return value
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _movie_profile(profiles: list[dict], movie: dict) -> dict:
+    profile_id = movie.get("quality_profile_id")
+    for profile in profiles:
+        if profile.get("id") == profile_id:
+            return profile
+    for profile in profiles:
+        if profile.get("is_default"):
+            return profile
+    return profiles[0] if profiles else {}
+
+
+def _stage_state(context: dict) -> dict:
+    """The one user-facing state label for the current work row."""
+    stage = str(context.get("stage") or "")
+    status = str(context.get("status") or "")
+    if status == "failed_stopped" or stage == "failed":
+        return {"stage": stage or "failed", "label": "Failed",
+                "tone": "danger", "status": status}
+    if context.get("paused") and status not in (
+            "complete", "disabled", "failed_stopped"):
+        return {"stage": stage or "paused", "label": "Paused",
+                "tone": "warning", "status": status}
+    if stage == "skipped" or status == "disabled":
+        return {"stage": stage or "skipped", "label": "Skipped",
+                "tone": "muted", "status": status}
+    return {
+        "stage": stage,
+        "label": str(context.get("label") or "Pending"),
+        "tone": str(context.get("stage_tone") or "muted"),
+        "status": status,
+    }
+
+
+def movie_stage_summary(conn, movie_id: int) -> dict | None:
+    """Compact stage badge data for index cards (integration hook).
+
+    ``movies.html``/``_decorate_movies`` remain integration-owned. Calling
+    this once per card gives the same label/tone/status the detail card shows;
+    a future batched version should load the work and newest-event rows for
+    all ids in one query instead of per card.
+    """
+    context = (_movie_stage_context(conn, movie_id)
+               if bworker_events is not None
+               else _sql_movie_stage_context(conn, movie_id))
+    if context is None:
+        return None
+    try:
+        paused = bool(bworker_store.get_state(conn).get("paused"))
+    except Exception:
+        paused = False
+    context = dict(context)
+    context["paused"] = paused
+    state = _stage_state(context)
+    return {
+        "stage": state["stage"],
+        "label": state["label"],
+        "tone": state["tone"],
+        "status": context.get("status"),
+        "status_label": context.get("status_label"),
+        "best_score": context.get("best_score"),
+        "next_run_at": context.get("next_run_at"),
+    }
+
+
+def _movie_stage_context(conn, movie_id: int) -> dict | None:
+    if bworker_events is not None:
+        return bworker_events.movie_stage_context(conn, int(movie_id))
+    return _sql_movie_stage_context(conn, int(movie_id))
+
+
+def _movie_stage_view(conn, movie: dict, profiles: list[dict]) -> dict:
+    """Everything the top card needs, built once for the server render."""
+    context = dict(_movie_stage_context(conn, int(movie["id"])) or {})
+    try:
+        paused = bool(bworker_store.get_state(conn).get("paused"))
+    except Exception:
+        paused = False
+    profile = _movie_profile(profiles, movie)
+    work = context.get("work") or {}
+    events = list(context.get("events") or [])
+
+    context["paused"] = paused
+    context["profile_name"] = profile.get("name") or "No profile"
+    context["target_score"] = profile.get("target_score")
+    context["max_score"] = profile.get("max_score")
+    context["profile_id"] = profile.get("id")
+    context["events"] = [_stage_event_view(event) for event in events]
+    context["progress"] = (
+        _progress_view(None, context.get("download"))
+        or _progress_view(context.get("progress"))
+    )
+    context["state"] = _stage_state(context)
+    # The state badge already says Failed/Paused. Keep the unit's own status
+    # label ("Stopped after failures", "Running", ...) so the metric retains
+    # the bworker detail instead of repeating the state.
+    context["status_label"] = (
+        "Paused" if paused and context.get("status") not in (
+            "complete", "disabled", "failed_stopped")
+        else context.get("status_label") or "Pending"
+    )
+    context["started_at"] = work.get("started_at") or (
+        events[0].get("started_at") if events else None)
+    context["updated_at"] = (
+        work.get("updated_at")
+        or (events[0].get("created_at") if events else None)
+        or movie.get("last_search_at")
+    )
+    context["next_run_text"] = _in_label(context.get("next_run_at"))
+    context["failure_count"] = int(work.get("failure_count") or 0)
+    context["work_type_label"] = str(work.get("work_type") or "").replace(
+        "_", " ").title() or "Movie search"
+    context["stage_api_url"] = _stage_api_url(int(movie["id"]))
+    first_event = context["events"][0].get("id") if context["events"] else ""
+    context["signature"] = "|".join((
+        str(context.get("stage") or ""),
+        str(context.get("status") or ""),
+        str(context.get("message") or ""),
+        str(context.get("best_score") or ""),
+        str((context.get("progress") or {}).get("text") or ""),
+        str(first_event),
+    ))
+    return context
+
+
 # -------------------------------------------------------------------- movies
 @bp.get("/movies")
 def movies():
@@ -237,11 +712,13 @@ def movie_detail(movie_id: int):
     candidates = library.movie_candidates_view(conn, movie)
     alternates = library.movie_alternates(conn, movie_id)
     main_identity = library.main_release_identity(conn, movie)
+    profiles = _profiles(conn)
     return render_template(
         "movie.html",
         movie=movie,
-        profiles=_profiles(conn),
+        profiles=profiles,
         status=library.movie_status(conn, movie),
+        stage=_movie_stage_view(conn, movie, profiles),
         history=_history_for(conn, movie_id=movie_id),
         candidates=candidates["candidates"],
         candidate_total=candidates["total"],
