@@ -17,8 +17,14 @@ from . import (bworker, config, connections, db, items, jobs, metadata, naming,
                player, sources, sync)
 from .api import bp as api_bp
 from .bworker_api import bp as bworker_api_bp
+from .explore_web import bp as explore_web_bp
+from .import_web import bp as import_web_bp
 from .manager_api import bp as manager_api_bp
 from .manager_web import bp as manager_web_bp
+from .settings_sections import bp as settings_sections_bp
+from .stage_web import bp as stage_web_bp
+from .storage_web import bp as storage_web_bp
+from .update_web import bp as update_web_bp
 
 #: Hostnames that mean "this machine". Used for both the Host header and the
 #: Origin of writes.
@@ -89,6 +95,12 @@ def create_app() -> Flask:
     app.register_blueprint(manager_api_bp, url_prefix="/api")
     app.register_blueprint(bworker_api_bp)
     app.register_blueprint(manager_web_bp)
+    app.register_blueprint(explore_web_bp)
+    app.register_blueprint(import_web_bp)
+    app.register_blueprint(storage_web_bp)
+    app.register_blueprint(settings_sections_bp)
+    app.register_blueprint(stage_web_bp)
+    app.register_blueprint(update_web_bp)
 
     @app.before_request
     def _guard_request():

@@ -32,8 +32,8 @@ import time
 import traceback
 from typing import Any, Callable, Mapping
 
-from . import (activity_log, config, db, downloader, jobs, library, scan,
-               scheduler, sync)
+from . import (activity_log, bworker_events, config, db, downloader, jobs,
+               library, scan, scheduler, sync)
 from . import bworker_store as store
 
 logger = logging.getLogger("iptv_charts.bworker")
@@ -162,6 +162,7 @@ class WorkContext:
         self.progress: dict | None = None
         self.current_download_id = work.get("current_download_id")
         self._last_write = float("-inf")
+        self._event_stage = self.stage
 
     # ----------------------------------------------------------- identity
     @property
@@ -234,6 +235,30 @@ class WorkContext:
         except Exception:
             pass
 
+    def _record_event(self, status: str, message: str | None = None,
+                      progress: Mapping[str, Any] | None = None, *,
+                      started_at: int | None = None,
+                      finished_at: int | None = None) -> None:
+        """Best-effort durable item history; never fails the unit."""
+        connection = None
+        try:
+            connection = sqlite3.connect(str(config.db_path()), timeout=0.05)
+            bworker_events.record_for_work(
+                connection, self.work, self.stage, status,
+                message if message is not None else self.message,
+                progress if progress is not None else self.progress,
+                started_at=started_at, finished_at=finished_at,
+                now=self.now(),
+            )
+        except Exception:
+            pass
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
     def set_stage(self, stage: str, message: str | None = None,
                   progress: Mapping[str, Any] | None = None) -> None:
         """A stage change is user-visible immediately (not throttled)."""
@@ -244,6 +269,9 @@ class WorkContext:
             self.progress = dict(progress)
         self._write_activity(force=True)
         self._write_db_stage()
+        if self.stage != self._event_stage:
+            self._event_stage = self.stage
+            self._record_event("progress", self.message, self.progress)
 
     def set_message(self, message: str) -> None:
         self.message = str(message)
@@ -1394,6 +1422,8 @@ class Bworker:
             pass
         ctx = WorkContext(runner=self, conn=conn, work=work,
                           activity_id=activity_id, stop=self.stop)
+        ctx._record_event("started", message, ctx.progress,
+                          started_at=started_wall)
         outcome: dict = {}
         try:
             handler = WORK_HANDLERS.get(work_type)
@@ -1453,6 +1483,14 @@ class Bworker:
             started_at=started_wall,
             current_download_id=result.get("current_download_id"),
         )
+        event_status = {
+            activity_log.STATUS_SUCCESS: "succeeded",
+            activity_log.STATUS_FAILURE: "failed",
+            activity_log.STATUS_SKIPPED: "skipped",
+        }.get(activity_status, "info")
+        ctx.stage = str(result.get("stage") or ctx.stage or "complete")
+        ctx._record_event(event_status, outcome_message, ctx.progress,
+                          started_at=started_wall, finished_at=self._now())
         self._set_current(None, None, None, "idle")
         try:
             store.heartbeat(conn, status="idle", now=self._now())

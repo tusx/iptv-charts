@@ -361,7 +361,8 @@ def main() -> int:
     from iptv_charts.import_web import bp as import_web_bp
 
     app = create_app()
-    app.register_blueprint(import_web_bp)
+    if "import_media" not in app.blueprints:
+        app.register_blueprint(import_web_bp)
     client = app.test_client()
 
     try:

@@ -4,7 +4,7 @@
  * The bworker API is the source of truth for pause/current work and the
  * in-memory log; /api/activity keeps the legacy download queue and scheduled
  * task state. Everything returned by those endpoints is untrusted data and is
- * inserted with textContent/DOM APIs, never innerHTML.
+ * inserted with textContent/DOM APIs, never as HTML strings.
  *
  * Auto-refresh is deliberately conservative: it stops while the page or the
  * log is scrolled away from the top, while the tab is hidden, or when the user
@@ -918,7 +918,7 @@
   function renderTasks(tasks, running) {
     nodes.tasksBody.replaceChildren();
     nodes.tasksState.textContent = running ? 'A task is running.' : '';
-    // Search missing is bworker work now; the legacy manual task row is not
+    // The legacy manual search task is bworker work now; its row is not
     // shown at all.
     const visible = tasks.filter((task) => task.name !== 'search_missing');
     if (!visible.length) {
