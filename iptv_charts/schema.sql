@@ -111,6 +111,10 @@ CREATE TABLE IF NOT EXISTS items (
     release_date    TEXT,
     youtube_trailer TEXT,
     tmdb_id         TEXT,
+    -- IMDb identity supplied by provider metadata. Candidate resolution tries
+    -- TMDB, then IMDb, then title/year because providers are inconsistent
+    -- about which identifier they expose.
+    imdb_id         TEXT,
     -- 1 once get_vod_info has been fetched for this row, so we only pay for
     -- the detail payload when a user actually opens the item.
     detail_loaded   INTEGER NOT NULL DEFAULT 0,
@@ -194,7 +198,26 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('probe_cache_hours',     '24'),
     ('probe_timeout_seconds', '30'),
     ('probe_max_candidates',  '6'),
-    ('probe_search_budget',   '60');
+    ('probe_search_budget',   '60'),
+    -- 0.8.0 section/profile/bworker defaults. The quality-profile rows
+    -- themselves are seeded by db.ensure_builtin_profiles() (migration and
+    -- every startup) because an old database does not have the new columns
+    -- until migration runs, and an INSERT here would fail before that.
+    ('external_player_enabled', '0'),
+    ('default_profile_key',     '1080p'),
+    ('movie_search_interval_hours', '6'),
+    ('series_search_interval_hours', '4'),
+    ('candidate_batch_size',    '25'),
+    ('probe_batch_per_loop',    '3'),
+    ('update_check_enabled',    '1'),
+    ('bworker_retry_delay_seconds',     '60'),
+    ('bworker_retry_backoff',           '2.0'),
+    ('bworker_retry_max_delay_seconds', '3600'),
+    ('bworker_idle_wait_seconds',       '30'),
+    ('bworker_fast_loop_seconds',       '10'),
+    ('activity_log_cap',        '500'),
+    ('activity_log_trim_to',    '100'),
+    ('activity_refresh_seconds', '5');
 
 -- --------------------------------------------------------------------------
 -- Media library and automation
@@ -230,7 +253,37 @@ CREATE TABLE IF NOT EXISTS quality_profiles (
     -- When 1 (the default), automatic grabs require a successful ffprobe of
     -- the stream. A failed probe is reported instead of guessed around.
     probe_required INTEGER NOT NULL DEFAULT 1,
-    created_at  INTEGER NOT NULL
+    created_at  INTEGER NOT NULL,
+
+    -- ------------------------------------------------------------------
+    -- Schema v5 weighted profiles.
+    --
+    -- The columns above are the legacy 0.7.0 tier model. They are retained
+    -- (and populated for builtins) so an old database can be read before the
+    -- v5 migration and so ALTER TABLE has stable NOT NULL columns. New code
+    -- reads the fields below; criteria_json is the forward-compatible
+    -- payload documented in docs/implementation/0.8.0-contracts.md.
+    -- ------------------------------------------------------------------
+    -- Immutable defaults: '4k', '1080p', '720p'. NULL for custom profiles.
+    builtin_key       TEXT,
+    is_builtin        INTEGER NOT NULL DEFAULT 0
+        CHECK (is_builtin IN (0, 1)),
+    -- The single mandatory resolution. NULL only on legacy rows that have
+    -- not been migrated; the v5 migration replaces every such row.
+    resolution        TEXT
+        CHECK (resolution IS NULL OR
+               resolution IN ('2160p', '1080p', '720p', '480p', '360p')),
+    resolution_weight INTEGER NOT NULL DEFAULT 10,
+    -- target_score is the old plan's min_score: minimum score for target_met.
+    target_score      INTEGER NOT NULL DEFAULT 20,
+    -- Computed maximum score; stored so the API/UI can show it without
+    -- re-deriving the algebra. NULL for a legacy row until saved.
+    max_score         INTEGER,
+    revision          INTEGER NOT NULL DEFAULT 1,
+    updated_at        INTEGER,
+    -- JSON: quality_options, video_codecs, audio_codecs, audio_languages,
+    -- audio_channels, subtitle_formats, subtitle_languages.
+    criteria_json     TEXT    NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS movies (
@@ -280,7 +333,16 @@ CREATE TABLE IF NOT EXISTS movies (
     -- Provider identity of the current main file, so an "also" pin of the
     -- same candidate is not downloaded twice.
     main_source_id        INTEGER,
-    main_remote_id        TEXT
+    main_remote_id        TEXT,
+    -- Schema v5: score of the current file against its profile at import or
+    -- last evaluation. Used for upgrade decisions; NULL means unscored.
+    file_score            INTEGER,
+    -- Per-item overrides of the section defaults. NULL means "use the
+    -- section setting" (candidate_batch_size/probe_batch_per_loop/
+    -- movie_search_interval_hours).
+    candidate_batch_size  INTEGER,
+    probe_batch_size      INTEGER,
+    search_interval_hours REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title COLLATE NOCASE);
@@ -312,7 +374,12 @@ CREATE TABLE IF NOT EXISTS series (
     quality_profile_id INTEGER REFERENCES quality_profiles(id) ON DELETE SET NULL,
     last_refreshed_at  INTEGER,
     last_search_at     INTEGER,
-    search_message     TEXT
+    search_message     TEXT,
+    -- Schema v5 per-item overrides; NULL means use the series section
+    -- setting.
+    candidate_batch_size  INTEGER,
+    probe_batch_size      INTEGER,
+    search_interval_hours REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_series_title ON series (title COLLATE NOCASE);
@@ -338,6 +405,8 @@ CREATE TABLE IF NOT EXISTS series_episodes (
     media_info     TEXT,
     imported_at    INTEGER,
     last_search_at INTEGER,
+    -- Schema v5: score of the current file against its series profile.
+    file_score     INTEGER,
     UNIQUE (series_id, season, episode)
 );
 
@@ -391,7 +460,11 @@ CREATE TABLE IF NOT EXISTS downloads (
     requested_at      INTEGER NOT NULL,
     started_at        INTEGER,
     finished_at       INTEGER,
-    next_attempt_at   INTEGER
+    next_attempt_at   INTEGER,
+    -- Schema v5 profile score for the grabbed candidate. score_details holds
+    -- the per-criterion breakdown as JSON (see the contracts document).
+    score             INTEGER,
+    score_details     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_downloads_status
@@ -561,3 +634,236 @@ CREATE TABLE IF NOT EXISTS worker_state (
     current_job_id INTEGER,
     status        TEXT NOT NULL DEFAULT 'starting'
 );
+
+-- --------------------------------------------------------------------------
+-- bworker: declarative automatic work (schema v5)
+--
+-- worker_jobs above is the imperative, durable execution queue. bworker_work
+-- is the declarative schedule: one row per recurring/per-item unit. bworker
+-- materialises due rows into worker_jobs and maps the job outcome back onto
+-- the work row. The web process may read both, but only bworker claims jobs
+-- or advances work.
+--
+-- entity_id is deliberately not a foreign key: work is polymorphic across
+-- movies, series, episodes, sources and global tasks. Writers remove work when
+-- the entity is deleted; bworker treats a missing entity as a clean no-op.
+-- --------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS bworker_work (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Stable, human-readable identity. Convention is documented in
+    -- docs/implementation/0.8.0-contracts.md; the UNIQUE constraint is what
+    -- makes duplicate seeding impossible.
+    work_key            TEXT    NOT NULL UNIQUE,
+    work_type           TEXT    NOT NULL,
+    entity_type         TEXT    NOT NULL
+        CHECK (entity_type IN ('movie', 'series', 'episode', 'source', 'global')),
+    entity_id           INTEGER,
+    payload             TEXT    NOT NULL DEFAULT '{}',
+    enabled             INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    -- The current per-unit stage. Stage names are per work type; see the
+    -- contracts document. 'pending' is the reset/initial value.
+    stage               TEXT    NOT NULL DEFAULT 'pending',
+    -- pending | running | retry | failed_stopped | disabled | complete
+    status              TEXT    NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'running', 'retry', 'failed_stopped',
+                          'disabled', 'complete')),
+    failure_count       INTEGER NOT NULL DEFAULT 0,
+    -- NULL with infinite_retry=1 means retry forever. A finite max_failures
+    -- stops this unit (failed_stopped) without stopping other work.
+    max_failures        INTEGER,
+    infinite_retry      INTEGER NOT NULL DEFAULT 0 CHECK (infinite_retry IN (0, 1)),
+    retry_delay_seconds INTEGER NOT NULL DEFAULT 60,
+    backoff_multiplier  REAL    NOT NULL DEFAULT 2.0,
+    next_run_at         INTEGER,
+    -- Candidate-pipeline cursor JSON: {"epoch": "...", "offset": n,
+    -- "batch": n, ...}. Opaque to everything except the pipeline.
+    cursor              TEXT,
+    -- Snapshot of the candidate the current search has chosen. Scores are
+    -- integers from the profile algebra; identity columns mirror downloads.
+    best_score          INTEGER,
+    best_source_id      INTEGER REFERENCES sources(id) ON DELETE SET NULL,
+    best_remote_id      TEXT,
+    best_episode_stream_id TEXT,
+    -- Download currently owned by this work unit (download stage).
+    current_download_id INTEGER REFERENCES downloads(id) ON DELETE SET NULL,
+    -- Profile revision the current scan/cursor was scored against. A profile
+    -- edit bumps revision and invalidates the scan.
+    profile_revision    INTEGER,
+    -- Web sets this to ask bworker to clear failure state/reset the unit;
+    -- bworker consumes it at the loop boundary.
+    reset_requested     INTEGER NOT NULL DEFAULT 0 CHECK (reset_requested IN (0, 1)),
+    last_error          TEXT,
+    -- Current attempt bounds; last_* are the previous attempt's summary.
+    started_at          INTEGER,
+    finished_at         INTEGER,
+    last_started_at     INTEGER,
+    last_finished_at    INTEGER,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL
+);
+
+-- Due-work scan: only non-running, enabled rows with a due time are candidates.
+CREATE INDEX IF NOT EXISTS idx_bworker_work_due
+    ON bworker_work (status, next_run_at)
+    WHERE status IN ('pending', 'retry');
+CREATE INDEX IF NOT EXISTS idx_bworker_work_enabled_due
+    ON bworker_work (enabled, status, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_bworker_work_entity
+    ON bworker_work (entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_bworker_work_type
+    ON bworker_work (work_type, status);
+
+-- Per-item durable history. Writers prune to the newest 15 rows per
+-- (entity_type, entity_id) in the same transaction as the insert.
+CREATE TABLE IF NOT EXISTS bworker_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- SET NULL: deleting a work row must not erase the item's history.
+    work_id     INTEGER REFERENCES bworker_work(id) ON DELETE SET NULL,
+    work_type   TEXT    NOT NULL,
+    entity_type TEXT    NOT NULL
+        CHECK (entity_type IN ('movie', 'series', 'episode', 'source', 'global')),
+    entity_id   INTEGER,
+    stage       TEXT    NOT NULL,
+    -- started | progress | succeeded | failed | skipped | info
+    status      TEXT    NOT NULL,
+    message     TEXT,
+    progress    TEXT,
+    started_at  INTEGER,
+    finished_at INTEGER,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bworker_events_entity
+    ON bworker_events (entity_type, entity_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_bworker_events_work
+    ON bworker_events (work_id, id DESC);
+
+-- Singleton bworker runtime state. The paused flag is the authority; a pause
+-- request finishes the current unit before bworker stops claiming new work.
+CREATE TABLE IF NOT EXISTS bworker_state (
+    id                 INTEGER PRIMARY KEY CHECK (id = 1),
+    paused             INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0, 1)),
+    current_work_id    INTEGER REFERENCES bworker_work(id) ON DELETE SET NULL,
+    current_work_label TEXT,
+    started_at         INTEGER,
+    heartbeat_at       INTEGER,
+    -- starting | idle | running | paused | stopped | error
+    status             TEXT    NOT NULL DEFAULT 'starting',
+    updated_at         INTEGER
+);
+
+INSERT OR IGNORE INTO bworker_state (id, paused, status) VALUES (1, 0, 'starting');
+
+-- Per-work-type retry/toggle policy. bworker_work carries a copy for a unit
+-- that started under an older policy; new units copy the policy here.
+-- activity_cleanup is always enabled and is never paused.
+CREATE TABLE IF NOT EXISTS bworker_policies (
+    work_type           TEXT    PRIMARY KEY,
+    enabled             INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    max_failures        INTEGER,
+    infinite_retry      INTEGER NOT NULL DEFAULT 0 CHECK (infinite_retry IN (0, 1)),
+    retry_delay_seconds INTEGER NOT NULL DEFAULT 60,
+    backoff_multiplier  REAL    NOT NULL DEFAULT 2.0,
+    max_delay_seconds   INTEGER,
+    updated_at          INTEGER
+);
+
+INSERT OR IGNORE INTO bworker_policies
+    (work_type, enabled, max_failures, infinite_retry,
+     retry_delay_seconds, backoff_multiplier, max_delay_seconds)
+VALUES
+    ('movie_search',     1, NULL, 1, 21600,  1.0, 21600),
+    ('series_search',    1, NULL, 1, 14400,  1.0, 14400),
+    ('episode_search',   1, NULL, 1, 14400,  1.0, 14400),
+    ('playlist_sync',    1, NULL, 1,   300,  2.0,  3600),
+    ('metadata_refresh', 1, NULL, 1, 604800, 1.0, 604800),
+    ('download',         1,    3, 0,    60,  2.0,   900),
+    ('probe',            1,    3, 0,   300,  1.0,   300),
+    ('library_scan',     1,    3, 0,   900,  2.0,   900),
+    ('activity_cleanup', 1, NULL, 1,    60,  2.0,  3600);
+
+-- One catalogue scan session per work/epoch. epoch is opaque and changes when
+-- the underlying provider catalogue changes; a changed epoch invalidates the
+-- old scan so paging can never mix two catalogues.
+CREATE TABLE IF NOT EXISTS bworker_scan (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_id            INTEGER NOT NULL REFERENCES bworker_work(id) ON DELETE CASCADE,
+    epoch              TEXT    NOT NULL,
+    -- Fingerprint of the query/title identity inputs that produced this scan.
+    -- When the title, year, season/episode identity or search query changes,
+    -- the scan is invalidated and a new epoch/fingerprint is started instead
+    -- of paging results from the old query.
+    query_fingerprint  TEXT,
+    status             TEXT    NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'complete', 'invalidated')),
+    cursor             TEXT,
+    -- exhausted=1 means source paging reached the end for this epoch. It is
+    -- distinct from complete: a scan may stop early (batch limit) without
+    -- exhausting the provider result set.
+    exhausted          INTEGER NOT NULL DEFAULT 0 CHECK (exhausted IN (0, 1)),
+    candidates_seen    INTEGER NOT NULL DEFAULT 0,
+    -- Provider entries whose parsed title matched the target identity,
+    -- before deduplication.
+    candidates_matched INTEGER NOT NULL DEFAULT 0,
+    -- Deduplicated candidate rows retained in bworker_candidates for this
+    -- scan. A03 updates this on every upsert; it is the count used to decide
+    -- whether another page is needed.
+    matched_count      INTEGER NOT NULL DEFAULT 0,
+    candidates_probed  INTEGER NOT NULL DEFAULT 0,
+    created_at         INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL,
+    UNIQUE (work_id, epoch)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bworker_scan_work
+    ON bworker_scan (work_id, status);
+-- idx_bworker_scan_fingerprint is created by the v5 migration, after it has
+-- added query_fingerprint to databases created by a partial v5 build. An
+-- index on a column that does not exist yet would make schema.sql fail before
+-- the migration can repair the table.
+
+-- Candidates discovered while paging the catalogue. Derived data: excluded
+-- from backups and safe to rebuild. Identity mirrors a download/probe:
+-- (source_id, provider_kind, provider_remote_id, episode_stream_id).
+CREATE TABLE IF NOT EXISTS bworker_candidates (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id            INTEGER NOT NULL REFERENCES bworker_scan(id) ON DELETE CASCADE,
+    work_id            INTEGER NOT NULL REFERENCES bworker_work(id) ON DELETE CASCADE,
+    source_id          INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    -- Catalogue item the candidate was matched against, when known. Kept
+    -- nullable because a cached catalogue entry can disappear between paging
+    -- and matching; ON DELETE SET NULL preserves the candidate record.
+    item_id            INTEGER REFERENCES items(id) ON DELETE SET NULL,
+    provider_kind      TEXT    NOT NULL CHECK (provider_kind IN ('vod', 'series')),
+    provider_remote_id TEXT    NOT NULL,
+    episode_stream_id  TEXT    NOT NULL DEFAULT '',
+    release_name       TEXT,
+    resolution         TEXT,
+    source             TEXT,
+    score              INTEGER,
+    score_details      TEXT,
+    -- How item_id was matched and its confidence; NULL when no identity match.
+    match_kind         TEXT CHECK (match_kind IS NULL OR
+        match_kind IN ('tmdb', 'imdb', 'title')),
+    match_score        REAL,
+    eligible           INTEGER NOT NULL DEFAULT 0 CHECK (eligible IN (0, 1)),
+    target_met         INTEGER NOT NULL DEFAULT 0 CHECK (target_met IN (0, 1)),
+    needs_upgrade      INTEGER NOT NULL DEFAULT 0 CHECK (needs_upgrade IN (0, 1)),
+    -- pending | probing | probed | selected | rejected | failed
+    status             TEXT    NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'probing', 'probed', 'selected',
+                          'rejected', 'failed')),
+    probed_at          INTEGER,
+    created_at         INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL,
+    UNIQUE (scan_id, source_id, provider_kind,
+            provider_remote_id, episode_stream_id)
+);
+
+-- Candidate paging: the next pending row and the best-scored finished row.
+CREATE INDEX IF NOT EXISTS idx_bworker_candidates_scan
+    ON bworker_candidates (scan_id, status, score DESC, id);
+CREATE INDEX IF NOT EXISTS idx_bworker_candidates_work
+    ON bworker_candidates (work_id, status, score DESC, id);
+-- idx_bworker_candidates_item is created by the v5 migration for the same
+-- schema.sql-before-migration reason as idx_bworker_scan_fingerprint.

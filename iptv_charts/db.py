@@ -13,6 +13,7 @@ import json
 import sqlite3
 import time
 from contextlib import contextmanager
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -23,7 +24,82 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 #: Bumped whenever schema.sql starts relying on a column that existing
 #: databases do not have. New tables appear through CREATE IF NOT EXISTS;
 #: columns need an explicit step below.
-SCHEMA_VERSION = 4
+#:
+#: v5 (0.8.0): weighted profiles, items.imdb_id, per-item overrides, file and
+#: download scores, and the bworker work/state/events/policy/scan/candidate
+#: tables. The legacy quality_profiles columns stay in place; old profile rows
+#: are discarded and every movie/series is assigned to the 1080p builtin.
+SCHEMA_VERSION = 5
+
+#: The profile new movies/series receive when they have no explicit choice.
+DEFAULT_PROFILE_KEY = "1080p"
+
+#: Builtin profiles, in display order. The canonical data shape is owned here
+#: (not in quality.py) so migration and restore agree without importing the
+#: scoring engine. Insert order is separate: 1080p is inserted first so that
+#: legacy code selecting "the first profile by id" still lands on the default.
+BUILTIN_PROFILES = (
+    {"builtin_key": "4k", "name": "4K", "resolution": "2160p"},
+    {"builtin_key": "1080p", "name": "1080p", "resolution": "1080p"},
+    {"builtin_key": "720p", "name": "720p", "resolution": "720p"},
+)
+
+#: Key -> spec lookup used by validation and backup restore.
+BUILTIN_PROFILES_BY_KEY = {
+    profile["builtin_key"]: profile for profile in BUILTIN_PROFILES
+}
+
+_BUILTIN_INSERT_ORDER = ("1080p", "4k", "720p")
+
+#: Required quality/source selections for every builtin, in preference order.
+#: The full option vocabulary (including Unknown, Workprint, CAM, Telesync,
+#: Telecine, Screener and R5) is documented in the contracts file; a builtin
+#: selects only these eight, each worth 10 points.
+_BUILTIN_QUALITY_OPTIONS = (
+    ("remux", "REMUX"),
+    ("bluray", "BluRay"),
+    ("bdrip", "BDRip"),
+    ("web-dl", "WEB-DL"),
+    ("webrip", "WEBRip"),
+    ("hdtv", "HDTV"),
+    ("sd-tv", "SD-TV"),
+    ("dvd", "DVD"),
+)
+
+#: Settings introduced with schema v5. They are also seeded in schema.sql for
+#: fresh databases; this copy lets the v5 migration and startup repair run
+#: independently of schema.sql's execution order.
+DEFAULT_SETTINGS = {
+    "external_player_enabled": "0",
+    "default_profile_key": DEFAULT_PROFILE_KEY,
+    "movie_search_interval_hours": "6",
+    "series_search_interval_hours": "4",
+    "candidate_batch_size": "25",
+    "probe_batch_per_loop": "3",
+    "update_check_enabled": "1",
+    "bworker_retry_delay_seconds": "60",
+    "bworker_retry_backoff": "2.0",
+    "bworker_retry_max_delay_seconds": "3600",
+    "bworker_idle_wait_seconds": "30",
+    "bworker_fast_loop_seconds": "10",
+    "activity_log_cap": "500",
+    "activity_log_trim_to": "100",
+    "activity_refresh_seconds": "5",
+}
+
+#: (work_type, enabled, max_failures, infinite_retry, retry_delay_seconds,
+#:  backoff_multiplier, max_delay_seconds)
+DEFAULT_POLICIES = (
+    ("movie_search", 1, None, 1, 21600, 1.0, 21600),
+    ("series_search", 1, None, 1, 14400, 1.0, 14400),
+    ("episode_search", 1, None, 1, 14400, 1.0, 14400),
+    ("playlist_sync", 1, None, 1, 300, 2.0, 3600),
+    ("metadata_refresh", 1, None, 1, 604800, 1.0, 604800),
+    ("download", 1, 3, 0, 60, 2.0, 900),
+    ("probe", 1, 3, 0, 300, 1.0, 300),
+    ("library_scan", 1, 3, 0, 900, 2.0, 900),
+    ("activity_cleanup", 1, None, 1, 60, 2.0, 3600),
+)
 
 _TASKS = ("search_missing", "refresh_metadata", "refresh_catalog", "scan_library")
 
@@ -99,6 +175,332 @@ def apply_schema(conn: sqlite3.Connection) -> None:
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+# --------------------------------------------------------------- v5 canonical
+def _builtin_criteria() -> dict:
+    """The canonical criteria_json shared by all three builtin profiles.
+
+    Builtins configure only the mandatory resolution and eight quality
+    selections. Optional sections start empty, so their maximum and target are
+    both the mandatory base score of 20.
+    """
+    return {
+        "version": 1,
+        "quality_options": [
+            {"value": value, "label": label, "weight": 10}
+            for value, label in _BUILTIN_QUALITY_OPTIONS
+        ],
+        "video_codecs": [],
+        "audio_codecs": [],
+        "audio_languages": [],
+        "audio_channels": [],
+        "subtitle_formats": [],
+        "subtitle_languages": [],
+    }
+
+
+def _release_builtin_name(conn: sqlite3.Connection, name: str, key: str) -> None:
+    """Free a builtin's canonical name without discarding user data.
+
+    Builtin names (4K, 1080p, 720p) are reserved. A damaged or partial
+    database can hold a custom row under one of those names while the
+    canonical row is missing; a plain ``INSERT OR IGNORE`` would then be
+    silently skipped on the name conflict and leave the builtin absent. Any
+    conflicting row is renamed instead, so the insert can proceed and the
+    custom profile survives under a distinct name. A builtin row that itself
+    carries the wrong name is renamed too; the UPDATE by ``builtin_key`` below
+    restores its canonical name on its own iteration.
+    """
+    rows = conn.execute(
+        "SELECT id, builtin_key FROM quality_profiles WHERE name = ?", (name,)
+    ).fetchall()
+    for row in rows:
+        if str(row["builtin_key"] or "") == key:
+            continue
+        base = f"{name} (custom)"
+        candidate = base
+        suffix = 2
+        while conn.execute(
+            "SELECT 1 FROM quality_profiles WHERE name = ?", (candidate,)
+        ).fetchone():
+            candidate = f"{base} {suffix}"
+            suffix += 1
+        conn.execute(
+            "UPDATE quality_profiles SET name = ? WHERE id = ?",
+            (candidate, int(row["id"])),
+        )
+
+
+def ensure_builtin_profiles(conn: sqlite3.Connection, *,
+                            now: int | None = None) -> dict[str, int]:
+    """Insert (or repair) the three immutable builtins and return key -> id.
+
+    Legacy columns are populated as well, because an old ``quality.Profile``
+    reader may run until the weighted engine takes over. The criteria payload
+    is canonical: editing a builtin through the API is forbidden, and a
+    damaged row is repaired on the next startup.
+
+    Robust to a missing or damaged builtin row: the canonical row is inserted
+    when absent and overwritten when present. A custom row occupying a
+    canonical name is renamed rather than deleted (see
+    ``_release_builtin_name``), so a migration/startup repair can never fail
+    with a UNIQUE-name error.
+    """
+    now = int(now or time.time())
+    criteria = _builtin_criteria()
+    criteria_json = json.dumps(criteria, ensure_ascii=False, sort_keys=True)
+    selected = [option["value"] for option in criteria["quality_options"]]
+    specs = {spec["builtin_key"]: spec for spec in BUILTIN_PROFILES}
+
+    for key in _BUILTIN_INSERT_ORDER:
+        spec = specs[key]
+        resolution = spec["resolution"]
+        _release_builtin_name(conn, spec["name"], key)
+        legacy_qualities = json.dumps([{
+            "name": resolution,
+            "resolution": resolution,
+            "sources": selected,
+        }])
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO quality_profiles
+                (name, resolutions, cutoff, upgrades, qualities,
+                 audio_mode, audio_languages, subtitle_mode, subtitle_languages,
+                 probe_required, created_at, builtin_key, is_builtin,
+                 resolution, resolution_weight, target_score, max_score,
+                 revision, updated_at, criteria_json)
+            VALUES (?, ?, ?, 1, ?, 'any', '[]', 'any', '[]', 1, ?,
+                    ?, 1, ?, 10, 20, 20, 1, ?, ?)
+            """,
+            (
+                spec["name"], json.dumps([resolution]), resolution,
+                legacy_qualities, now, key, resolution, now, criteria_json,
+            ),
+        )
+        # Keep the builtin canonical even if an old/backup path inserted a
+        # row with the same key. Builtins are immutable by contract.
+        conn.execute(
+            """
+            UPDATE quality_profiles SET
+                name = ?, resolutions = ?, cutoff = ?, upgrades = 1,
+                qualities = ?, audio_mode = 'any', audio_languages = '[]',
+                subtitle_mode = 'any', subtitle_languages = '[]',
+                probe_required = 1, is_builtin = 1, resolution = ?,
+                resolution_weight = 10, target_score = 20, max_score = 20,
+                revision = 1, updated_at = COALESCE(updated_at, ?),
+                criteria_json = ?
+            WHERE builtin_key = ?
+            """,
+            (
+                spec["name"], json.dumps([resolution]), resolution,
+                legacy_qualities, resolution, now, criteria_json, key,
+            ),
+        )
+
+    rows = conn.execute(
+        "SELECT id, builtin_key FROM quality_profiles WHERE builtin_key IS NOT NULL"
+    ).fetchall()
+    return {str(row["builtin_key"]): int(row["id"]) for row in rows}
+
+
+def ensure_default_settings(conn: sqlite3.Connection) -> None:
+    """Seed the 0.8.0 settings keys without overwriting user values."""
+    for key, value in DEFAULT_SETTINGS.items():
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+
+
+def ensure_bworker_policies(conn: sqlite3.Connection, *,
+                            now: int | None = None) -> None:
+    """Seed the per-work-type retry policies without overwriting edits."""
+    now = int(now or time.time())
+    for row in DEFAULT_POLICIES:
+        work_type, enabled, max_failures, infinite_retry, delay, backoff, max_delay = row
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO bworker_policies
+                (work_type, enabled, max_failures, infinite_retry,
+                 retry_delay_seconds, backoff_multiplier, max_delay_seconds,
+                 updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (work_type, enabled, max_failures, infinite_retry,
+             delay, backoff, max_delay, now),
+        )
+    # Log cleanup is the one policy that must never be switched off: it has to
+    # keep trimming the Valkey log while bworker is paused.
+    conn.execute(
+        "UPDATE bworker_policies SET enabled = 1 WHERE work_type = 'activity_cleanup'"
+    )
+
+
+def ensure_bworker_state(conn: sqlite3.Connection) -> None:
+    """Create the singleton state row if a database predates schema v5."""
+    conn.execute(
+        "INSERT OR IGNORE INTO bworker_state (id, paused, status) "
+        "VALUES (1, 0, 'starting')"
+    )
+
+
+def _parse_iso_date(value) -> date | None:
+    try:
+        return date.fromisoformat(str(value or "")[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _date_epoch(day: date) -> int:
+    """Unix seconds for midnight UTC of ``day``.
+
+    Availability/air dates are calendar dates; pinning them to UTC makes the
+    stored next_run_at independent of the host timezone.
+    """
+    return int(datetime(day.year, day.month, day.day,
+                        tzinfo=timezone.utc).timestamp())
+
+
+def _movie_initial_stage(row, now: int) -> tuple[str, int]:
+    """(stage, next_run_at) for a freshly seeded movie work row."""
+    mode = str(row["minimum_availability"] or "released").lower()
+    if mode == "announced":
+        return "search", now
+    release = _parse_iso_date(row["release_date"])
+    today = date.fromtimestamp(now)
+    if release is None:
+        # No date: check back daily instead of searching a cinema recording.
+        return "waiting_availability", now + 86400
+    if release > today:
+        return "waiting_availability", _date_epoch(release)
+    if mode == "in_cinemas":
+        return "search", now
+    status = str(row["status"] or "").lower()
+    if not status or status == "released":
+        return "search", now
+    return "waiting_availability", now + 86400
+
+
+def _episode_initial_stage(air_date, now: int) -> tuple[str, int]:
+    """(stage, next_run_at) for a freshly seeded episode work row."""
+    day = _parse_iso_date(air_date)
+    if day is None:
+        return "waiting_air", now + 86400
+    if day > date.fromtimestamp(now):
+        return "waiting_air", _date_epoch(day)
+    return "search", now
+
+
+def seed_bworker_work(conn: sqlite3.Connection, *, now: int | None = None) -> int:
+    """Create work rows for monitored movies and episodes.
+
+    Safe to call repeatedly: ``work_key`` is UNIQUE and every insert uses
+    ``INSERT OR IGNORE``. Existing rows (including disabled ones) are never
+    overwritten. Work keys are part of the public contract:
+    ``movie:<movie_id>:search`` and ``episode:<episode_id>:search``.
+    """
+    now = int(now or time.time())
+    inserted = 0
+
+    movies = conn.execute(
+        """
+        SELECT id, release_date, status, minimum_availability, file_path
+        FROM movies WHERE monitored = 1 ORDER BY id
+        """
+    ).fetchall()
+    for movie in movies:
+        stage, next_run = _movie_initial_stage(movie, now)
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO bworker_work
+                (work_key, work_type, entity_type, entity_id, payload, enabled,
+                 stage, status, failure_count, max_failures, infinite_retry,
+                 retry_delay_seconds, backoff_multiplier, next_run_at,
+                 created_at, updated_at)
+            VALUES (?, 'movie_search', 'movie', ?, ?, 1, ?, 'pending', 0,
+                    NULL, 1, 21600, 1.0, ?, ?, ?)
+            """,
+            (
+                f"movie:{int(movie['id'])}:search", int(movie["id"]),
+                json.dumps({"movie_id": int(movie["id"])}),
+                stage, int(next_run), now, now,
+            ),
+        )
+        inserted += int(cursor.rowcount or 0)
+
+    episodes = conn.execute(
+        """
+        SELECT e.id, e.series_id, e.season, e.episode, e.air_date, e.file_path
+        FROM series_episodes e
+        JOIN series s ON s.id = e.series_id
+        WHERE e.monitored = 1 AND s.monitored = 1
+        ORDER BY e.id
+        """
+    ).fetchall()
+    for episode in episodes:
+        stage, next_run = _episode_initial_stage(episode["air_date"], now)
+        payload = {
+            "series_id": int(episode["series_id"]),
+            "episode_id": int(episode["id"]),
+            "season": int(episode["season"]),
+            "episode": int(episode["episode"]),
+        }
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO bworker_work
+                (work_key, work_type, entity_type, entity_id, payload, enabled,
+                 stage, status, failure_count, max_failures, infinite_retry,
+                 retry_delay_seconds, backoff_multiplier, next_run_at,
+                 created_at, updated_at)
+            VALUES (?, 'episode_search', 'episode', ?, ?, 1, ?, 'pending', 0,
+                    NULL, 1, 14400, 1.0, ?, ?, ?)
+            """,
+            (
+                f"episode:{int(episode['id'])}:search", int(episode["id"]),
+                json.dumps(payload), stage, int(next_run), now, now,
+            ),
+        )
+        inserted += int(cursor.rowcount or 0)
+
+    return inserted
+
+
+def cancel_obsolete_search_jobs(conn: sqlite3.Connection, *,
+                                now: int | None = None) -> int:
+    """Cancel queued 0.7.0 search jobs that bworker now owns.
+
+    Only queued search/search-task rows are affected. Playlist syncs,
+    downloads, metadata refreshes, probes and library scans continue untouched.
+    Running handlers are left to finish; their results are still valid.
+    """
+    now = int(now or time.time())
+    cancelled = 0
+    rows = conn.execute(
+        "SELECT id, kind, payload FROM worker_jobs WHERE status = 'queued'"
+    ).fetchall()
+    for row in rows:
+        kind = str(row["kind"] or "")
+        obsolete = kind in {"search_movie", "search_series"}
+        if kind == "task":
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            obsolete = isinstance(payload, dict) and payload.get("name") == "search_missing"
+        if not obsolete:
+            continue
+        cursor = conn.execute(
+            """
+            UPDATE worker_jobs SET status = 'cancelled', finished_at = ?,
+                   cancel_requested = 1,
+                   message = 'Superseded by bworker in the 0.8.0 upgrade'
+            WHERE id = ? AND status = 'queued'
+            """,
+            (now, int(row["id"])),
+        )
+        cancelled += int(cursor.rowcount or 0)
+    return cancelled
 
 
 def migrate(conn: sqlite3.Connection) -> None:
@@ -266,6 +668,146 @@ def migrate(conn: sqlite3.Connection) -> None:
             """
         )
 
+    if version < 5:
+        # ---------------------------------------------------------------
+        # 0.8.0: weighted profiles, item/download scores and bworker.
+        #
+        # guard every column: a fresh database already has them from
+        # schema.sql, while a v4 database needs the ALTER. New tables are
+        # created by schema.sql before this runs.
+        # ---------------------------------------------------------------
+        now = int(time.time())
+        additions = (
+            ("items", "imdb_id", "TEXT"),
+            ("quality_profiles", "builtin_key", "TEXT"),
+            ("quality_profiles", "is_builtin", "INTEGER NOT NULL DEFAULT 0"),
+            ("quality_profiles", "resolution", "TEXT"),
+            ("quality_profiles", "resolution_weight", "INTEGER NOT NULL DEFAULT 10"),
+            ("quality_profiles", "target_score", "INTEGER NOT NULL DEFAULT 20"),
+            ("quality_profiles", "max_score", "INTEGER"),
+            ("quality_profiles", "revision", "INTEGER NOT NULL DEFAULT 1"),
+            ("quality_profiles", "updated_at", "INTEGER"),
+            ("quality_profiles", "criteria_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("movies", "file_score", "INTEGER"),
+            ("movies", "candidate_batch_size", "INTEGER"),
+            ("movies", "probe_batch_size", "INTEGER"),
+            ("movies", "search_interval_hours", "REAL"),
+            ("series", "candidate_batch_size", "INTEGER"),
+            ("series", "probe_batch_size", "INTEGER"),
+            ("series", "search_interval_hours", "REAL"),
+            ("series_episodes", "file_score", "INTEGER"),
+            ("downloads", "score", "INTEGER"),
+            ("downloads", "score_details", "TEXT"),
+        )
+        for table, column, definition in additions:
+            if column not in _columns(conn, table):
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+        # Defensive: if a partial v5 run created bworker_work before these
+        # lifecycle columns were added to schema.sql, add them here. A normal
+        # v4 -> v5 run gets the complete table from schema.sql already.
+        work_additions = (
+            ("best_score", "INTEGER"),
+            ("best_source_id", "INTEGER"),
+            ("best_remote_id", "TEXT"),
+            ("best_episode_stream_id", "TEXT"),
+            ("current_download_id", "INTEGER"),
+            ("profile_revision", "INTEGER"),
+            ("reset_requested", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_started_at", "INTEGER"),
+            ("last_finished_at", "INTEGER"),
+        )
+        if _columns(conn, "bworker_work"):
+            for column, definition in work_additions:
+                if column not in _columns(conn, "bworker_work"):
+                    conn.execute(
+                        f"ALTER TABLE bworker_work ADD COLUMN {column} {definition}"
+                    )
+
+        # Same defensive rule for the A03 scan/candidate identity fields. A
+        # normal v4 -> v5 upgrade gets them from schema.sql; this only repairs
+        # a database created by a partial v5 build.
+        scan_additions = (
+            ("query_fingerprint", "TEXT"),
+            ("exhausted", "INTEGER NOT NULL DEFAULT 0"),
+            ("matched_count", "INTEGER NOT NULL DEFAULT 0"),
+        )
+        if _columns(conn, "bworker_scan"):
+            for column, definition in scan_additions:
+                if column not in _columns(conn, "bworker_scan"):
+                    conn.execute(
+                        f"ALTER TABLE bworker_scan ADD COLUMN {column} {definition}"
+                    )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bworker_scan_fingerprint "
+                "ON bworker_scan (work_id, query_fingerprint, id DESC)"
+            )
+        candidate_additions = (
+            ("item_id", "INTEGER REFERENCES items(id) ON DELETE SET NULL"),
+            ("match_kind", "TEXT"),
+            ("match_score", "REAL"),
+        )
+        if _columns(conn, "bworker_candidates"):
+            for column, definition in candidate_additions:
+                if column not in _columns(conn, "bworker_candidates"):
+                    conn.execute(
+                        f"ALTER TABLE bworker_candidates ADD COLUMN {column} {definition}"
+                    )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bworker_candidates_item "
+                "ON bworker_candidates (item_id, status, score DESC, id)"
+            )
+
+        # Candidate resolution is ID-first, so identity lookups must not scan
+        # the whole catalogue.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_items_kind_tmdb ON items (kind, tmdb_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_items_kind_imdb ON items (kind, imdb_id)"
+        )
+        # One row per builtin key; custom profiles have NULL and are exempt.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_quality_profiles_builtin "
+            "ON quality_profiles (builtin_key) WHERE builtin_key IS NOT NULL"
+        )
+
+        # Old domain profiles are intentionally not migrated. Delete them
+        # before inserting builtins because quality_profiles.name is UNIQUE and
+        # a 0.7.0 profile may well be called "4K" or "1080p". Movie/series
+        # identity is preserved; only their profile reference is reset.
+        conn.execute(
+            "DELETE FROM quality_profiles WHERE is_builtin = 0 OR builtin_key IS NULL"
+        )
+        builtin_ids = ensure_builtin_profiles(conn, now=now)
+        default_id = builtin_ids[DEFAULT_PROFILE_KEY]
+        conn.execute(
+            """
+            UPDATE movies SET quality_profile_id = ?
+            WHERE quality_profile_id IS NULL
+               OR quality_profile_id NOT IN (
+                   SELECT id FROM quality_profiles WHERE is_builtin = 1)
+            """,
+            (default_id,),
+        )
+        conn.execute(
+            """
+            UPDATE series SET quality_profile_id = ?
+            WHERE quality_profile_id IS NULL
+               OR quality_profile_id NOT IN (
+                   SELECT id FROM quality_profiles WHERE is_builtin = 1)
+            """,
+            (default_id,),
+        )
+
+        ensure_default_settings(conn)
+        ensure_bworker_policies(conn, now=now)
+        ensure_bworker_state(conn)
+        # Work rows are seeded only for monitored items and never duplicated:
+        # bworker_work.work_key is UNIQUE and the insert uses OR IGNORE.
+        seed_bworker_work(conn, now=now)
+        cancel_obsolete_search_jobs(conn, now=now)
+
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -288,6 +830,15 @@ def init_db(path: Path | None = None) -> None:
         try:
             apply_schema(conn)
             migrate(conn)
+            # These are cheap INSERT OR IGNORE repairs, not migrations. They
+            # keep the immutable builtins, defaults and singleton state row
+            # present even if an early v5 database was created before the
+            # schema was finalised.
+            ensure_default_settings(conn)
+            ensure_bworker_policies(conn)
+            ensure_bworker_state(conn)
+            ensure_builtin_profiles(conn)
+            conn.commit()
         finally:
             conn.close()
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
