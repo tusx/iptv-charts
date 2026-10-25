@@ -1023,6 +1023,8 @@ def _handoff(conn, ctx: dict, profile, candidate: Mapping[str, Any],
 def _label(evaluation: Mapping[str, Any]) -> str:
     resolution = str(evaluation.get("resolution") or "unknown")
     source = str(evaluation.get("source") or "unknown")
+    if source in ("", "unknown", "none"):
+        return resolution
     try:
         source_name = quality.source_label(source)
     except Exception:
