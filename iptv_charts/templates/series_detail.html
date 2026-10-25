@@ -1,189 +1,543 @@
 {% extends "base.html" %}
-{% from "_macros.html" import poster, status_badge, progress, library_nav %}
+{% from "_macros.html" import poster, library_nav, icon %}
 {% block title %}{{ series.title }} · {{ app_name }}{% endblock %}
 
 {% block content %}
-<section class="detail-page">
-  <p class="crumb"><a href="{{ url_for('manager.series') }}">Series</a> / {{ series.title }}</p>
-  {{ library_nav('series', 'library') }}
+{# Bootstrap is vendored locally and loaded only on this page: no runtime CDN
+   and no external font/JS request. series_detail.css restores the app theme
+   after Bootstrap's reboot and styles the accordions and stage badges. #}
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap/css/bootstrap.min.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/series_detail.css') }}">
 
-  <div class="detail-hero{% if series.backdrop %} has-backdrop{% endif %}"
-       {% if series.backdrop %}style="--hero-backdrop: url('{{ series.backdrop }}')"{% endif %}>
-    <div class="detail-poster">
-      {{ poster(series.poster, series.title, 'poster-large') }}
-    </div>
-    <div class="detail-info">
-      <h1>{{ series.title }}</h1>
-      <p class="detail-meta">
-        {{ series.year or 'Year unknown' }}
-        {% if series.status %} · {{ series.status }}{% endif %}
-        {% if series.rating %} · ★ {{ '%.1f'|format(series.rating) }}{% endif %}
-      </p>
-      {% if series.genres %}
-        <p class="detail-genres">{{ series.genres|join(' · ') }}</p>
-      {% endif %}
-      <p class="detail-overview">{{ series.overview or 'No overview available.' }}</p>
-      <div class="library-badges">
-        {% if series.monitored %}<span class="badge badge-monitored">Monitored</span>{% endif %}
-        <span class="badge badge-muted">
-          New seasons: {% if series.monitor_new_seasons == 'future' %}future only
-          {% elif series.monitor_new_seasons == 'none' %}ignored
-          {% else %}all{% endif %}
-        </span>
-        {% if series.tvdb_id %}<span class="badge badge-muted">TVDB {{ series.tvdb_id }}</span>{% endif %}
-      </div>
-      <div class="detail-actions">
-        <button class="btn btn-primary" id="series-search-now" type="button">Search missing</button>
-        <button class="btn btn-ghost" id="series-refresh" type="button">Refresh metadata</button>
-        <button class="btn btn-danger" id="series-delete" type="button">Delete</button>
-      </div>
-      <p class="hint" id="series-action-status" role="status"></p>
-      {% if series.search_message %}
-        <p class="hint">Last search: {{ series.search_message }}</p>
-      {% endif %}
-    </div>
-  </div>
+<div class="series-detail-page">
+  <section class="detail-page">
+    <p class="crumb"><a href="{{ url_for('manager.series') }}">Series</a> / {{ series.title }}</p>
+    {{ library_nav('series', 'library') }}
 
-  <div class="detail-columns">
-    <section class="detail-panel">
-      <div class="panel-head">
-        <h2>Episodes</h2>
-        <span class="muted">{{ seasons|length }} season{{ '' if seasons|length == 1 else 's' }}</span>
+    <div class="detail-hero{% if series.backdrop %} has-backdrop{% endif %}"
+         {% if series.backdrop %}style="--hero-backdrop: url('{{ series.backdrop }}')"{% endif %}>
+      <div class="detail-poster">
+        {{ poster(series.poster, series.title, 'poster-large') }}
       </div>
-      {% if seasons %}
-        {% for season, episodes in seasons %}
-          {% set season_monitored = episodes|selectattr('monitored')|list|length == episodes|length %}
-          <details class="season" open>
-            <summary>
-              <span class="season-name">Season {{ season }}</span>
-              <span class="muted">{{ episodes|length }} episode{{ '' if episodes|length == 1 else 's' }}</span>
-              <label class="check season-monitor" onclick="event.stopPropagation()">
-                <input type="checkbox" data-season-monitor="{{ season }}" {% if season_monitored %}checked{% endif %}>
-                Monitored
-              </label>
-            </summary>
-            <div class="episode-list">
-              {% for episode in episodes %}
-                <div class="episode-row">
-                  <span class="episode-code">S{{ '%02d'|format(episode.season) }}E{{ '%02d'|format(episode.episode) }}</span>
-                  <span class="episode-title" title="{{ episode.title }}">{{ episode.title or 'Episode ' ~ episode.episode }}</span>
-                  <span class="episode-date">{{ episode.air_date or '' }}</span>
-                  <span class="episode-resolution">
-                    {{ episode.quality_label or episode.resolution or '' }}
-                    {% if episode.audio_languages %}<span class="muted"> · {{ episode.audio_languages|join('/') }}</span>{% endif %}
-                  </span>
-                  {{ status_badge('downloading' if episode.download else episode.status) }}
-                  <label class="check">
-                    <input type="checkbox" data-episode-monitor="{{ episode.id }}" {% if episode.monitored %}checked{% endif %}>
-                    Monitor
-                  </label>
-                  <span class="episode-actions">
-                    <button class="btn btn-sm" type="button" data-episode-search="{{ episode.id }}">Search</button>
-                    <button class="btn btn-sm btn-ghost" type="button" data-episode-manual="{{ episode.id }}">Manual</button>
-                  </span>
-                </div>
-                {% if episode.download %}
-                  <div class="episode-download">{{ progress(episode.download) }}</div>
-                {% endif %}
-              {% endfor %}
+      <div class="detail-info">
+        <h1>{{ series.title }}</h1>
+        <p class="detail-meta">
+          {{ series.year or 'Year unknown' }}
+          {% if series.rating %} · ★ {{ '%.1f'|format(series.rating) }}{% endif %}
+          · <span class="airing-badge airing-{{ airing.state }}"
+                  title="{{ airing.detail }}">{{ airing.label }}</span>
+        </p>
+        {% if series.genres %}
+          <p class="detail-genres">{{ series.genres|join(' · ') }}</p>
+        {% endif %}
+        <p class="detail-overview">{{ series.overview or 'No overview available.' }}</p>
+        <div class="library-badges">
+          {% if series.monitored %}<span class="badge badge-monitored">Monitored</span>{% endif %}
+          <span class="badge badge-muted">
+            New seasons: {% if series.monitor_new_seasons == 'future' %}future only
+            {% elif series.monitor_new_seasons == 'none' %}ignored
+            {% else %}all{% endif %}
+          </span>
+          {% if series.tvdb_id %}<span class="badge badge-muted">TVDB {{ series.tvdb_id }}</span>{% endif %}
+        </div>
+        <div class="detail-actions">
+          <button class="btn btn-primary" id="series-search-now" type="button">
+            {{ icon('magnifying-glass') }} Search missing
+          </button>
+          <button class="btn btn-ghost" id="series-refresh" type="button">
+            {{ icon('rotate') }} Refresh metadata
+          </button>
+          <button class="btn btn-ghost" id="series-manual-metadata" type="button"
+                  {% if not tmdb_configured %}disabled title="Add a TMDB token on the settings page first"{% endif %}>
+            {{ icon('pen-to-square') }} Manual metadata
+          </button>
+          <button class="btn btn-danger" id="series-delete" type="button">
+            {{ icon('trash-can') }} Delete
+          </button>
+        </div>
+        <p class="hint" id="series-action-status" role="status"></p>
+        {% if series.search_message %}
+          <p class="hint">Last search: {{ series.search_message }}</p>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ------------------------------------------------------- series stage #}
+    <section class="stage-card" id="series-stage-card"
+             data-stage="{{ stage.stage }}"
+             data-stage-status="{{ stage.status }}"
+             data-stage-signature="{{ stage.signature }}"
+             aria-labelledby="series-stage-title">
+      <div class="stage-card-head">
+        <div class="stage-card-identity">
+          <span class="stage-eyebrow">{{ icon('robot') }} Bworker</span>
+          <h2 id="series-stage-title">Series status</h2>
+          <p class="stage-now" data-stage-now>{{ stage.bworker_now }}</p>
+        </div>
+        <div class="stage-card-head-state">
+          <span class="stage-badge tone-{{ stage.tone }}" data-stage-label
+                title="{{ stage.hint }}">{{ stage.label }}</span>
+          <span class="stage-status-line">{{ stage.status_label }}</span>
+          <button class="btn btn-sm btn-ghost" id="series-stage-refresh" type="button"
+                  title="Reload the server-rendered stage and history">
+            {{ icon('rotate') }} Refresh stage
+          </button>
+        </div>
+      </div>
+
+      {% if bworker_paused %}
+        <div class="note note-warn stage-paused" id="series-stage-paused">
+          <strong>Bworker is paused.</strong>
+          No new searches, probes or downloads start until it is resumed from the
+          Activity page.
+        </div>
+      {% endif %}
+      {% if not series.monitored %}
+        <div class="note stage-unmonitored">
+          <strong>This series is unmonitored.</strong>
+          Its episodes are skipped until monitoring is enabled in Edit.
+        </div>
+      {% endif %}
+
+      <div class="stage-tabs" role="tablist" aria-label="Series status panels">
+        <button class="stage-tab is-active" type="button" id="series-stage-tab-current"
+                role="tab" aria-selected="true" aria-controls="series-stage-current"
+                data-stage-tab="current">Current</button>
+        <button class="stage-tab" type="button" id="series-stage-tab-history"
+                role="tab" aria-selected="false" aria-controls="series-stage-history"
+                data-stage-tab="history" tabindex="-1">
+          History <span class="stage-tab-count">{{ stage_events|length }}</span>
+        </button>
+      </div>
+
+      <div class="stage-panel" id="series-stage-current" role="tabpanel"
+           aria-labelledby="series-stage-tab-current" data-stage-panel="current">
+        <div class="stage-metrics">
+          <div class="stage-metric">
+            <span class="stage-metric-label">Airing</span>
+            <strong class="airing-badge airing-{{ airing.state }}"
+                    title="{{ airing.detail }}">{{ airing.label }}</strong>
+            <span class="stage-metric-note">{{ airing.detail }}</span>
+          </div>
+          <div class="stage-metric">
+            <span class="stage-metric-label">Episodes downloaded</span>
+            <strong>{{ counts.downloaded }} / {{ counts.monitored }}</strong>
+            <span class="stage-metric-note">{{ counts.episodes }} episode{{ '' if counts.episodes == 1 else 's' }} loaded</span>
+          </div>
+          <div class="stage-metric">
+            <span class="stage-metric-label">Missing</span>
+            <strong>{{ counts.missing }}</strong>
+            <span class="stage-metric-note">Aired and monitored</span>
+          </div>
+          <div class="stage-metric">
+            <span class="stage-metric-label">Unaired</span>
+            <strong>{{ counts.unaired }}</strong>
+            <span class="stage-metric-note">Waiting for air</span>
+          </div>
+          <div class="stage-metric">
+            <span class="stage-metric-label">Quality profile</span>
+            <strong>{{ quality_profile.name or 'Default' }}</strong>
+            <span class="stage-metric-note">
+              {% if target_score is not none %}
+                Target {{ target_score }}{% if max_score %} of {{ max_score }}{% endif %}
+              {% else %}No weighted target{% endif %}
+              {% if upgrades %} · upgrades on{% endif %}
+            </span>
+          </div>
+          <div class="stage-metric">
+            <span class="stage-metric-label">Best candidate score</span>
+            <strong>{{ stage.best_score if stage.best_score is not none else '—' }}</strong>
+            <span class="stage-metric-note">bworker's strongest match</span>
+          </div>
+          <div class="stage-metric">
+            <span class="stage-metric-label">Next bworker pass</span>
+            <strong>{{ stage.next_run_text or '—' }}</strong>
+            <span class="stage-metric-note">
+              {% if stage.next_run_at %}Scheduled by the queue{% else %}No unit scheduled{% endif %}
+            </span>
+          </div>
+          <div class="stage-metric">
+            <span class="stage-metric-label">Stage</span>
+            <strong><span class="stage-badge tone-{{ stage.tone }}">{{ stage.label }}</span></strong>
+            <span class="stage-metric-note">{{ stage.hint }}</span>
+          </div>
+        </div>
+
+        {% if stage.progress %}
+          <div class="stage-current-progress">
+            <div class="stage-progress-row">
+              <span>{{ stage.progress.text }}</span>
+              {% if stage.progress.percent is not none %}
+                <span class="stage-progress-percent">{{ stage.progress.percent }}%</span>
+              {% endif %}
             </div>
-          </details>
-        {% endfor %}
-      {% else %}
-        <p class="muted">No episodes have been loaded from the metadata provider yet. Use Refresh metadata.</p>
-      {% endif %}
+            <div class="stage-progress" role="progressbar" aria-label="Current bworker progress"
+                 aria-valuemin="0" aria-valuemax="100"
+                 {% if stage.progress.percent is not none %}aria-valuenow="{{ stage.progress.percent }}"{% endif %}>
+              <span class="stage-progress-bar{% if stage.progress.indeterminate %} is-indeterminate{% endif %}"
+                    style="width: {{ stage.progress.percent if stage.progress.percent is not none else 100 }}%"></span>
+            </div>
+          </div>
+        {% endif %}
 
-      <h2>Edit</h2>
-      <form id="series-edit-form" class="stack-form">
-        <label class="check">
-          <input type="checkbox" id="series-monitored-edit" {% if series.monitored %}checked{% endif %}>
-          Monitored
-        </label>
-        <label class="field">
-          <span>Quality profile</span>
-          <select id="series-profile-edit">
-            {% for profile in profiles %}
-              <option value="{{ profile.id }}" {% if profile.id == series.quality_profile_id %}selected{% endif %}>
-                {{ profile.name }} ({{ profile.resolutions|join(', ') }})
-              </option>
+        {% if stage.message %}
+          <p class="stage-message"><strong>Last bworker message:</strong> {{ stage.message }}</p>
+        {% endif %}
+        <p class="hint">
+          Stages are read from bworker work and its durable event history. The
+          page polls the stage endpoint while it is open and reloads when the
+          stage, status, score, episode progress or newest event changes.
+        </p>
+      </div>
+
+      <div class="stage-panel" id="series-stage-history" role="tabpanel"
+           aria-labelledby="series-stage-tab-history" data-stage-panel="history" hidden>
+        <p class="hint">
+          Newest {{ stage_events|length }} of the durable bworker events for this
+          series and its episodes. Later events replace older ones.
+        </p>
+        {% if stage_events %}
+          <ol class="stage-events" id="series-stage-events">
+            {% for event in stage_events %}
+              <li class="stage-event" data-event-id="{{ event.id }}"
+                  data-event-time="{{ event.created_at or '' }}">
+                <span class="stage-badge tone-{{ event.stage_tone }}">{{ event.stage_label }}</span>
+                <span class="stage-event-status tone-{{ event.status_tone }}">{{ event.status_label }}</span>
+                {% if event.season is defined and event.episode is defined
+                      and event.season is not none and event.episode is not none %}
+                  <span class="stage-event-episode">S{{ '%02d'|format(event.season) }}E{{ '%02d'|format(event.episode) }}</span>
+                {% else %}
+                  <span class="stage-event-episode">Series</span>
+                {% endif %}
+                <span class="stage-event-message">{{ event.message or 'No message' }}</span>
+                <time class="stage-event-time" title="{{ event.created_at or '' }}">
+                  {{ format_age(event.created_at) }}
+                  {% if event.duration_seconds is defined and event.duration_seconds is not none %}
+                    · {{ event.duration_seconds }}s
+                  {% endif %}
+                </time>
+              </li>
             {% endfor %}
-          </select>
-        </label>
-        <label class="field">
-          <span>When a new season appears</span>
-          <select id="series-new-seasons-edit">
-            <option value="all" {% if series.monitor_new_seasons == 'all' %}selected{% endif %}>Monitor all new episodes</option>
-            <option value="future" {% if series.monitor_new_seasons == 'future' %}selected{% endif %}>Monitor future episodes only</option>
-            <option value="none" {% if series.monitor_new_seasons == 'none' %}selected{% endif %}>Do not monitor new seasons</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Queue priority</span>
-          <input type="number" id="series-priority-edit" min="-100" max="100" step="1" value="{{ series.priority or 0 }}">
-        </label>
-        <button class="btn" type="submit">Save</button>
-        <span class="hint" id="series-edit-status" role="status"></span>
-      </form>
+          </ol>
+        {% else %}
+          <p class="muted" id="series-stage-events-empty">
+            No bworker events recorded for this series yet.
+          </p>
+        {% endif %}
+      </div>
     </section>
 
-    <aside class="detail-side">
-      <h2>History</h2>
-      {% if history %}
-        <ul class="history-list">
-          {% for event in history %}
-            <li>
-              <span class="badge badge-{{ event.event }}">{{ event.event|title }}</span>
-              <span>{{ event.message or '' }}</span>
-              <time>{{ format_age(event.created_at) }}</time>
-            </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        <p class="muted">Nothing has happened yet.</p>
-      {% endif %}
-    </aside>
-  </div>
-</section>
+    <div class="detail-columns">
+      <section class="detail-panel series-seasons-panel">
+        <div class="panel-head">
+          <h2>Episodes</h2>
+          <span class="muted">{{ seasons|length }} season{{ '' if seasons|length == 1 else 's' }}</span>
+        </div>
 
-<dialog class="dialog dialog-wide" id="episode-search-dialog">
-  <div class="dialog-head">
-    <h2>Manual episode search</h2>
-    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
-  </div>
-  <div class="dialog-body">
-    <div class="search-field">
-      <input type="search" id="episode-release-query" placeholder="Search the IPTV catalog" autocomplete="off">
+        {% if seasons %}
+          {# Bootstrap accordion: the header carries season identity and its
+             aggregate stage; interactive controls live in the body so no
+             button is nested inside another button. #}
+          <div class="accordion series-accordions" id="series-seasons">
+            {% for group in seasons %}
+              <div class="accordion-item season-card" data-season="{{ group.number }}"
+                   data-season-stage="{{ group.stage.value }}">
+                <h2 class="accordion-header" id="season-heading-{{ group.number }}">
+                  <button class="accordion-button{% if not loop.first %} collapsed{% endif %}"
+                          type="button" data-bs-toggle="collapse"
+                          data-bs-target="#season-panel-{{ group.number }}"
+                          aria-expanded="{{ 'true' if loop.first else 'false' }}"
+                          aria-controls="season-panel-{{ group.number }}">
+                    <span class="season-heading-main">
+                      <span class="season-name">Season {{ group.number }}</span>
+                      <span class="season-summary">
+                        {{ group.episode_count }} episode{{ '' if group.episode_count == 1 else 's' }}
+                        · {{ group.downloaded_count }} downloaded
+                        · {{ group.monitored_count }} monitored
+                      </span>
+                    </span>
+                    <span class="stage-badge tone-{{ group.stage.tone }}"
+                          title="{{ group.stage.title }}">{{ group.stage.label }}</span>
+                  </button>
+                </h2>
+                <div id="season-panel-{{ group.number }}"
+                     class="accordion-collapse collapse{% if loop.first %} show{% endif %}"
+                     aria-labelledby="season-heading-{{ group.number }}"
+                     data-bs-parent="#series-seasons">
+                  <div class="accordion-body">
+                    <div class="season-toolbar">
+                      <label class="check season-monitor">
+                        <input type="checkbox" data-season-monitor="{{ group.number }}"
+                               {% if group.all_monitored %}checked{% endif %}>
+                        Monitor season
+                      </label>
+                      <button class="btn btn-sm" type="button"
+                              data-season-search="{{ group.number }}"
+                              title="Queue a search for every monitored episode in this season">
+                        {{ icon('magnifying-glass') }} Search season
+                      </button>
+                      <span class="hint">Uses the existing per-episode search endpoint.</span>
+                    </div>
+
+                    <div class="episode-list">
+                      {% for episode in group.episodes %}
+                        <article class="episode-row" data-episode-id="{{ episode.id }}"
+                                 data-stage="{{ episode.stage }}"
+                                 data-stage-status="{{ episode.stage_status }}">
+                          <div class="episode-main">
+                            <span class="episode-code">S{{ '%02d'|format(episode.season) }}E{{ '%02d'|format(episode.episode) }}</span>
+                            <span class="episode-title"
+                                  title="{{ episode.title or ('Episode ' ~ episode.episode) }}{% if episode.overview %} — {{ episode.overview|truncate(220) }}{% endif %}">
+                              {{ episode.title or 'Episode ' ~ episode.episode }}
+                            </span>
+                            <span class="episode-date">{{ episode.air_date or 'Air date unknown' }}</span>
+                            <span class="episode-tech" title="{{ episode.tech.summary or 'No downloaded file metadata' }}">
+                              {% if episode.tech.resolution %}<span>{{ episode.tech.resolution }}</span>{% endif %}
+                              {% if episode.tech.quality %}<span>{{ episode.tech.quality }}</span>{% endif %}
+                              {% if episode.tech.audio %}
+                                <span>{{ icon('language') }} {{ episode.tech.audio|join('/') }}</span>
+                              {% endif %}
+                              {% if episode.tech.subtitles %}
+                                <span>{{ icon('closed-captioning') }} {{ episode.tech.subtitles|join('/') }}</span>
+                              {% endif %}
+                              {% if not episode.tech.resolution and not episode.tech.quality and not episode.tech.audio and not episode.tech.subtitles %}
+                                <span class="muted">{% if episode.file_path %}No file metadata{% else %}No file yet{% endif %}</span>
+                              {% endif %}
+                            </span>
+                          </div>
+
+                          <div class="episode-state">
+                            <span class="stage-badge tone-{{ episode.stage_tone }}"
+                                  data-episode-stage="{{ episode.stage }}"
+                                  title="{{ episode.stage_title }}">{{ episode.stage_label }}</span>
+                            <span class="episode-stage-hint">{{ episode.stage_hint }}</span>
+                            {% if episode.stage_status_label and episode.stage_status_label != episode.stage_label %}
+                              <span class="episode-stage-status">{{ episode.stage_status_label }}</span>
+                            {% endif %}
+                            {% if episode.stage_message %}
+                              <span class="episode-stage-message">{{ episode.stage_message }}</span>
+                            {% endif %}
+                            {% if episode.below_target %}
+                              <span class="badge badge-missing"
+                                    title="The downloaded file scores below the profile target">
+                                Below profile {{ episode.file_score }}/{{ episode.score_target }}
+                              </span>
+                            {% endif %}
+                          </div>
+
+                          <div class="episode-progress">
+                            {% if episode.stage_progress %}
+                              <div class="stage-progress" role="progressbar"
+                                   aria-label="Episode bworker progress"
+                                   aria-valuemin="0" aria-valuemax="100"
+                                   {% if episode.stage_progress.percent is not none %}aria-valuenow="{{ episode.stage_progress.percent }}"{% endif %}>
+                                <span class="stage-progress-bar{% if episode.stage_progress.indeterminate %} is-indeterminate{% endif %}"
+                                      style="width: {{ episode.stage_progress.percent if episode.stage_progress.percent is not none else 100 }}%"></span>
+                              </div>
+                              <span class="stage-progress-label">{{ episode.stage_progress.text }}</span>
+                            {% endif %}
+                          </div>
+
+                          <div class="episode-controls">
+                            <label class="check">
+                              <input type="checkbox" data-episode-monitor="{{ episode.id }}"
+                                     {% if episode.monitored %}checked{% endif %}>
+                              Monitor
+                            </label>
+                            <button class="btn btn-sm" type="button"
+                                    data-episode-search="{{ episode.id }}"
+                                    title="Search the playlists for this episode now">
+                              {{ icon('magnifying-glass') }} Search
+                            </button>
+                            <button class="btn btn-sm btn-ghost" type="button"
+                                    data-episode-manual="{{ episode.id }}"
+                                    title="Pick a specific provider episode">
+                              {{ icon('list-check') }} Manual
+                            </button>
+                            {% if episode.stage_work_id and (episode.stage == 'failed' or episode.stage_status in ('retry', 'failed_stopped')) %}
+                              <button class="btn btn-sm btn-ghost" type="button"
+                                      data-episode-retry="{{ episode.id }}"
+                                      data-work-id="{{ episode.stage_work_id }}"
+                                      title="Reset this bworker work unit to pending">
+                                {{ icon('rotate-left') }} Retry
+                              </button>
+                            {% endif %}
+                            {% if episode.file_key %}
+                              <button class="btn btn-sm btn-danger" type="button"
+                                      data-episode-remove-file="{{ episode.id }}"
+                                      data-file-key="{{ episode.file_key }}"
+                                      data-episode-label="S{{ '%02d'|format(episode.season) }}E{{ '%02d'|format(episode.episode) }}"
+                                      title="Delete the downloaded file from disk">
+                                {{ icon('trash-can') }} Remove file
+                              </button>
+                            {% endif %}
+                          </div>
+                        </article>
+                      {% endfor %}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="muted">No episodes have been loaded from the metadata provider yet. Use Refresh metadata.</p>
+        {% endif %}
+
+        <h2>Edit</h2>
+        <form id="series-edit-form" class="stack-form">
+          <label class="check">
+            <input type="checkbox" id="series-monitored-edit" {% if series.monitored %}checked{% endif %}>
+            Monitored
+          </label>
+          <label class="field">
+            <span>Quality profile</span>
+            <select id="series-profile-edit">
+              {% for profile in profiles %}
+                <option value="{{ profile.id }}" {% if profile.id == series.quality_profile_id %}selected{% endif %}>
+                  {{ profile.name }} ({{ profile.resolutions|join(', ') }})
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="field">
+            <span>When a new season appears</span>
+            <select id="series-new-seasons-edit">
+              <option value="all" {% if series.monitor_new_seasons == 'all' %}selected{% endif %}>Monitor all new episodes</option>
+              <option value="future" {% if series.monitor_new_seasons == 'future' %}selected{% endif %}>Monitor future episodes only</option>
+              <option value="none" {% if series.monitor_new_seasons == 'none' %}selected{% endif %}>Do not monitor new seasons</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Queue priority</span>
+            <input type="number" id="series-priority-edit" min="-100" max="100" step="1" value="{{ series.priority or 0 }}">
+          </label>
+          <button class="btn" type="submit">Save</button>
+          <span class="hint" id="series-edit-status" role="status"></span>
+        </form>
+      </section>
+
+      <aside class="detail-side">
+        <h2>Library history</h2>
+        <p class="hint">Library and import events, separate from bworker stages.</p>
+        {% if history %}
+          <ul class="history-list">
+            {% for event in history %}
+              <li>
+                <span class="badge badge-{{ event.event }}">{{ event.event|title }}</span>
+                <span>{{ event.message or '' }}</span>
+                <time>{{ format_age(event.created_at) }}</time>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="muted">Nothing has happened yet.</p>
+        {% endif %}
+      </aside>
     </div>
-    <p class="hint" id="episode-release-status" role="status"></p>
-    <div class="release-list" id="episode-release-list"></div>
-  </div>
-  <div class="dialog-foot">
-    <span class="spacer"></span>
-    <button class="btn btn-ghost" type="button" data-close>Close</button>
-  </div>
-</dialog>
+  </section>
 
-<dialog class="dialog" id="series-delete-dialog">
-  <div class="dialog-head">
-    <h2>Delete {{ series.title }}?</h2>
-    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
-  </div>
-  <div class="dialog-body">
-    <p>The library entry and every episode row will be removed. Choose whether files should go too.</p>
-    <label class="check"><input type="checkbox" id="series-delete-files"> Also delete downloaded files from disk</label>
-  </div>
-  <div class="dialog-foot">
-    <button class="btn btn-ghost" type="button" data-close>Cancel</button>
-    <button class="btn btn-danger" type="button" id="series-delete-confirm">Delete</button>
-  </div>
-</dialog>
+  {# ------------------------------------------------ manual episode search #}
+  <dialog class="dialog dialog-wide" id="episode-search-dialog">
+    <div class="dialog-head">
+      <h2>Manual episode search</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+    </div>
+    <div class="dialog-body">
+      <div class="search-field">
+        <input type="search" id="episode-release-query" placeholder="Search the IPTV catalog" autocomplete="off">
+      </div>
+      <p class="hint" id="episode-release-status" role="status"></p>
+      <div class="release-list" id="episode-release-list"></div>
+    </div>
+    <div class="dialog-foot">
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" type="button" data-close>Close</button>
+    </div>
+  </dialog>
 
-<script>
-  window.SERIES_ID = {{ series.id }};
-</script>
+  {# ---------------------------------------------------- manual metadata #}
+  <dialog class="dialog dialog-wide" id="series-metadata-dialog">
+    <div class="dialog-head">
+      <h2>Manual metadata</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+    </div>
+    <div class="dialog-body">
+      <p class="hint">
+        Search TMDB and replace this series' title, year, overview, poster and
+        episode metadata. Downloaded files, bworker work, monitoring choices and
+        history stay unchanged; episodes are refreshed for the new identity.
+      </p>
+      <div class="dialog-options">
+        <label class="field">
+          <span>Title</span>
+          <input type="search" id="series-metadata-query" value="{{ series.title }}" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>Year <small class="muted">optional</small></span>
+          <input type="number" id="series-metadata-year" min="1888" max="2100"
+                 value="{{ series.year or '' }}" placeholder="Any">
+        </label>
+        <button class="btn" type="button" id="series-metadata-search">Search TMDB</button>
+      </div>
+      <p class="hint" id="series-metadata-status" role="status"></p>
+      <div class="metadata-results" id="series-metadata-results"></div>
+    </div>
+    <div class="dialog-foot">
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" type="button" data-close>Close</button>
+    </div>
+  </dialog>
+
+  {# ------------------------------------------------------- remove file #}
+  <dialog class="dialog" id="episode-remove-dialog">
+    <div class="dialog-head">
+      <h2>Remove downloaded file?</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+    </div>
+    <div class="dialog-body">
+      <p>
+        Delete <strong id="episode-remove-label">this episode</strong> from disk
+        and mark it missing again.
+      </p>
+      <p class="hint">
+        The series and episode rows, bworker work and event history stay in the
+        library. Any cancelable download for the episode is cancelled by the
+        storage service before the file is deleted.
+      </p>
+    </div>
+    <div class="dialog-foot">
+      <button class="btn btn-ghost" type="button" data-close>Cancel</button>
+      <button class="btn btn-danger" type="button" id="episode-remove-confirm">Remove file</button>
+    </div>
+  </dialog>
+
+  {# --------------------------------------------------------------- delete #}
+  <dialog class="dialog" id="series-delete-dialog">
+    <div class="dialog-head">
+      <h2>Delete {{ series.title }}?</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+    </div>
+    <div class="dialog-body">
+      <p>The library entry and every episode row will be removed. Choose whether files should go too.</p>
+      <label class="check"><input type="checkbox" id="series-delete-files"> Also delete downloaded files from disk</label>
+    </div>
+    <div class="dialog-foot">
+      <button class="btn btn-ghost" type="button" data-close>Cancel</button>
+      <button class="btn btn-danger" type="button" id="series-delete-confirm">Delete</button>
+    </div>
+  </dialog>
+
+  <script>
+    window.SERIES_ID = {{ series.id }};
+    window.SERIES_STAGE_URL = {{ (stage.stage_api_url or '')|tojson }};
+    window.SERIES_STAGE_SIGNATURE = {{ stage.signature|tojson }};
+  </script>
+</div>
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/manager.js') }}"></script>
 <script src="{{ url_for('static', filename='js/series_detail.js') }}"></script>
 {% endblock %}

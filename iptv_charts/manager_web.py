@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import calendar as calendar_module
 import json
+import logging
 import time
 from datetime import date, timedelta
+from pathlib import Path
 
 from flask import (Blueprint, abort, current_app, g, redirect, render_template,
                    request, url_for)
@@ -22,6 +24,7 @@ except ImportError:  # pragma: no cover
     bworker_events = None
 
 bp = Blueprint("manager", __name__)
+logger = logging.getLogger(__name__)
 
 
 def _conn():
@@ -736,6 +739,681 @@ def movie_detail(movie_id: int):
 
 
 # -------------------------------------------------------------------- series
+# --------------------------------------------------------- series stage view
+# The series page shows the aggregate bworker stage for the whole show, the
+# current episode stages and the durable last-15 event history. The read-only
+# helpers below reuse the generic movie helpers above (stage labels, progress
+# formatting, next-run wording) and A04's series_stage_context when present.
+# Nothing here writes bworker state: the web process only reads it.
+
+_SERIES_STAGE_API_RULE = "/api/series/<int:series_id>/stage"
+
+#: The exact vocabulary the series page promises. The short hint is what the
+#: row's title attribute explains; it is also used for derived stages where
+#: "Searching" alone would read as if a search were running right now.
+_SERIES_STAGE_HINTS = {
+    "pending": "Queued for the next bworker pass",
+    "waiting_availability": "Not released yet — waiting for availability",
+    "waiting_air": "Unaired — waiting for the episode to air",
+    "search": "Aired — awaiting the search",
+    "searching_candidates": "Scanning the catalog for candidates",
+    "probing": "Probing candidate streams",
+    "downloading": "Downloading the chosen release",
+    "verifying": "Verifying the downloaded file",
+    "renaming": "Renaming and importing the file",
+    "moving": "Moving the file into the library",
+    "awaiting_upgrade": "Below profile — awaiting a better release",
+    "complete": "Downloaded — profile target met",
+    "no_candidates": "No eligible candidate matched the profile",
+    "failed": "Failed — reset the work to retry",
+    "paused": "Paused",
+    "skipped": "Skipped / unmonitored",
+}
+
+#: Stage preference for a season header when its episodes disagree.
+_SERIES_STAGE_PRIORITY = (
+    "failed", "downloading", "verifying", "renaming", "moving", "probing",
+    "searching_candidates", "search", "awaiting_upgrade", "no_candidates",
+    "waiting_availability", "waiting_air", "paused", "pending", "skipped",
+    "complete",
+)
+_SERIES_STAGE_RANK = {
+    stage: index for index, stage in enumerate(_SERIES_STAGE_PRIORITY)
+}
+_SERIES_ACTIVE_STAGES = {
+    "searching_candidates", "probing", "downloading", "verifying", "renaming",
+    "moving",
+}
+
+
+def _series_stage_api_url(series_id: int) -> str | None:
+    """The per-series stage JSON route, only when stage_web is registered."""
+    try:
+        rules = list(current_app.url_map.iter_rules())
+    except RuntimeError:
+        return None
+    for rule in rules:
+        if rule.rule == _SERIES_STAGE_API_RULE:
+            try:
+                return url_for(rule.endpoint, series_id=int(series_id))
+            except BuildError:
+                return None
+    return None
+
+
+def _series_stage_meta(stage) -> dict:
+    key = str(stage or "pending")
+    label, tone = _STAGE_FALLBACK_LABELS.get(
+        key, (key.replace("_", " ").title() or "Unknown", "muted"))
+    badge = "secondary"
+    if bworker_events is not None:
+        try:
+            info = bworker_events.stage_meta(key)
+            label = str(info.get("label") or label)
+            badge = str(info.get("badge") or badge)
+            tone = str(info.get("tone") or tone)
+        except Exception:  # pragma: no cover - keep the server render
+            pass
+    hint = _SERIES_STAGE_HINTS.get(key) or label
+    return {
+        "value": key,
+        "label": label,
+        "badge": badge,
+        "tone": tone,
+        "hint": hint,
+        "title": f"{label} — {hint}" if hint and hint != label else label,
+    }
+
+
+def _series_work_status_meta(status) -> dict:
+    key = str(status or "pending")
+    label, badge, tone = _WORK_FALLBACK_LABELS.get(
+        key, (key.replace("_", " ").title() or "Unknown", "secondary", "muted"))
+    if bworker_events is not None:
+        try:
+            info = bworker_events.work_status_meta(key)
+            label = str(info.get("label") or label)
+            badge = str(info.get("badge") or badge)
+            tone = str(info.get("tone") or tone)
+        except Exception:  # pragma: no cover
+            pass
+    return {"value": key, "label": label, "badge": badge, "tone": tone}
+
+
+def _series_event_status_meta(status) -> dict:
+    key = str(status or "info")
+    label, badge, tone = _EVENT_FALLBACK_LABELS.get(
+        key, (key.replace("_", " ").title() or "Info", "secondary", "muted"))
+    if bworker_events is not None:
+        try:
+            info = bworker_events.event_status_meta(key)
+            label = str(info.get("label") or label)
+            badge = str(info.get("badge") or badge)
+            tone = str(info.get("tone") or tone)
+        except Exception:  # pragma: no cover
+            pass
+    return {"value": key, "label": label, "badge": badge, "tone": tone}
+
+
+def _series_airing(status) -> dict:
+    """Normalise TMDB's free-form status into the card's Airing/Ended state."""
+    text = " ".join(str(status or "").split())
+    key = text.casefold()
+    if key == "returning series":
+        return {"state": "airing", "label": "Airing", "detail": text}
+    if key in {"in production", "planned", "pilot", "upcoming"}:
+        return {"state": "upcoming", "label": text or "Upcoming",
+                "detail": "Not currently airing"}
+    if key == "ended":
+        return {"state": "ended", "label": "Ended", "detail": text}
+    if key in {"canceled", "cancelled"}:
+        return {"state": "ended", "label": "Canceled", "detail": text}
+    if not text:
+        return {"state": "unknown", "label": "Unknown",
+                "detail": "No TMDB airing status"}
+    return {"state": "unknown", "label": text,
+            "detail": "Unrecognised TMDB airing status"}
+
+
+def _series_profile(profiles: list[dict], item: dict) -> dict:
+    profile_id = item.get("quality_profile_id")
+    for profile in profiles:
+        if profile.get("id") == profile_id:
+            return profile
+    for profile in profiles:
+        if profile.get("is_default"):
+            return profile
+    return profiles[0] if profiles else {}
+
+
+def _series_media_key(file_path) -> str | None:
+    """Media-root-relative key for the storage delete endpoint, if confined.
+
+    The storage API accepts only a relative key below the media root and
+    refuses symlinks/``..``. An episode path outside the root (or a path that
+    cannot be resolved) gets no remove action rather than a guaranteed 403.
+    """
+    if not file_path:
+        return None
+    try:
+        root = Path(config.media_dir()).resolve()
+        target = Path(str(file_path)).resolve()
+        return target.relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
+def _series_episode_tech(episode: dict) -> dict:
+    """Compact quality/audio/subtitle metadata copied from the catalog row."""
+    media = episode.get("media") or {}
+    resolution = episode.get("resolution") or media.get("resolution")
+    if not resolution and media.get("video_height"):
+        resolution = f"{int(media['video_height'])}p"
+    quality = episode.get("quality_label") or episode.get("source")
+    if quality and not episode.get("quality_label"):
+        quality = str(quality).upper()
+    video = media.get("video_codec")
+    audio = [str(value) for value in (episode.get("audio_languages") or []) if value]
+    if not audio and isinstance(media.get("audio_languages"), list):
+        audio = [str(value) for value in media["audio_languages"] if value]
+    subtitles = [str(value) for value in (episode.get("subtitle_languages") or [])
+                 if value]
+    if not subtitles and isinstance(media.get("subtitle_languages"), list):
+        subtitles = [str(value) for value in media["subtitle_languages"] if value]
+    parts = [str(value) for value in (resolution, quality, video) if value]
+    if audio:
+        parts.append("audio " + "/".join(audio))
+    if subtitles:
+        parts.append("subs " + "/".join(subtitles))
+    return {
+        "resolution": resolution,
+        "quality": quality,
+        "video": video,
+        "audio": audio,
+        "subtitles": subtitles,
+        "summary": " · ".join(parts),
+    }
+
+
+def _series_episode_derived(episode: dict, series_monitored: bool,
+                            target_score, upgrades: bool) -> tuple[str, str]:
+    """The stage the UI can prove from the row alone (no bworker work row)."""
+    if episode.get("file_path"):
+        score = _number(episode.get("file_score"))
+        if (upgrades and target_score and score is not None
+                and score < float(target_score)):
+            return "awaiting_upgrade", "complete"
+        return "complete", "complete"
+    if not episode.get("monitored") or not series_monitored:
+        return "skipped", "disabled"
+    if episode.get("download"):
+        return "downloading", "running"
+    air = str(episode.get("air_date") or "")[:10]
+    if air and air > date.today().isoformat():
+        return "waiting_air", "pending"
+    return "search", "pending"
+
+
+def _series_pick_work(works):
+    return min(
+        works,
+        key=lambda row: (
+            _WORK_PRIORITY.get(str(row.get("status") or ""), 9),
+            -(int(row.get("updated_at") or 0)),
+            -int(row.get("id") or 0),
+        ),
+        default=None,
+    )
+
+
+def _series_pick_stage(works) -> str | None:
+    stages = [str(row.get("stage") or "pending") for row in works]
+    if not stages:
+        return None
+    return min(stages, key=lambda stage: (_SERIES_STAGE_RANK.get(stage, 99), stage))
+
+
+def _series_aggregate_stage(works, series_monitored: bool,
+                            monitored_episodes: list[dict]
+                            ) -> tuple[str, str]:
+    """Fallback aggregate; mirrors bworker_events._aggregate_series."""
+    by_status: dict[str, list[dict]] = {}
+    for work in works:
+        by_status.setdefault(str(work.get("status") or ""), []).append(work)
+    if not series_monitored:
+        return "skipped", "disabled"
+    if by_status.get("running"):
+        work = _series_pick_work(by_status["running"])
+        return str(work.get("stage") or "pending"), "running"
+    if by_status.get("retry"):
+        work = _series_pick_work(by_status["retry"])
+        return str(work.get("stage") or "failed"), "retry"
+    if by_status.get("failed_stopped"):
+        return "failed", "failed_stopped"
+    if by_status.get("pending"):
+        return _series_pick_stage(by_status["pending"]) or "pending", "pending"
+    if by_status.get("complete"):
+        stages = {str(work.get("stage") or "") for work in by_status["complete"]}
+        return ("awaiting_upgrade" if "awaiting_upgrade" in stages
+                else "complete"), "complete"
+    if by_status.get("disabled"):
+        return "skipped", "disabled"
+    if not monitored_episodes:
+        return "skipped", "disabled"
+    if all(episode.get("file_path") for episode in monitored_episodes):
+        return "complete", "complete"
+    today = date.today().isoformat()
+    if any(not episode.get("file_path")
+           and (episode.get("air_date") or "0000-00-00") <= today
+           for episode in monitored_episodes):
+        return "search", "pending"
+    if any((episode.get("air_date") or "9999-12-31") > today
+           for episode in monitored_episodes):
+        return "waiting_air", "pending"
+    return "pending", "pending"
+
+
+def _sql_series_stage_context(conn, series_id: int, item: dict,
+                              episodes: list[dict], active: dict) -> dict:
+    """Direct-SQL fallback for the series card when bworker_events is absent."""
+    works = [dict(row) for row in conn.execute(
+        "SELECT w.* FROM bworker_work w "
+        "WHERE (w.entity_type = 'series' AND w.entity_id = ?) "
+        "   OR (w.entity_type = 'episode' AND w.entity_id IN "
+        "       (SELECT id FROM series_episodes WHERE series_id = ?)) "
+        "ORDER BY w.id", (int(series_id), int(series_id)),
+    )]
+    works_by_episode: dict[int, list[dict]] = {}
+    series_works: list[dict] = []
+    for work in works:
+        if str(work.get("entity_type")) == "episode":
+            works_by_episode.setdefault(int(work.get("entity_id") or 0),
+                                        []).append(work)
+        else:
+            series_works.append(work)
+    series_monitored = bool(item.get("monitored"))
+    monitored = [episode for episode in episodes
+                 if series_monitored and bool(episode.get("monitored"))]
+    monitored_ids = {int(episode["id"]) for episode in monitored}
+    aggregate = [work for work in works
+                 if str(work.get("entity_type")) == "episode"
+                 and int(work.get("entity_id") or 0) in monitored_ids]
+    stage, status = _series_aggregate_stage(aggregate, series_monitored, monitored)
+    running_series = [work for work in series_works
+                      if str(work.get("status") or "") == "running"]
+    representative = _series_pick_work(running_series)
+    if representative is not None:
+        stage = str(representative.get("stage") or stage)
+        status = "running"
+    else:
+        representative = (_series_pick_work(aggregate)
+                          or _series_pick_work(series_works))
+
+    rows = conn.execute(
+        "SELECT ev.*, e.season AS event_season, e.episode AS event_number "
+        "FROM bworker_events ev LEFT JOIN series_episodes e "
+        "ON e.id = ev.entity_id AND ev.entity_type = 'episode' "
+        "WHERE (ev.entity_type = 'series' AND ev.entity_id = ?) "
+        "   OR (ev.entity_type = 'episode' AND e.series_id = ?) "
+        "ORDER BY ev.id DESC LIMIT 15",
+        (int(series_id), int(series_id)),
+    ).fetchall()
+    events: list[dict] = []
+    latest_by_episode: dict[int, dict] = {}
+    for row in rows:
+        event = dict(row)
+        stage_info = _series_stage_meta(event.get("stage"))
+        status_info = _series_event_status_meta(event.get("status"))
+        event.update({
+            "stage_label": stage_info["label"],
+            "stage_badge": stage_info["badge"],
+            "stage_tone": stage_info["tone"],
+            "status_label": status_info["label"],
+            "status_badge": status_info["badge"],
+            "status_tone": status_info["tone"],
+            "progress": _decode_json(event.get("progress")),
+        })
+        if event.get("event_season") is not None:
+            event["season"] = int(event["event_season"])
+            event["episode"] = int(event["event_number"])
+        events.append(event)
+        if str(event.get("entity_type")) == "episode":
+            latest_by_episode.setdefault(int(event.get("entity_id") or 0), event)
+
+    target_score = None
+    upgrades = True
+    profile = _series_profile(
+        [dict(row) for row in conn.execute("SELECT * FROM quality_profiles")],
+        item,
+    )
+    if profile:
+        try:
+            summary = quality.profile_summary(profile)
+            target_score = summary.get("target_score")
+            upgrades = bool(summary.get("upgrades", True))
+        except Exception:  # pragma: no cover - SQL fallback for display only
+            target_score = None
+
+    episode_views: list[dict] = []
+    for episode in episodes:
+        episode_id = int(episode["id"])
+        work = _series_pick_work(works_by_episode.get(episode_id, []))
+        latest_event = latest_by_episode.get(episode_id)
+        derived_stage, derived_status = _series_episode_derived(
+            episode, series_monitored, target_score, upgrades)
+        if work is not None:
+            episode_stage = str(work.get("stage") or derived_stage)
+            episode_status = str(work.get("status") or "pending")
+            source = "work"
+        elif latest_event is not None:
+            episode_stage = str(latest_event.get("stage") or derived_stage)
+            episode_status = str(latest_event.get("status") or "info")
+            source = "event"
+        else:
+            episode_stage, episode_status = derived_stage, derived_status
+            source = "derived"
+        stage_info = _series_stage_meta(episode_stage)
+        status_info = (_series_event_status_meta(episode_status) if source == "event"
+                       else _series_work_status_meta(episode_status))
+        download = active.get(episode_id)
+        progress = _progress_view(None, download)
+        if progress is None and latest_event is not None:
+            progress = _progress_view(latest_event.get("progress"))
+        message = None
+        if work is not None and str(work.get("status") or "") in (
+                "retry", "failed_stopped"):
+            message = work.get("last_error")
+        if not message and latest_event is not None:
+            message = latest_event.get("message")
+        episode_views.append({
+            "id": episode_id,
+            "season": int(episode["season"]),
+            "episode": int(episode["episode"]),
+            "title": episode.get("title"),
+            "air_date": episode.get("air_date"),
+            "monitored": bool(episode.get("monitored")),
+            "downloaded": bool(episode.get("file_path")),
+            "stage": episode_stage,
+            "stage_label": stage_info["label"],
+            "stage_badge": stage_info["badge"],
+            "stage_tone": stage_info["tone"],
+            "status": episode_status,
+            "status_label": status_info["label"],
+            "status_badge": status_info["badge"],
+            "status_tone": status_info["tone"],
+            "status_source": source,
+            "message": message,
+            "progress": progress,
+            "work_id": int(work["id"]) if work else None,
+            "next_run_at": work.get("next_run_at") if work else None,
+            "updated_at": work.get("updated_at") if work else None,
+            "last_event": latest_event,
+        })
+
+    downloaded = sum(1 for episode in monitored if episode.get("file_path"))
+    return {
+        "stage": stage,
+        "label": _series_stage_meta(stage)["label"],
+        "status": status,
+        "status_label": _series_work_status_meta(status)["label"],
+        "status_badge": _series_work_status_meta(status)["badge"],
+        "status_tone": _series_work_status_meta(status)["tone"],
+        "status_source": "work" if representative is not None else "derived",
+        "message": None,
+        "progress": {"done": downloaded, "total": len(monitored)},
+        "current_progress": None,
+        "best_score": (representative.get("best_score")
+                       if representative is not None else None),
+        "next_run_at": (representative.get("next_run_at")
+                        if representative is not None else None),
+        "work": None,
+        "works": [],
+        "download": _progress_view(None, active.get(
+            int(representative.get("entity_id") or 0))
+            if representative is not None
+            and str(representative.get("entity_type")) == "episode" else None),
+        "counts": {
+            "episodes": len(episodes),
+            "monitored_episodes": len(monitored),
+            "downloaded_episodes": downloaded,
+        },
+        "episodes": episode_views,
+        "events": events,
+    }
+
+
+def _series_stage_context(conn, series_id: int, item: dict,
+                          episodes: list[dict], active: dict) -> dict:
+    if bworker_events is not None:
+        try:
+            context = bworker_events.series_stage_context(conn, int(series_id))
+            if context:
+                return dict(context)
+        except Exception:
+            logger.exception(
+                "series stage context failed for #%s; using direct SQL",
+                series_id)
+    return _sql_series_stage_context(conn, series_id, item, episodes, active)
+
+
+def _series_stage_view(conn, item: dict, episodes: list[dict], active: dict,
+                       profiles: list[dict]) -> dict:
+    """Build the top card and per-episode stage data for the server render."""
+    context = _series_stage_context(conn, int(item["id"]), item, episodes, active)
+    try:
+        paused = bool(bworker_store.get_state(conn).get("paused"))
+    except Exception:
+        paused = False
+    profile = _series_profile(profiles, item)
+    target_score = profile.get("target_score")
+    try:
+        target_score = int(target_score) if target_score is not None else None
+    except (TypeError, ValueError):
+        target_score = None
+    upgrades = bool(profile.get("upgrades", True)) if profile else True
+    views = {
+        int(view["id"]): view
+        for view in (context.get("episodes") or [])
+        if view.get("id") is not None
+    }
+    today = date.today().isoformat()
+
+    for episode in episodes:
+        episode_id = int(episode["id"])
+        episode["download"] = active.get(episode_id)
+        episode["audio_languages"] = _json_value(episode.get("audio_languages")) or []
+        episode["subtitle_languages"] = (
+            _json_value(episode.get("subtitle_languages")) or [])
+        episode["media"] = _json_value(episode.get("media_info")) or {}
+        view = views.get(episode_id) or {}
+        derived_stage, derived_status = _series_episode_derived(
+            episode, bool(item.get("monitored")), target_score, upgrades)
+        source = str(view.get("status_source") or "derived")
+        if not view or source == "derived":
+            stage, status = derived_stage, derived_status
+        else:
+            stage = str(view.get("stage") or derived_stage)
+            status = str(view.get("status") or "pending")
+        stage_info = _series_stage_meta(stage)
+        status_info = (_series_event_status_meta(status) if source == "event"
+                       else _series_work_status_meta(status))
+        message = view.get("message")
+        if not message and episode["download"]:
+            message = f"Download {episode['download'].get('status') or 'active'}"
+        progress = _progress_view(view.get("progress"))
+        if progress is None:
+            progress = _progress_view(None, episode["download"])
+        if progress is None and stage in _SERIES_ACTIVE_STAGES:
+            progress = {
+                "percent": None, "text": f"{stage_info['label']}…",
+                "indeterminate": True, "kind": "stage", "status": stage,
+            }
+        title = stage_info["label"]
+        if status_info["label"] and status_info["label"] != title:
+            title = f"{title} · {status_info['label']}"
+        if message:
+            title = f"{title} · {message}"
+        episode["stage"] = stage
+        episode["stage_value"] = stage
+        episode["stage_label"] = stage_info["label"]
+        episode["stage_badge"] = stage_info["badge"]
+        episode["stage_tone"] = stage_info["tone"]
+        episode["stage_hint"] = stage_info["hint"]
+        episode["stage_title"] = title
+        episode["stage_status"] = status
+        episode["stage_status_label"] = status_info["label"]
+        episode["stage_source"] = source
+        episode["stage_message"] = message
+        episode["stage_progress"] = progress
+        episode["stage_work_id"] = view.get("work_id")
+        episode["stage_next_run_at"] = view.get("next_run_at")
+        episode["tech"] = _series_episode_tech(episode)
+        episode["file_key"] = _series_media_key(episode.get("file_path"))
+        episode["aired"] = not episode.get("air_date") or (
+            str(episode["air_date"])[:10] <= today)
+        episode["file_score"] = episode.get("file_score")
+        episode["score_target"] = target_score
+        episode["below_target"] = bool(
+            episode.get("file_path") and target_score is not None
+            and episode.get("file_score") is not None
+            and int(episode["file_score"]) < int(target_score))
+
+    monitored_episodes = [episode for episode in episodes
+                          if episode.get("monitored")]
+    downloaded = sum(1 for episode in monitored_episodes
+                     if episode.get("file_path"))
+    missing = sum(
+        1 for episode in monitored_episodes
+        if not episode.get("file_path") and episode["aired"]
+    )
+    counts = {
+        "episodes": len(episodes),
+        "monitored": len(monitored_episodes),
+        "downloaded": downloaded,
+        "missing": missing,
+        "unaired": sum(1 for episode in monitored_episodes
+                       if not episode["aired"]),
+        "all_downloaded": sum(1 for episode in episodes
+                              if episode.get("file_path")),
+    }
+
+    seasons: dict[int, list[dict]] = {}
+    for episode in episodes:
+        seasons.setdefault(int(episode["season"]), []).append(episode)
+    season_groups: list[dict] = []
+    for number in sorted(seasons):
+        rows = seasons[number]
+        stages = [episode["stage"] for episode in rows]
+        stage = min(stages, key=lambda value: (
+            _SERIES_STAGE_RANK.get(value, 99), value)) if stages else "pending"
+        stage_info = _series_stage_meta(stage)
+        season_monitored = sum(1 for episode in rows if episode.get("monitored"))
+        season_groups.append({
+            "number": int(number),
+            "episodes": rows,
+            "episode_count": len(rows),
+            "monitored_count": season_monitored,
+            "downloaded_count": sum(1 for episode in rows
+                                    if episode.get("file_path")),
+            "all_monitored": season_monitored == len(rows) and bool(rows),
+            "stage": stage_info,
+        })
+
+    stage_info = _series_stage_meta(context.get("stage"))
+    status = str(context.get("status") or "pending")
+    status_info = _series_work_status_meta(status)
+    if paused and status not in ("complete", "disabled", "failed_stopped"):
+        status_label = "Paused"
+    elif status == "failed_stopped":
+        status_label = "Stopped after failures"
+    else:
+        status_label = str(context.get("status_label") or status_info["label"])
+    events = [_stage_event_view(event)
+              for event in (context.get("events") or [])][:15]
+    for event in events:
+        if event.get("season") is not None and event.get("episode") is not None:
+            event["episode_code"] = (
+                f"S{int(event['season']):02d}E{int(event['episode']):02d}")
+    progress = _progress_view(None, context.get("download"))
+    if progress is None:
+        progress = _progress_view(context.get("current_progress"))
+    if progress is None:
+        progress = _progress_view(context.get("progress"))
+    state = {
+        "stage": stage_info["value"],
+        "label": stage_info["label"],
+        "tone": stage_info["tone"],
+        "badge": stage_info["badge"],
+        "hint": stage_info["hint"],
+        "status": status,
+        "status_label": status_label,
+        "status_tone": status_info["tone"],
+        "message": context.get("message"),
+        "next_run_at": context.get("next_run_at"),
+        "next_run_text": _in_label(context.get("next_run_at")),
+        "progress": progress,
+        "best_score": context.get("best_score"),
+        "paused": paused,
+        "stage_api_url": _series_stage_api_url(int(item["id"])),
+        "failure_count": int(
+            (context.get("work") or {}).get("failure_count") or 0),
+    }
+    state["bworker_now"] = _series_bworker_now(state, paused)
+    aggregate = context.get("progress") or {}
+    done = aggregate.get("done")
+    total = aggregate.get("total")
+    state["signature"] = "|".join((
+        str(context.get("stage") or "pending"),
+        str(context.get("status") or ""),
+        str(context.get("message") or ""),
+        "" if context.get("best_score") is None
+        else str(context.get("best_score")),
+        f"{'' if done is None else done}/{'' if total is None else total}",
+        str(events[0].get("id")) if events else "",
+    ))
+    return {
+        "context": context,
+        "state": state,
+        "counts": counts,
+        "seasons": season_groups,
+        "events": events,
+        "profile": profile,
+        "target_score": target_score,
+        "max_score": profile.get("max_score"),
+        "upgrades": upgrades,
+        "airing": _series_airing(item.get("status")),
+        "paused": paused,
+    }
+
+
+def _series_bworker_now(state: dict, paused: bool) -> str:
+    """One sentence for "what is bworker doing with this series right now?"."""
+    stage = state["stage"]
+    status = state["status"]
+    label = state["label"]
+    if paused and status not in ("complete", "disabled", "failed_stopped"):
+        return "Bworker is paused; this series waits until it resumes."
+    if stage in _SERIES_ACTIVE_STAGES or status == "running":
+        return f"{label} now."
+    if status == "retry":
+        return f"Retry scheduled after {label.lower()}."
+    if status == "failed_stopped" or stage == "failed":
+        return "Stopped after failures; reset bworker work to retry."
+    if stage == "paused":
+        return "Paused."
+    if stage == "waiting_air":
+        return "Waiting for the next episode to air."
+    if stage == "awaiting_upgrade":
+        return "Below profile; bworker keeps looking for an upgrade."
+    if stage == "no_candidates":
+        return "No eligible candidate matched the profile; retrying later."
+    if stage == "complete" or status == "complete":
+        return "Complete — no work is due."
+    if stage == "skipped":
+        return "Skipped — the series or episode is unmonitored."
+    return "Idle — waiting for the next scheduled search."
+
+
 @bp.get("/series")
 def series():
     conn = _conn()
@@ -765,30 +1443,26 @@ def series_detail(series_id: int):
         abort(404, description="That series no longer exists.")
     episodes = library.series_episodes(conn, series_id)
     _, active = _active_maps(conn)
-    today = date.today().isoformat()
-    seasons: dict[int, list[dict]] = {}
-    for episode in episodes:
-        episode["download"] = active.get(int(episode["id"]))
-        episode["audio_languages"] = _json_value(episode.get("audio_languages")) or []
-        episode["subtitle_languages"] = _json_value(episode.get("subtitle_languages")) or []
-        episode["media"] = _json_value(episode.get("media_info")) or {}
-        if episode.get("file_path"):
-            episode["status"] = "downloaded"
-        elif episode["download"]:
-            episode["status"] = "downloading"
-        elif episode.get("air_date") and str(episode["air_date"]) > today:
-            episode["status"] = "unaired"
-        else:
-            episode["status"] = "missing"
-        seasons.setdefault(int(episode["season"]), []).append(episode)
     _decorate_series([item])
     return render_template(
+    profiles = _profiles(conn)
+    view = _series_stage_view(conn, item, episodes, active, profiles)
         "series_detail.html",
         series=item,
-        seasons=sorted(seasons.items()),
-        profiles=_profiles(conn),
+        seasons=view["seasons"],
+        profiles=profiles,
         history=_history_for(conn, series_id=series_id),
         **_media_context(),
+        stage=view["state"],
+        stage_events=view["events"],
+        counts=view["counts"],
+        airing=view["airing"],
+        quality_profile=view["profile"],
+        target_score=view["target_score"],
+        max_score=view["max_score"],
+        upgrades=view["upgrades"],
+        bworker_paused=view["paused"],
+        tmdb_configured=metadata.has_tmdb(conn),
     )
 
 
