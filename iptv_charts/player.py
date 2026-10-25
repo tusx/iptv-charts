@@ -94,6 +94,10 @@ STREAM_SCHEMES = frozenset({
 #: Settings keys this module owns.
 PREFERENCE_KEY = "preferred_player"
 COMMAND_KEY = "player_command"
+#: Global switch for every external-player control. Off by default: handing a
+#: stream to a program on the host is opt-in, and the browser player always
+#: works. Detection still runs so the settings page can list what is available.
+EXTERNAL_PLAYER_ENABLED_KEY = "external_player_enabled"
 
 #: Every id a stored preference may name. The settings page only offers what
 #: `available()` actually returned, but a save is accepted regardless -- a
@@ -558,6 +562,16 @@ def custom_player(conn, *, bridged: bool | None = None) -> Player | None:
     )
 
 
+def enabled(conn) -> bool:
+    """Whether external playback is switched on.
+
+    Never raises, for the same reason as :func:`resolve`: it runs while
+    rendering every page. A missing or malformed value is treated as off.
+    """
+    value = _setting(conn, EXTERNAL_PLAYER_ENABLED_KEY, "0")
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def available(conn, *, refresh: bool = False) -> list[Player]:
     """Every player that could be used, in preference order.
 
@@ -574,9 +588,18 @@ def available(conn, *, refresh: bool = False) -> list[Player]:
 def resolve(conn, *, refresh: bool = False) -> Player | None:
     """The player to use, honouring the user's preference.
 
+    External playback is globally off by default, so ``resolve`` returns
+    ``None`` until ``external_player_enabled`` is switched on. Every page and
+    playback endpoint uses this as the single gate, which hides the controls
+    instead of offering a button that cannot work. Detection is untouched:
+    :func:`available` still lists players for the settings page.
+
     Never raises: it is called while rendering every page, so anything
     unreadable or malformed has to degrade to a sane default instead.
     """
+    if not enabled(conn):
+        return None
+
     players = available(conn, refresh=refresh)
     if not players:
         return None

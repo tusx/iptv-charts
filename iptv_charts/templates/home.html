@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon %}
 {% block title %}Overview · {{ app_name }}{% endblock %}
 
 {% block content %}
@@ -13,8 +14,8 @@
     </p>
   </div>
   <div class="page-actions">
-    <a class="btn btn-ghost" href="{{ url_for('manager.activity') }}">Activity</a>
-    <a class="btn btn-ghost" href="{{ url_for('settings') }}">Settings</a>
+    <a class="btn btn-ghost" href="{{ url_for('manager.activity') }}">{{ icon('chart-line') }} Activity</a>
+    <a class="btn btn-ghost" href="{{ url_for('settings') }}">{{ icon('gear') }} Settings</a>
   </div>
 </section>
 
@@ -29,15 +30,18 @@
           {{ '{:,}'.format(catalog_items) }} items
         </p>
       </div>
-      <span class="home-icon" aria-hidden="true">▤</span>
+      <span class="home-icon" aria-hidden="true">{{ icon('server') }}</span>
     </header>
 
     <div class="home-card-actions">
-      <button class="btn btn-primary btn-sm" type="button" id="add-open-btn">Add playlist</button>
+      <button class="btn btn-primary btn-sm" type="button" id="add-open-btn">{{ icon('plus') }} Add playlist</button>
       {% if sources %}
-        <button class="btn btn-sm" type="button" id="sync-all-btn">Update all</button>
-        <a class="btn btn-sm btn-ghost" href="{{ url_for('sources_list') }}">Manage</a>
+        <button class="btn btn-sm" type="button" id="sync-all-btn">{{ icon('arrows-rotate') }} Update all</button>
+        <a class="btn btn-sm btn-ghost" href="{{ url_for('sources_list') }}">{{ icon('sliders') }} Manage</a>
       {% endif %}
+      {# TODO(A07/integration): IPTV settings will live at the bottom of the
+         playlists manage page; point there once that section exists. #}
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('settings') }}">{{ icon('gear') }} Settings</a>
     </div>
 
     <div class="batch-progress" id="batch-progress" hidden>
@@ -90,15 +94,15 @@
               <a class="btn btn-sm btn-ghost" href="{{ url_for('browse', source_id=source.id) }}"
                  {% if not (source.live_count + source.vod_count + source.series_count) %}
                    aria-disabled="true" title="Nothing imported yet — run an update first"
-                 {% else %}title="Search and browse this playlist"{% endif %}>Browse</a>
-              <a class="btn btn-sm btn-ghost" href="{{ url_for('edit_source', source_id=source.id) }}">Edit</a>
+                 {% else %}title="Search and browse this playlist"{% endif %}>{{ icon('magnifying-glass') }} Browse</a>
+              <a class="btn btn-sm btn-ghost" href="{{ url_for('edit_source', source_id=source.id) }}">{{ icon('pen-to-square') }} Edit</a>
               <button class="btn btn-sm btn-ghost js-sync" data-source-id="{{ source.id }}"
-                      {% if job and job.state in ('queued', 'running') %}disabled{% endif %}>Update</button>
+                      {% if job and job.state in ('queued', 'running') %}disabled{% endif %}>{{ icon('arrows-rotate') }} Update</button>
               <button class="btn btn-sm btn-ghost js-cancel" data-source-id="{{ source.id }}"
-                      {% if not job or job.state not in ('queued', 'running') %}hidden{% endif %}>Cancel</button>
+                      {% if not job or job.state not in ('queued', 'running') %}hidden{% endif %}>{{ icon('xmark') }} Cancel</button>
               <button class="btn btn-sm btn-ghost btn-danger js-delete"
                       data-source-id="{{ source.id }}" data-source-name="{{ source.name }}"
-                      title="Remove this playlist">Remove</button>
+                      title="Remove this playlist">{{ icon('trash') }} Remove</button>
             </div>
           </article>
         {% endfor %}
@@ -107,7 +111,7 @@
       <div class="home-empty">
         <p><strong>No playlists yet</strong></p>
         <p class="muted">Add an M3U URL or Xtream account to build your catalog.</p>
-        <button class="btn btn-primary btn-sm" type="button" id="add-open-btn-empty">Add your first playlist</button>
+        <button class="btn btn-primary btn-sm" type="button" id="add-open-btn-empty">{{ icon('plus') }} Add your first playlist</button>
       </div>
     {% endif %}
   </section>
@@ -117,30 +121,32 @@
       <div>
         <span class="home-eyebrow">Library</span>
         <h2>Movies</h2>
-        <p class="muted">
-          {{ movie_counts.downloaded }} downloaded ·
-          {{ movie_counts.missing }} missing
-        </p>
       </div>
-      <span class="home-icon" aria-hidden="true">▶</span>
+      <span class="home-icon" aria-hidden="true">{{ icon('film') }}</span>
     </header>
 
     <dl class="home-stats">
       <div><dt>In library</dt><dd>{{ movie_counts.total }}</dd></div>
       <div><dt>Monitored</dt><dd>{{ movie_counts.monitored }}</dd></div>
       <div><dt>Downloaded</dt><dd>{{ movie_counts.downloaded }}</dd></div>
+      <div><dt>Missing</dt><dd>{{ movie_counts.missing }}</dd></div>
     </dl>
 
     <div class="home-card-actions">
-      <a class="btn btn-primary btn-sm" href="{{ url_for('manager.movies') }}">Open movies</a>
+      <a class="btn btn-primary btn-sm" href="{{ url_for('manager.movies') }}">{{ icon('film') }} Open movies</a>
       {% if tmdb_configured %}
-        <a class="btn btn-sm" href="{{ url_for('manager.movies') }}?add=1">Add movie</a>
+        <a class="btn btn-sm" href="{{ url_for('manager.movies') }}?add=1">{{ icon('plus') }} Add movie</a>
       {% else %}
-        <a class="btn btn-sm" href="{{ url_for('settings') }}#metadata-settings">Set up TMDB</a>
+        <a class="btn btn-sm" href="{{ url_for('settings') }}#metadata-settings">{{ icon('key') }} Set up TMDB</a>
       {% endif %}
-      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.movies_calendar') }}">Calendar</a>
-      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.movies_wanted') }}">Wanted</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.movies_calendar') }}">{{ icon('calendar-days') }} Calendar</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.movies_wanted') }}">{{ icon('bullseye') }} Wanted</a>
+      {# Search-missing gets its icon from shell.css: app.js swaps this
+         button's textContent, which would remove a child icon element. #}
       <button class="btn btn-sm btn-ghost" type="button" data-search-missing data-search-scope="movies">Search missing</button>
+      {# TODO(A07/integration): point at the movies section settings page once
+         that route exists; /settings is the current settings page. #}
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('settings') }}">{{ icon('gear') }} Settings</a>
     </div>
     {% if not tmdb_configured %}
       <p class="hint">Add a TMDB key in Settings to search for movies.</p>
@@ -152,30 +158,32 @@
       <div>
         <span class="home-eyebrow">Library</span>
         <h2>Series</h2>
-        <p class="muted">
-          {{ series_counts.downloaded_episodes }} episodes downloaded ·
-          {{ series_counts.missing_episodes }} missing
-        </p>
       </div>
-      <span class="home-icon" aria-hidden="true">☰</span>
+      <span class="home-icon" aria-hidden="true">{{ icon('tv') }}</span>
     </header>
 
     <dl class="home-stats">
       <div><dt>Series</dt><dd>{{ series_counts.total }}</dd></div>
       <div><dt>Episodes</dt><dd>{{ series_counts.episodes }}</dd></div>
       <div><dt>Downloaded</dt><dd>{{ series_counts.downloaded_episodes }}</dd></div>
+      <div><dt>Missing episodes</dt><dd>{{ series_counts.missing_episodes }}</dd></div>
     </dl>
 
     <div class="home-card-actions">
-      <a class="btn btn-primary btn-sm" href="{{ url_for('manager.series') }}">Open series</a>
+      <a class="btn btn-primary btn-sm" href="{{ url_for('manager.series') }}">{{ icon('tv') }} Open series</a>
       {% if tmdb_configured %}
-        <a class="btn btn-sm" href="{{ url_for('manager.series') }}?add=1">Add series</a>
+        <a class="btn btn-sm" href="{{ url_for('manager.series') }}?add=1">{{ icon('plus') }} Add series</a>
       {% else %}
-        <a class="btn btn-sm" href="{{ url_for('settings') }}#metadata-settings">Set up TMDB</a>
+        <a class="btn btn-sm" href="{{ url_for('settings') }}#metadata-settings">{{ icon('key') }} Set up TMDB</a>
       {% endif %}
-      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.series_calendar') }}">Calendar</a>
-      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.series_wanted') }}">Wanted</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.series_calendar') }}">{{ icon('calendar-days') }} Calendar</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.series_wanted') }}">{{ icon('bullseye') }} Wanted</a>
+      {# Search-missing gets its icon from shell.css: app.js swaps this
+         button's textContent, which would remove a child icon element. #}
       <button class="btn btn-sm btn-ghost" type="button" data-search-missing data-search-scope="series">Search missing</button>
+      {# TODO(A07/integration): point at the series section settings page once
+         that route exists; /settings is the current settings page. #}
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('settings') }}">{{ icon('gear') }} Settings</a>
     </div>
     {% if not tmdb_configured %}
       <p class="hint">Add a TMDB key in Settings to search for series.</p>

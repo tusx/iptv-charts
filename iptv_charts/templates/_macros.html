@@ -47,6 +47,14 @@
 {%- endmacro %}
 
 
+{# A Font Awesome Free 6 solid icon. Vendored locally, never loaded from a
+   CDN; decorative by default because the surrounding link/button carries the
+   accessible name. Pass extra classes (for example 'fa-spin') when needed. #}
+{% macro icon(name, extra='') -%}
+<i class="fa-solid fa-fw fa-{{ name }}{% if extra %} {{ extra }}{% endif %}" aria-hidden="true"></i>
+{%- endmacro %}
+
+
 {% macro library_nav(section, active) -%}
 <nav class="section-tabs" aria-label="{{ section|title }} sections">
   <a href="{{ url_for('manager.movies' if section == 'movies' else 'manager.series') }}"

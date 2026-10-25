@@ -4,7 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  {# Vendored locally: no runtime CDN, no external font requests. #}
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/fontawesome/css/all.min.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/shell.css') }}">
 </head>
 <body>
   <header class="topbar">
@@ -12,37 +15,8 @@
       <span class="brand-mark" aria-hidden="true"></span>
       <span class="brand-name">{{ app_name }}</span>
     </a>
-
-    <nav class="topbar-nav">
-      {% block nav %}
-        {% set endpoint = request.endpoint or '' %}
-        <a href="{{ url_for('home') }}"
-           {% if endpoint == 'home' %}class="active"{% endif %}>Home</a>
-        <a href="{{ url_for('sources_list') }}"
-           {% if endpoint in ('sources_list', 'browse', 'edit_source') %}class="active"{% endif %}>Playlists</a>
-        <a href="{{ url_for('manager.movies') }}"
-           {% if endpoint in ('manager.movies', 'manager.movie_detail', 'manager.movies_wanted', 'manager.movies_calendar') %}class="active"{% endif %}>Movies</a>
-        <a href="{{ url_for('manager.series') }}"
-           {% if endpoint in ('manager.series', 'manager.series_detail', 'manager.series_wanted', 'manager.series_calendar') %}class="active"{% endif %}>Series</a>
-        <a href="{{ url_for('manager.activity') }}"
-           {% if endpoint == 'manager.activity' %}class="active"{% endif %}>Activity</a>
-        <a href="{{ url_for('settings') }}"
-           {% if endpoint in ('settings', 'manager.profiles_page') %}class="active"{% endif %}>Settings</a>
-      {% endblock %}
-    </nav>
-
-    <div class="topbar-meta">
-      {# What the "External player" button will use. Change it in Settings. #}
-      {% if external_player %}
-        <span class="pill pill-ok" title="Streams are handed to {{ external_player.label }}">
-          {{ external_player.label }}
-        </span>
-      {% else %}
-        <span class="pill pill-muted" title="No external player configured — see Settings">
-          browser only
-        </span>
-      {% endif %}
-    </div>
+    {# The brand is the only top-bar navigation: no nav menu and no extra
+       top-bar links. #}
   </header>
 
   {% with messages = get_flashed_messages(with_categories=true) %}

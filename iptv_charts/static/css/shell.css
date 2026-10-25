@@ -1,0 +1,136 @@
+/* IPTV Charts 0.8.0 shell additions.
+   Loaded after app.css; Font Awesome is vendored under static/vendor and is
+   linked from base.html. Nothing here fetches a remote asset. */
+
+/* --------------------------------------------------------------- icon rules */
+/* Icon in front of a button label. The macro already marks it aria-hidden, so
+   the text stays the accessible name. */
+.btn > .fa-solid:first-child,
+.btn > .fa-regular:first-child,
+.btn > .fa-brands:first-child {
+  margin-right: 0.45em;
+}
+
+/* Icon-only controls keep their glyph centred. */
+.btn.icon-btn > .fa-solid:first-child,
+.btn.icon-btn > .fa-regular:first-child {
+  margin-right: 0;
+}
+
+/* Search missing is the one home button whose icon cannot be a child element:
+   app.js replaces the button's textContent while it runs, which would delete
+   the icon. A pseudo-element is unaffected by that and keeps the behaviour
+   (and the restored label) intact. \f002 is fa-magnifying-glass. */
+[data-search-missing]::before {
+  font-family: "Font Awesome 6 Free";
+  font-weight: 900;
+  content: "\f002";
+  margin-right: 0.45em;
+}
+
+.home-icon .fa-solid {
+  font-size: 16px;
+}
+
+/* ---------------------------------------------------------------- top bar */
+/* The brand is the only top-bar navigation now; keep it comfortably alone. */
+.topbar {
+  gap: 12px;
+}
+
+/* ------------------------------------------------------------------- home */
+/* app.css uses minmax(320px, 1fr), which overflows a 360px viewport before it
+   gets the chance to collapse to one column. min(100%, 320px) fixes that at
+   every width while still allowing multi-column cards on desktop. */
+.home-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+}
+
+.home-card,
+.home-card-head,
+.home-card-head > div,
+.home-card-actions {
+  min-width: 0;
+}
+
+/* Four metrics (Downloaded + Missing, Episodes + Missing episodes) instead of
+   the three the base stylesheet was written for. auto-fit keeps labels legible
+   and lets the row wrap rather than clip. */
+.home-stats {
+  grid-template-columns: repeat(auto-fit, minmax(68px, 1fr));
+}
+
+.home-stats dt,
+.home-stats dd {
+  overflow-wrap: anywhere;
+}
+
+.home-card-actions .btn {
+  max-width: 100%;
+}
+
+/* -------------------------------------------------------------- no h-scroll */
+html {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* `clip` does not create a scroll container, so the sticky top bar keeps
+   working; `hidden` on html is the fallback that still stops the page sliding
+   sideways on browsers without clip support. */
+body {
+  max-width: 100%;
+  overflow-x: clip;
+}
+
+/* ------------------------------------------------------------- responsive */
+@media (max-width: 768px) {
+  .home-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .home-card {
+    padding: 16px;
+    gap: 14px;
+  }
+
+  .home-card-actions,
+  .home-playlist-actions {
+    gap: 6px;
+  }
+
+  /* Let buttons share a row evenly and centre their icon + label. */
+  .home-card-actions .btn,
+  .home-playlist-actions .btn {
+    flex: 1 1 auto;
+    text-align: center;
+  }
+
+  .home-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 400px) {
+  .content {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .home-card {
+    padding: 14px;
+  }
+
+  .home-card-actions .btn,
+  .home-playlist-actions .btn {
+    flex-basis: 100%;
+  }
+
+  .home-stats dd {
+    font-size: 17px;
+  }
+
+  .page-actions {
+    flex-wrap: wrap;
+  }
+}
