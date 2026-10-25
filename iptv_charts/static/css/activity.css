@@ -1,0 +1,363 @@
+/* Activity page: bworker card, live log and refresh toolbar.
+ *
+ * Shared cards, buttons, pills, tags and progress bars live in app.css. This
+ * file only adds the page-specific layout. No external assets. */
+
+/* ------------------------------------------------------------ bworker card */
+.bworker-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.bworker-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.bworker-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.bworker-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-raised));
+  color: var(--accent);
+  font-size: 20px;
+}
+
+.bworker-identity-text { min-width: 0; }
+.bworker-identity-text h2 { margin: 0; font-size: 17px; font-weight: 650; }
+.bworker-state-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 4px 0 0;
+}
+
+.bworker-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.bworker-actions .btn { display: inline-flex; align-items: center; gap: 6px; }
+
+/* -------------------------------------------------------- current work box */
+.bworker-current {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 13px 14px;
+  min-width: 0;
+}
+
+.bworker-current-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.bworker-current-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.bworker-current-eyebrow {
+  color: var(--fg-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.bworker-current-title strong {
+  font-size: 16px;
+  font-weight: 620;
+  overflow-wrap: anywhere;
+}
+
+.bworker-current-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.bworker-current .hint { margin-top: 8px; }
+
+.bworker-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.bworker-progress .progress { flex: 1; min-width: 90px; }
+
+.bworker-progress-label {
+  flex: 0 0 auto;
+  max-width: 45%;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+/* ------------------------------------------------------------ queue counts */
+.bworker-counts {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.bworker-count {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  min-width: 0;
+}
+
+.bworker-count-label {
+  color: var(--fg-faint);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bworker-count-value {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+/* --------------------------------------------------------- refresh toolbar */
+.activity-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.activity-refresh-label {
+  color: var(--fg-muted);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.activity-refresh-select {
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+
+.activity-refresh-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.activity-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Active: clearly green. Inactive: quiet, because the label says why. */
+.activity-refresh-btn.is-on {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.activity-refresh-btn.is-on:hover:not(:disabled) {
+  background: var(--ok);
+  border-color: var(--ok);
+  filter: brightness(1.06);
+}
+
+.activity-refresh-btn.is-off {
+  background: transparent;
+  border-color: var(--border-strong);
+  color: var(--fg-muted);
+}
+
+.activity-refresh-hint { flex: 1 1 180px; min-width: 0; }
+
+/* ------------------------------------------------------------- degraded log */
+.activity-degraded { margin: 0 0 12px; }
+.activity-degraded strong { color: var(--warn); }
+
+/* ----------------------------------------------------------------- live log */
+.activity-log {
+  max-height: 520px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.activity-log > #activity-log-empty { margin: 0; padding: 18px 14px; }
+
+.activity-log-list { display: flex; flex-direction: column; }
+
+.activity-log-entry {
+  padding: 11px 13px;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+
+.activity-log-entry:first-child { border-top: 0; }
+.activity-log-entry:hover { background: var(--bg-hover); }
+
+.activity-entry-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.activity-entry-time {
+  margin-left: auto;
+  color: var(--fg-faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.activity-entry-title {
+  display: block;
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.activity-entry-message {
+  margin: 3px 0 0;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.activity-entry-progress {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 7px;
+}
+
+.activity-entry-progress .progress { flex: 1; max-width: 360px; }
+
+.activity-entry-progress-label {
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+/* Running work gets a quiet accent edge; paused work a warning edge. */
+.activity-log-entry:has(.pill-running) {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.activity-log-entry.activity-entry-paused {
+  background: color-mix(in srgb, var(--warn) 7%, transparent);
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.pill-running {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+/* ----------------------------------------------------- queue and history */
+.queue-actions .priority-input {
+  width: 66px;
+  padding: 4px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  text-align: right;
+}
+
+.queue-actions .priority-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.queue-state .badge { align-self: flex-start; }
+
+.history-row time { white-space: nowrap; }
+
+.task-list .task-message { overflow-wrap: anywhere; }
+
+/* --------------------------------------------------------------- responsive */
+@media (max-width: 980px) {
+  .bworker-counts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+@media (max-width: 700px) {
+  .bworker-head { flex-direction: column; }
+  .bworker-actions { justify-content: flex-start; width: 100%; }
+  .bworker-actions .btn { flex: 1 1 auto; justify-content: center; }
+  .bworker-current-head { flex-direction: column; gap: 7px; }
+  .bworker-current-head > .pill { align-self: flex-start; }
+  .bworker-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bworker-progress { align-items: flex-start; flex-direction: column; }
+  .bworker-progress .progress { width: 100%; }
+  .bworker-progress-label { max-width: 100%; text-align: left; }
+  .activity-log { max-height: 62vh; }
+  .activity-entry-time { margin-left: 0; flex-basis: 100%; }
+  .activity-entry-progress { align-items: flex-start; flex-direction: column; gap: 5px; }
+  .activity-entry-progress .progress { width: 100%; max-width: none; }
+  .activity-refresh-hint { flex-basis: 100%; }
+  .task-row { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar { transition: none; }
+  .progress-indeterminate .progress-bar { animation-duration: 3s; }
+}

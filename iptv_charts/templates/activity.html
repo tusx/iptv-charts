@@ -1,23 +1,160 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon %}
 {% block title %}Activity · {{ app_name }}{% endblock %}
 
 {% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/activity.css') }}">
+
 <section class="page-head">
   <div>
     <p class="crumb"><a href="{{ url_for('home') }}">Home</a> / Activity</p>
     <h1>Activity</h1>
-    <p class="subtitle">Downloads, history and the scheduled library tasks.</p>
-  </div>
-  <div class="page-actions">
-    <button class="btn btn-sm" type="button" data-run-task="search_missing">Search missing</button>
-    <button class="btn btn-sm" type="button" data-run-task="refresh_metadata">Refresh metadata</button>
-    <button class="btn btn-sm" type="button" data-run-task="refresh_catalog">Refresh playlists</button>
-    <button class="btn btn-sm" type="button" data-run-task="scan_library">Scan library</button>
-    <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.scan_page') }}">Review scan</a>
+    <p class="subtitle">
+      The bworker, its live log, the download queue and the scheduled tasks.
+    </p>
   </div>
 </section>
+
 <p class="hint" id="activity-status" role="status"></p>
 
+{# ------------------------------------------------------------------ bworker #}
+<section class="activity-section bworker-card" id="bworker-card"
+         aria-labelledby="bworker-title">
+  <div class="bworker-head">
+    <div class="bworker-identity">
+      <span class="bworker-mark" aria-hidden="true">{{ icon('robot') }}</span>
+      <div class="bworker-identity-text">
+        <h2 id="bworker-title">Bworker</h2>
+        <p class="bworker-state-line">
+          <span class="pill pill-muted" id="bworker-state">Checking…</span>
+          <span class="muted small" id="bworker-heartbeat">Waiting for the first heartbeat…</span>
+        </p>
+      </div>
+    </div>
+    <div class="bworker-actions">
+      <button class="btn btn-sm" id="bworker-pause" type="button" aria-pressed="false">
+        <i class="fa-solid fa-fw fa-pause" id="bworker-pause-icon" aria-hidden="true"></i>
+        <span id="bworker-pause-label">Pause</span>
+      </button>
+      <button class="btn btn-sm btn-ghost" id="bworker-reset" type="button"
+              title="Clear failure counters and re-queue every bworker work unit">
+        {{ icon('rotate-left') }} Reset all failed attempts
+      </button>
+      <a class="btn btn-sm btn-ghost" id="download-folder-link" href="/storage">
+        {{ icon('folder-open') }} Download folder
+      </a>
+    </div>
+  </div>
+
+  <div class="bworker-current" id="bworker-current">
+    <div class="bworker-current-head">
+      <div class="bworker-current-title">
+        <span class="bworker-current-eyebrow">Current work</span>
+        <strong id="bworker-current-label">Loading…</strong>
+        <span class="bworker-current-meta">
+          <span class="tag" id="bworker-current-stage">stage: —</span>
+          <span class="muted small" id="bworker-current-started">started —</span>
+        </span>
+      </div>
+      <span class="pill pill-muted" id="bworker-current-status">—</span>
+    </div>
+    <p class="hint" id="bworker-paused-note" hidden></p>
+    <div class="bworker-progress" id="bworker-progress" hidden>
+      <div class="progress" id="bworker-progress-bar">
+        <span class="progress-bar" id="bworker-progress-fill"></span>
+      </div>
+      <span class="bworker-progress-label" id="bworker-progress-label"></span>
+    </div>
+    <p class="hint" id="bworker-current-empty">Waiting for the first status update…</p>
+  </div>
+
+  <div class="bworker-counts" aria-label="Bworker queue counts">
+    <div class="bworker-count">
+      <span class="bworker-count-label">Work pending</span>
+      <strong class="bworker-count-value" id="bw-count-work-pending">—</strong>
+    </div>
+    <div class="bworker-count">
+      <span class="bworker-count-label">Work running</span>
+      <strong class="bworker-count-value" id="bw-count-work-running">—</strong>
+    </div>
+    <div class="bworker-count">
+      <span class="bworker-count-label">Retrying</span>
+      <strong class="bworker-count-value" id="bw-count-work-retry">—</strong>
+    </div>
+    <div class="bworker-count">
+      <span class="bworker-count-label">Stopped</span>
+      <strong class="bworker-count-value" id="bw-count-work-stopped">—</strong>
+    </div>
+    <div class="bworker-count">
+      <span class="bworker-count-label">Complete</span>
+      <strong class="bworker-count-value" id="bw-count-work-complete">—</strong>
+    </div>
+    <div class="bworker-count">
+      <span class="bworker-count-label">Jobs queued</span>
+      <strong class="bworker-count-value" id="bw-count-jobs-queued">—</strong>
+    </div>
+    <div class="bworker-count">
+      <span class="bworker-count-label">Jobs running</span>
+      <strong class="bworker-count-value" id="bw-count-jobs-running">—</strong>
+    </div>
+  </div>
+</section>
+
+{# ----------------------------------------------------------------- live log #}
+<section class="activity-section activity-log-section" aria-labelledby="live-log-title">
+  <div class="panel-head">
+    <div>
+      <h2 id="live-log-title">Live activity</h2>
+      <p class="hint">The newest 100 bworker entries. Running work updates in place.</p>
+    </div>
+    <span class="muted small" id="activity-log-count"></span>
+  </div>
+
+  <div class="activity-toolbar" role="group" aria-label="Activity refresh controls">
+    <label class="activity-refresh-label" for="activity-refresh-interval">Refresh</label>
+    <select class="activity-refresh-select" id="activity-refresh-interval"
+            aria-label="Refresh interval">
+      <option value="5" selected>5s</option>
+      <option value="10">10s</option>
+      <option value="15">15s</option>
+      <option value="20">20s</option>
+      <option value="25">25s</option>
+      <option value="30">30s</option>
+      <option value="60">60s</option>
+      <option value="120">2 min</option>
+      <option value="180">3 min</option>
+      <option value="300">5 min</option>
+      <option value="600">10 min</option>
+      <option value="900">15 min</option>
+      <option value="1200">20 min</option>
+      <option value="1800">30 min</option>
+      <option value="3600">60 min</option>
+    </select>
+    <button class="btn btn-sm activity-refresh-btn is-on" id="activity-refresh-toggle"
+            type="button" aria-pressed="true">
+      <i class="fa-solid fa-fw fa-rotate" id="activity-refresh-icon" aria-hidden="true"></i>
+      <span id="activity-refresh-label">Refresh on (5s)</span>
+    </button>
+    <button class="btn btn-sm btn-ghost" id="activity-refresh-pause" type="button">
+      <i class="fa-solid fa-fw fa-pause" id="activity-refresh-pause-icon" aria-hidden="true"></i>
+      <span id="activity-refresh-pause-label">Pause refresh</span>
+    </button>
+    <span class="hint activity-refresh-hint" id="activity-refresh-hint">Refreshes every 5s.</span>
+  </div>
+
+  <div class="note note-warn activity-degraded" id="activity-degraded" hidden>
+    <strong>Activity log unavailable.</strong>
+    The Valkey activity store is not reachable. Current work from the database
+    is still shown above; the live log returns when the store recovers.
+  </div>
+
+  <div class="activity-log" id="activity-log" role="log" aria-live="polite" aria-busy="true">
+    <p class="muted" id="activity-log-empty">Loading the activity log…</p>
+    <div class="activity-log-list" id="activity-log-list"></div>
+  </div>
+</section>
+
+{# -------------------------------------------------------- queue and history #}
 <section class="activity-section">
   <div class="panel-head">
     <h2>Queue</h2>
@@ -36,21 +173,13 @@
 <section class="activity-section">
   <div class="panel-head">
     <h2>Tasks</h2>
-  </div>
-  <div id="tasks-body"><p class="muted">Loading…</p></div>
-</section>
-
-<section class="activity-section">
-  <div class="panel-head">
-    <h2>Worker</h2>
-    <span class="muted" id="worker-state"></span>
+    <span class="muted" id="tasks-state"></span>
   </div>
   <p class="hint">
-    The single background queue. Playlist syncs, probe searches, downloads,
-    metadata refreshes and scans run here one job at a time; the web server
-    only queues them.
+    Scheduled tasks are started automatically by the bworker. This status view
+    is read-only.
   </p>
-  <div id="worker-body"><p class="muted">Loading…</p></div>
+  <div id="tasks-body"><p class="muted">Loading…</p></div>
 </section>
 {% endblock %}
 
