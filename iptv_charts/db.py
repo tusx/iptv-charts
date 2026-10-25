@@ -293,6 +293,24 @@ def ensure_builtin_profiles(conn: sqlite3.Connection, *,
     return {str(row["builtin_key"]): int(row["id"]) for row in rows}
 
 
+def repair_unknown_quality_labels(conn: sqlite3.Connection) -> int:
+    """Drop legacy "Unknown" source suffixes from stored display labels.
+
+    Source is no longer scored, but imports made by the previous label helper
+    can still say e.g. ``1080p Unknown``. The resolution is the useful part.
+    """
+    updated = 0
+    for table in ("movies", "series_episodes", "downloads"):
+        cursor = conn.execute(
+            f"UPDATE {table} SET quality_label = resolution "
+            "WHERE resolution IS NOT NULL AND ("
+            "quality_label = 'Unknown' OR quality_label LIKE '% Unknown')"
+        )
+        updated += max(0, int(cursor.rowcount or 0))
+    conn.commit()
+    return updated
+
+
 def ensure_default_settings(conn: sqlite3.Connection) -> None:
     """Seed the 0.8.0 settings keys without overwriting user values."""
     for key, value in DEFAULT_SETTINGS.items():
@@ -827,6 +845,7 @@ def init_db(path: Path | None = None) -> None:
             ensure_bworker_policies(conn)
             ensure_bworker_state(conn)
             ensure_builtin_profiles(conn)
+            repair_unknown_quality_labels(conn)
             conn.commit()
         finally:
             conn.close()

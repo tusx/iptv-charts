@@ -1004,6 +1004,19 @@ def test_manager_foundations() -> None:
         db.init_db(path)
         conn = db.connect(path)
         conn.execute(
+            "INSERT INTO movies (tmdb_id, title, added_at, resolution, "
+            "quality_label) VALUES (999001, 'Label repair', 0, '1080p', "
+            "'1080p Unknown')"
+        )
+        conn.commit()
+        db.repair_unknown_quality_labels(conn)
+        repair_row = conn.execute(
+            "SELECT quality_label FROM movies WHERE tmdb_id = 999001"
+        ).fetchone()
+        check("legacy unknown source label repaired",
+              repair_row["quality_label"], "1080p")
+        conn.execute("DELETE FROM movies WHERE tmdb_id = 999001")
+        conn.execute(
             "INSERT INTO sources (id, name, kind, created_at, connection_limit, "
             "max_connections) VALUES (1, 'limited', 'xtream', 0, 1, 4)"
         )
