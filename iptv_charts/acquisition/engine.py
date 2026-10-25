@@ -660,13 +660,16 @@ def _same_identity(ctx: dict, candidate: Mapping[str, Any],
                    identity) -> bool:
     if identity is None:
         return False
+    remote_id = candidate.get("provider_remote_id", candidate.get("remote_id"))
+    if remote_id is None:
+        return False
     if ctx["entity_type"] == "movie":
         return (int(candidate["source_id"]) == int(identity[0])
-                and str(candidate["provider_remote_id"]) == str(identity[1]))
+                and str(remote_id) == str(identity[1]))
     return (
         int(candidate["source_id"]) == int(identity[0])
-        and str(candidate["provider_remote_id"]) == str(identity[1])
-        and str(candidate["episode_stream_id"] or "") == str(identity[2])
+        and str(remote_id) == str(identity[1])
+        and str(candidate.get("episode_stream_id") or "") == str(identity[2])
     )
 
 
