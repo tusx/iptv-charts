@@ -262,6 +262,8 @@
                 <div><strong>{{ candidate.probe.hdr or 'SDR' }}</strong><span>HDR</span></div>
                 <div><strong>{{ candidate.probe.audio_track_count or 0 }}</strong><span>Audio</span></div>
                 <div><strong>{{ candidate.probe.subtitle_track_count or 0 }}</strong><span>Subtitles</span></div>
+                <div><strong>{{ candidate.probe.audio_codecs|join('/') or 'Unknown' }}</strong><span>Audio codecs</span></div>
+                <div><strong>{{ candidate.probe.subtitle_codecs|join('/') or 'None' }}</strong><span>Subtitle codecs</span></div>
                 <div>
                   <strong>
                     {% if candidate.probe.size %}{{ (candidate.probe.size / 1048576)|round(1) }} MiB{% else %}Unknown{% endif %}
@@ -269,11 +271,15 @@
                 </div>
               </div>
               <div class="candidate-langs">
-                {% if candidate.probe.audio_languages %}
-                  <span class="track-chip">Audio: {{ candidate.probe.audio_languages|join('/') }}</span>
+                {% if candidate.probe.audio %}
+                  <span class="track-chip">Audio:
+                    {% for track in candidate.probe.audio %}{{ track.codec or 'unknown' }}{% if track.language %} ({{ track.language }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+                  </span>
                 {% endif %}
-                {% if candidate.probe.subtitle_languages %}
-                  <span class="track-chip">Subtitles: {{ candidate.probe.subtitle_languages|join('/') }}</span>
+                {% if candidate.probe.subtitles %}
+                  <span class="track-chip">Subtitles:
+                    {% for track in candidate.probe.subtitles %}{{ track.codec or 'unknown' }}{% if track.language %} ({{ track.language }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+                  </span>
                 {% endif %}
                 {% if candidate.quality_label %}
                   <span class="track-chip">{{ candidate.quality_label }}</span>
@@ -468,6 +474,10 @@
   <div class="dialog-body">
     <div class="search-field">
       <input type="search" id="movie-release-query" placeholder="Search the IPTV catalog" autocomplete="off">
+    </div>
+    <div class="release-tools">
+      <button class="btn btn-primary btn-sm" type="button" id="movie-all-candidates">Show all candidates</button>
+      <span class="hint">Browse every catalog match, including unprobed and outside-profile versions.</span>
     </div>
     <p class="hint" id="movie-release-status" role="status"></p>
     <div class="release-list" id="movie-release-list"></div>

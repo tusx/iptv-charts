@@ -123,6 +123,21 @@ def fake_probe_episode(conn, release, *, refresh=False, acquire_timeout=5.0):
     return probe.apply(dict(release), payload)
 
 
+def store_probe(source_id: int, remote_id: str, payload: dict, *,
+                kind: str = "vod", stream_id: str = "") -> None:
+    conn.execute(
+        "INSERT INTO stream_probes (source_id, provider_kind, provider_remote_id, "
+        "episode_stream_id, ok, payload, probed_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(source_id, provider_kind, provider_remote_id, episode_stream_id) "
+        "DO UPDATE SET ok = excluded.ok, payload = excluded.payload, "
+        "probed_at = excluded.probed_at",
+        (int(source_id), kind, str(remote_id), str(stream_id),
+         1 if payload.get("ok") else 0,
+         json.dumps(payload, ensure_ascii=False), int(time.time())),
+    )
+    conn.commit()
+
+
 def fake_provider_episodes(conn, source_row, remote_id, *, refresh=False):
     key = (int(source_row["id"]), str(remote_id))
     PROVIDER_CALLS.append(key)
@@ -991,6 +1006,86 @@ def test_manual_search_and_grab() -> None:
     eq("Manual grab annotates the score",
        json.loads(grab["score_details"])["eligible"], True)
 
+    # ------------------------------------------------ manual candidate browser
+    facts = probe_payload(
+        "2160p",
+        audio=[{"codec": "eac3", "language": "eng"},
+               {"codec": "aac", "language": "spa"}],
+    )
+    facts["subtitles"] = [
+        {"codec": "subrip", "language": "eng"},
+        {"codec": "hdmv_pgs_subtitle", "language": "spa"},
+    ]
+    facts["audio_languages"] = ["eng", "spa"]
+    facts["subtitle_languages"] = ["eng", "spa"]
+    conn.execute(
+        "DELETE FROM stream_probes WHERE source_id = ? AND provider_remote_id IN "
+        "('manual-4k', 'manual-1080')", (source,),
+    )
+    conn.commit()
+    store_probe(source, "manual-4k", facts)
+    view = library.movie_candidates_view(
+        conn, get_movie(movie), limit=10, query="Manual Movie",
+    )
+    eq("Candidate browser returns every matching movie", view["total"], 2)
+    probed = next(row for row in view["candidates"] if row["probe_ok"])
+    eq("Candidate browser reads size", probed["size"], 1_000_000)
+    eq("Candidate browser reads resolution", probed["resolution"], "2160p")
+    eq("Candidate browser reads video codec", probed["video_codecs"], ["h264"])
+    eq("Candidate browser reads audio codecs", probed["audio_codecs"],
+       ["eac3", "aac"])
+    eq("Candidate browser reads subtitle codecs", probed["subtitle_codecs"],
+       ["subrip", "hdmv_pgs_subtitle"])
+    eq("Candidate browser reads audio languages", probed["audio_languages"],
+       ["eng", "spa"])
+    eq("Candidate browser reads subtitle languages", probed["subtitle_languages"],
+       ["eng", "spa"])
+
+    # Identity-only matching is right for the detail workspace, but "all
+    # candidates" must also reveal a same-title release that has no TMDB id.
+    add_item(source, "vod", "manual-title-only",
+             "Manual Movie (2020) 1080p WEBRip")
+    identity_view = library.movie_candidates_view(
+        conn, get_movie(movie), limit=10,
+    )
+    eq("Identity workspace keeps the precise match set", identity_view["total"], 2)
+    broad_view = library.movie_candidates_view(
+        conn, get_movie(movie), limit=10, all_matches=True,
+    )
+    eq("All candidates include title-only releases", broad_view["total"], 3)
+    check("All candidates expose the title-only release",
+          any(row["remote_id"] == "manual-title-only"
+              for row in broad_view["candidates"]))
+
+    # A candidate the automatic search never reached can be selected in the
+    # browser; the selection probes it first and refuses if ffprobe fails.
+    conn.execute("DELETE FROM stream_probes WHERE source_id = ?", (source,))
+    conn.commit()
+    original_probe = probe.probe_movie_release
+
+    def storing_probe(conn_arg, release, **kwargs):
+        result = fake_probe_movie(conn_arg, release, **kwargs)
+        store_probe(source, "manual-1080", result.get("probe") or {})
+        return result
+
+    probe.probe_movie_release = storing_probe
+    try:
+        selected = library.select_movie_candidate(
+            conn, movie, source, "manual-1080", "only", grab=False,
+            probe_if_needed=True,
+        )
+    finally:
+        probe.probe_movie_release = original_probe
+    check("Manual selection probes an unprobed candidate",
+          selected["candidate"]["probe_ok"])
+    eq("Manual selection keeps the probed facts",
+       selected["candidate"]["resolution"], "1080p")
+    conn.execute("UPDATE movies SET candidate_source_id = NULL, "
+                 "candidate_remote_id = NULL, candidate_mode = NULL, "
+                 "candidate_name = NULL, candidate_selected_at = NULL WHERE id = ?",
+                 (movie,))
+    conn.commit()
+
 
 def test_manual_episode_paths() -> None:
     section("Manual paths: episode releases and grab")
@@ -1020,6 +1115,41 @@ def test_manual_episode_paths() -> None:
               "not allowed" in str(exc).lower(), str(exc))
     else:
         check("Manual episode grab enforces the profile", False, "did not raise")
+
+    episode_facts = probe_payload(
+        "1080p",
+        audio=[{"codec": "aac", "language": "eng"}],
+    )
+    episode_facts["subtitles"] = [{"codec": "subrip", "language": "eng"}]
+    episode_facts["audio_languages"] = ["eng"]
+    episode_facts["subtitle_languages"] = ["eng"]
+    store_probe(source, "manual-series", episode_facts, kind="series",
+                stream_id="41")
+    view = library.episode_candidates_view(
+        conn, get_series(series), get_episode(episode), limit=10,
+    )
+    eq("Episode browser lists every provider episode", view["total"], 1)
+    candidate = view["candidates"][0]
+    check("Episode browser reads the cached probe", candidate["probe_ok"])
+    eq("Episode browser reads file size", candidate["size"], 1_000_000)
+    eq("Episode browser reads resolution", candidate["resolution"], "1080p")
+    eq("Episode browser reads video codec", candidate["video_codecs"], ["h264"])
+    eq("Episode browser reads audio codec", candidate["audio_codecs"], ["aac"])
+    eq("Episode browser reads audio language", candidate["audio_languages"],
+       ["eng"])
+    eq("Episode browser reads subtitle codec", candidate["subtitle_codecs"],
+       ["subrip"])
+    eq("Episode browser reads subtitle language",
+       candidate["subtitle_languages"], ["eng"])
+    probe_result = library.probe_episode_candidate(
+        conn, series, episode, source, "manual-series", "41",
+    )
+    check("Episode candidate probe returns facts", probe_result["probe"]["ok"])
+    forced = library.grab_episode(
+        conn, series, episode, source, "manual-series", "41", force=True,
+    )
+    eq("Forced episode grab is labelled as a manual override",
+       forced["reason"], "manual-override")
 
 
 # ===========================================================================

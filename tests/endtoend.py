@@ -120,12 +120,16 @@ def main() -> int:
         # A reload mid-sync must already show the card with its progress bar.
         response = client.get("/")
         check("home page renders with a source", response.status_code, 200)
-        check_true("source name shown on home", b"E2E playlist" in response.data)
-        check_true("home progress slot present", b"sync-slot" in response.data)
+        check_true("home offers Explore playlists", b"Explore playlists" in response.data)
+        check("home no longer lists each playlist",
+              b"E2E playlist" in response.data, False)
+        check("home defers sync progress to the manage page",
+              b"sync-slot" in response.data, False)
 
         response = client.get("/playlists")
         check("playlists page renders with a source", response.status_code, 200)
         check_true("source name shown on playlists", b"E2E playlist" in response.data)
+        check_true("manage page progress slot present", b"sync-slot" in response.data)
 
         # ---------------------------------------------------------------- sync
         section("sync completes")

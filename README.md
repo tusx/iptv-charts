@@ -239,10 +239,14 @@ search is the escape hatch.
 ### Manual search and the movie candidate workspace
 
 Manual search accepts a query override and lists plausible releases with
-probe facts. The **movie detail page is also the candidate workspace**: every
-matching VOD, its cached ffprobe facts, filtering (all, probed, profile
-allowed, pinned) and the weighted profile decision. Probe one/all candidates
-without leaving the page.
+probe facts; **Show all candidates** in the dialog expands that to every
+catalog match and lets you probe or download one explicitly. The **movie
+detail page is also the candidate workspace**: every matching VOD, its cached
+ffprobe facts (size, resolution, video/audio/subtitle codecs and languages),
+filtering (all, probed, profile allowed, pinned) and the weighted profile
+decision. Probe one/all candidates without leaving the page. Series manual
+search has the same all-candidates browser, and outside-profile episode picks
+require confirmation.
 
 A probed candidate can be pinned:
 

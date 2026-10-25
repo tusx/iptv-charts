@@ -93,6 +93,64 @@ def _float(value: Any) -> float | None:
         return None
 
 
+def _unique_codecs(tracks: Any) -> list[str]:
+    if not isinstance(tracks, list):
+        return []
+    return list(dict.fromkeys(
+        str(track["codec"])
+        for track in tracks
+        if isinstance(track, Mapping) and track.get("codec")
+    ))
+
+
+def _codec_facts(payload: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Aggregate codecs for a payload, including older cached probes."""
+    return {
+        "video_codecs": _unique_codecs(payload.get("video")),
+        "audio_codecs": _unique_codecs(payload.get("audio")),
+        "subtitle_codecs": _unique_codecs(payload.get("subtitles")),
+    }
+
+
+def enrich(payload: Mapping[str, Any]) -> dict:
+    """Return a probe payload with aggregate codec/track fields filled in.
+
+    Older cached payloads only contain the per-track arrays. Normalising on
+    read keeps the candidate cards and the download decision consistent
+    without rewriting the cache.
+    """
+    result = dict(payload)
+    if not result.get("ok"):
+        return result
+    for key, value in _codec_facts(result).items():
+        if value and not result.get(key):
+            result[key] = value
+    audio = result.get("audio")
+    subtitles = result.get("subtitles")
+    videos = result.get("video")
+    if isinstance(audio, list) and not result.get("audio_track_count"):
+        result["audio_track_count"] = len(audio)
+    if isinstance(subtitles, list) and not result.get("subtitle_track_count"):
+        result["subtitle_track_count"] = len(subtitles)
+    if isinstance(audio, list) and not result.get("audio_languages"):
+        result["audio_languages"] = list(dict.fromkeys(
+            track.get("language") for track in audio
+            if isinstance(track, Mapping) and track.get("language")
+        ))
+    if isinstance(subtitles, list) and not result.get("subtitle_languages"):
+        result["subtitle_languages"] = list(dict.fromkeys(
+            track.get("language") for track in subtitles
+            if isinstance(track, Mapping) and track.get("language")
+        ))
+    if isinstance(videos, list) and not result.get("video_codec"):
+        result["video_codec"] = next(
+            (track.get("codec") for track in videos
+             if isinstance(track, Mapping) and track.get("codec")),
+            None,
+        )
+    return result
+
+
 def normalise(payload: Mapping[str, Any]) -> dict:
     """Convert ffprobe ``-show_streams -show_format`` JSON into app facts."""
     raw_streams = payload.get("streams") if isinstance(payload, Mapping) else None
@@ -199,10 +257,13 @@ def normalise(payload: Mapping[str, Any]) -> dict:
         "width": primary.get("width"),
         "height": primary.get("height"),
         "video_codec": primary.get("codec"),
+        "video_codecs": _unique_codecs(videos),
         "hdr": primary.get("hdr") or "SDR",
         "video": videos,
         "audio": audio,
+        "audio_codecs": _unique_codecs(audio),
         "subtitles": subtitles,
+        "subtitle_codecs": _unique_codecs(subtitles),
         "audio_languages": audio_languages,
         "subtitle_languages": subtitle_languages,
         "audio_track_count": len(audio),
@@ -369,6 +430,7 @@ def inspect(conn, ref: streams.StreamRef, *, refresh: bool = False,
 
 def apply(release: dict, payload: Mapping[str, Any]) -> dict:
     """Attach a probe payload to a release and prefer the probed facts."""
+    payload = enrich(payload)
     release["probe"] = dict(payload)
     release["probe_ok"] = bool(payload.get("ok"))
     if payload.get("ok"):
@@ -376,9 +438,23 @@ def apply(release: dict, payload: Mapping[str, Any]) -> dict:
             release["resolution"] = payload["resolution"]
         release["audio_languages"] = payload.get("audio_languages") or []
         release["subtitle_languages"] = payload.get("subtitle_languages") or []
-        release["size"] = payload.get("size")
+        # HLS probes deliberately have no size (ffprobe would report only the
+        # playlist). Keep the catalog's size in that case instead of clearing
+        # a useful file-size hint.
+        if payload.get("size") is not None:
+            release["size"] = payload["size"]
         release["video_codec"] = payload.get("video_codec")
         release["hdr"] = payload.get("hdr")
+        release["width"] = payload.get("width")
+        release["height"] = payload.get("height")
+        release["duration"] = payload.get("duration")
+        release["bit_rate"] = payload.get("bit_rate")
+        release["container"] = payload.get("container")
+        release["audio_track_count"] = payload.get("audio_track_count")
+        release["subtitle_track_count"] = payload.get("subtitle_track_count")
+        for key, value in _codec_facts(payload).items():
+            if value:
+                release[key] = value
     return release
 
 
@@ -444,6 +520,7 @@ __all__ = [
     "cache_snapshot",
     "cached",
     "clear_cache",
+    "enrich",
     "inspect",
     "max_candidates",
     "normalise",

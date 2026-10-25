@@ -37,8 +37,8 @@
     <div class="home-card-actions">
       <button class="btn btn-primary btn-sm" type="button" id="add-open-btn">{{ icon('plus') }} Add playlist</button>
       {% if sources %}
+        <a class="btn btn-primary btn-sm" href="{{ url_for('sources_list') }}">{{ icon('compass') }} Explore playlists</a>
         <button class="btn btn-sm" type="button" id="sync-all-btn">{{ icon('arrows-rotate') }} Update all</button>
-        <a class="btn btn-sm btn-ghost" href="{{ url_for('sources_list') }}">{{ icon('sliders') }} Manage</a>
       {% endif %}
       {# IPTV player/playlist settings live at the bottom of the manage page. #}
       <a class="btn btn-sm btn-ghost" href="{{ url_for('sources_list') }}#iptv-settings">{{ icon('gear') }} Settings</a>
@@ -53,60 +53,10 @@
     </div>
 
     {% if sources %}
-      <div class="home-playlist-list">
-        {% for source in sources %}
-          {% set job = sync_state.jobs.get(source.id) %}
-          {% set effective_limit = source.connection_limit or source.max_connections or 1 %}
-          <article class="home-playlist source-card" data-source-id="{{ source.id }}"
-                   data-source-name="{{ source.name }}" data-source-row>
-            <div class="home-playlist-main">
-              <div class="home-playlist-title">
-                <strong>{{ source.name }}</strong>
-                <span class="tag">{{ source.kind }}</span>
-                {% if job and job.state in ('queued', 'running') %}
-                  <span class="badge badge-downloading home-sync-badge">Updating</span>
-                {% endif %}
-              </div>
-              <span class="muted small">
-                {{ source.live_count }} live · {{ source.vod_count }} VOD ·
-                {{ source.series_count }} series ·
-                {{ connection_counts.get(source.id, 0) }}/{{ effective_limit }} connection{{ '' if effective_limit == 1 else 's' }}
-              </span>
-              <span class="muted small home-sync-state">
-                {% if job and job.state in ('queued', 'running') %}{{ job.message or 'Syncing…' }}
-                {% elif job and job.state == 'error' %}Last update failed
-                {% else %}Updated {{ format_age(source.last_synced_at) }}{% endif %}
-              </span>
-            </div>
-            <div class="sync-slot home-sync-slot" data-source-id="{{ source.id }}"
-                 {% if not job or job.state not in ('queued', 'running') %}hidden{% endif %}>
-              <div class="sync-line">
-                <span class="sync-phase js-sync-phase">{{ job.detail or job.message if job else '' }}</span>
-                <span class="sync-count js-sync-count"></span>
-              </div>
-              <div class="progress {% if job and job.fraction is none %}progress-indeterminate{% endif %}">
-                <div class="progress-bar js-sync-bar"
-                     style="width: {{ ((job.fraction or 0) * 100) | round(1) if job else 0 }}%"></div>
-              </div>
-            </div>
-            <p class="note note-bad js-error" hidden></p>
-            <div class="home-playlist-actions">
-              <a class="btn btn-sm btn-ghost" href="{{ url_for('browse', source_id=source.id) }}"
-                 {% if not (source.live_count + source.vod_count + source.series_count) %}
-                   aria-disabled="true" title="Nothing imported yet — run an update first"
-                 {% else %}title="Search and browse this playlist"{% endif %}>{{ icon('magnifying-glass') }} Browse</a>
-              <a class="btn btn-sm btn-ghost" href="{{ url_for('edit_source', source_id=source.id) }}">{{ icon('pen-to-square') }} Edit</a>
-              <button class="btn btn-sm btn-ghost js-sync" data-source-id="{{ source.id }}"
-                      {% if job and job.state in ('queued', 'running') %}disabled{% endif %}>{{ icon('arrows-rotate') }} Update</button>
-              <button class="btn btn-sm btn-ghost js-cancel" data-source-id="{{ source.id }}"
-                      {% if not job or job.state not in ('queued', 'running') %}hidden{% endif %}>{{ icon('xmark') }} Cancel</button>
-              <button class="btn btn-sm btn-ghost btn-danger js-delete"
-                      data-source-id="{{ source.id }}" data-source-name="{{ source.name }}"
-                      title="Remove this playlist">{{ icon('trash') }} Remove</button>
-            </div>
-          </article>
-        {% endfor %}
-      </div>
+      <p class="hint">
+        Playlists are managed on their own page. Explore them there to browse a
+        provider, update it, change connection limits or open IPTV settings.
+      </p>
     {% else %}
       <div class="home-empty">
         <p><strong>No playlists yet</strong></p>

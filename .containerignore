@@ -5,6 +5,7 @@
 
 # Version control and the build definition itself.
 .git/
+.claude/
 .github/
 .gitignore
 Containerfile

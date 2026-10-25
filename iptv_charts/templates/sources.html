@@ -140,7 +140,7 @@
                   {% if job and job.state in ('queued', 'running') %}disabled{% endif %}>Update</button>
           <button class="btn btn-ghost js-cancel" data-source-id="{{ source.id }}"
                   {% if not job or job.state not in ('queued', 'running') %}hidden{% endif %}>Cancel</button>
-          <a class="btn btn-ghost js-browse" href="{{ url_for('browse', source_id=source.id) }}"
+          <a class="btn btn-primary js-browse" href="{{ url_for('browse', source_id=source.id) }}"
              {% if not (source.live_count + source.vod_count + source.series_count) %}
                aria-disabled="true" title="Nothing imported yet — run an update first"
              {% else %}

@@ -465,7 +465,8 @@ def manual_movie_releases(conn, movie_id: int, *, query: str | None = None) -> l
         raise LookupError("That movie no longer exists.")
     profile = _profile(conn, movie["quality_profile_id"])
     candidates = matching.movie_candidates(
-        conn, movie, query_override=query, min_score=0.45 if query else 0.65
+        conn, movie, query_override=query, min_score=0.45 if query else 0.65,
+        limit=500,
     )
     releases = _probe_movie_candidates(
         conn, candidates, profile, movie.get("original_language"),
@@ -846,14 +847,23 @@ def _decorate_candidate(candidate: dict, profile: quality.Profile,
         candidate["probe_age"] = max(0, _now() - int(probe_row["probed_at"]))
         payload = probe_row.get("payload")
         if payload:
+            payload = probe.enrich(payload)
             candidate["probe"] = payload
         if probe_row["ok"] and payload:
             candidate["probe_status"] = "probed"
             candidate["probe_ok"] = True
             release = probe.apply(candidate, payload)
             candidate["resolution"] = release.get("resolution") or candidate.get("resolution")
-            candidate["audio_languages"] = payload.get("audio_languages") or []
-            candidate["subtitle_languages"] = payload.get("subtitle_languages") or []
+            candidate["audio_languages"] = release.get("audio_languages") or []
+            candidate["subtitle_languages"] = release.get("subtitle_languages") or []
+            for key in (
+                "size", "video_codec", "video_codecs", "audio_codecs",
+                "subtitle_codecs", "hdr", "width", "height", "duration",
+                "bit_rate", "container", "audio_track_count",
+                "subtitle_track_count",
+            ):
+                if release.get(key) is not None:
+                    candidate[key] = release[key]
             allowed, reason = profile.check(release, movie.get("original_language"))
             candidate["allowed"] = allowed
             candidate["reason"] = reason
@@ -867,16 +877,29 @@ def _decorate_candidate(candidate: dict, profile: quality.Profile,
     return candidate
 
 
-def movie_candidates_view(conn, movie: Mapping[str, Any], *, limit: int = 80) -> dict:
+def movie_candidates_view(conn, movie: Mapping[str, Any], *, limit: int = 80,
+                          query: str | None = None,
+                          all_matches: bool = False) -> dict:
     """Catalog candidates for a movie, merged with cached ffprobe facts.
 
     This is the movie-detail equivalent of the Auto-Streams source list: every
     candidate is visible, whether it has been probed, and whether the current
-    quality profile accepts it. Nothing here contacts a provider.
+    quality profile accepts it. Nothing here contacts a provider. ``limit``
+    only caps the returned page; ``total`` still reports every match so the
+    manual browser can ask for the rest without re-scanning the catalog.
     """
     movie_id = int(movie["id"])
     profile = _profile(conn, movie["quality_profile_id"])
-    candidates = matching.movie_candidates(conn, movie, min_score=0.45)
+    query = (query or "").strip()[:120] or None
+    # The detail workspace uses the precise identity when one exists. The
+    # manual browser's "all" mode instead searches by title, because a file
+    # without a TMDB/IMDb id is still a valid version the user may want.
+    search_query = query
+    if all_matches and not search_query:
+        search_query = str(movie.get("title") or "").strip() or None
+    candidates = matching.movie_candidates(
+        conn, movie, query_override=search_query, min_score=0.45, limit=500,
+    )
     pin_source = movie.get("candidate_source_id")
     pin_remote = movie.get("candidate_remote_id")
     source_ids = {int(candidate["source_id"]) for candidate in candidates}
@@ -942,6 +965,7 @@ def movie_candidates_view(conn, movie: Mapping[str, Any], *, limit: int = 80) ->
         "candidates": decorated[:max(1, int(limit))],
         "total": len(decorated),
         "probed": probed,
+        "query": query,
     }
 
 
@@ -950,7 +974,9 @@ def probe_movie_candidate(conn, movie_id: int, source_id: int, remote_id: str,
     movie = get_movie(conn, movie_id)
     if movie is None:
         raise LookupError("That movie no longer exists.")
-    candidates = matching.movie_candidates(conn, movie, min_score=0.45)
+    candidates = matching.movie_candidates(
+        conn, movie, min_score=0.45, limit=500,
+    )
     candidate = next(
         (entry for entry in candidates
          if int(entry["source_id"]) == int(source_id)
@@ -1002,13 +1028,16 @@ def probe_movie_candidates(conn, movie_id: int, *, refresh: bool = False) -> dic
 
 
 def select_movie_candidate(conn, movie_id: int, source_id: int, remote_id: str,
-                           mode: str, *, grab: bool = True) -> dict:
+                           mode: str, *, grab: bool = True,
+                           probe_if_needed: bool = False) -> dict:
     if mode not in ("only", "also"):
         raise ValueError("Choose whether to use only this candidate or download it too.")
     movie = get_movie(conn, movie_id)
     if movie is None:
         raise LookupError("That movie no longer exists.")
-    candidates = matching.movie_candidates(conn, movie, min_score=0.45)
+    candidates = matching.movie_candidates(
+        conn, movie, min_score=0.45, limit=500,
+    )
     candidate = next(
         (entry for entry in candidates
          if int(entry["source_id"]) == int(source_id)
@@ -1024,7 +1053,23 @@ def select_movie_candidate(conn, movie_id: int, source_id: int, remote_id: str,
         raise LookupError("That candidate is no longer in the playlist.")
     probe_row = _latest_probe(conn, int(source_id), str(remote_id))
     if probe_row is None or not probe_row["ok"] or not probe_row["payload"]:
-        raise ValueError("Run ffprobe on this candidate before selecting it.")
+        if not probe_if_needed:
+            raise ValueError("Run ffprobe on this candidate before selecting it.")
+        # The manual browser can select a candidate that the automatic search
+        # never reached. Probe it now, then persist the same facts the normal
+        # candidate card would have shown.
+        probe.probe_movie_release(
+            conn, dict(candidate), refresh=True, acquire_timeout=30.0,
+        )
+        probe_row = _latest_probe(conn, int(source_id), str(remote_id))
+        if probe_row is None or not probe_row["ok"] or not probe_row["payload"]:
+            error = None
+            if probe_row and probe_row.get("payload"):
+                error = probe_row["payload"].get("error")
+            raise ValueError(
+                "ffprobe could not inspect this candidate"
+                + (f": {error}" if error else ".")
+            )
     release = probe.apply(dict(candidate), probe_row["payload"])
     release.pop("request_headers", None)
     if mode == "also" and db.get_one(
@@ -1776,8 +1821,123 @@ def manual_episode_releases(conn, series_id: int, episode_id: int,
     return out
 
 
-def grab_episode(conn, series_id: int, episode_id: int, source_id: int,
-                 provider_remote_id: str, stream_id: str) -> dict:
+def _latest_episode_probe(conn, source_id: int, provider_remote_id: str,
+                          stream_id: str) -> dict | None:
+    row = db.get_one(
+        conn,
+        "SELECT ok, payload, probed_at FROM stream_probes "
+        "WHERE source_id = ? AND provider_kind = 'series' "
+        "AND provider_remote_id = ? AND episode_stream_id = ?",
+        (int(source_id), str(provider_remote_id), str(stream_id)),
+    )
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except (TypeError, ValueError):
+        payload = None
+    if not isinstance(payload, dict):
+        payload = None
+    return {
+        "ok": bool(row["ok"]) and bool(payload and payload.get("ok")),
+        "payload": payload,
+        "probed_at": int(row["probed_at"]),
+    }
+
+
+def _decorate_episode_candidate(release: dict, profile: quality.Profile,
+                                original_language: str | None,
+                                probe_row: dict | None) -> dict:
+    release = dict(release)
+    release.pop("request_headers", None)
+    release["probe_status"] = "not_probed"
+    release["probe_ok"] = False
+    release["probe"] = None
+    release["probe_error"] = ""
+    release["probe_age"] = None
+    release["probed_at"] = None
+    release["allowed"] = None
+    release["reason"] = "Not probed yet."
+    release["quality_label"] = None
+    if probe_row is None:
+        return release
+    release["probed_at"] = int(probe_row["probed_at"])
+    release["probe_age"] = max(0, _now() - int(probe_row["probed_at"]))
+    payload = probe_row.get("payload")
+    if payload:
+        payload = probe.enrich(payload)
+        release["probe"] = payload
+    if probe_row["ok"] and payload:
+        release["probe_status"] = "probed"
+        release["probe_ok"] = True
+        release = probe.apply(release, payload)
+        allowed, reason = profile.check(release, original_language)
+        release["allowed"] = allowed
+        release["reason"] = reason
+        release["quality_label"] = _tier_label(profile, release) if allowed else None
+    else:
+        release["probe_status"] = "failed"
+        release["allowed"] = False
+        error = (payload or {}).get("error") if payload else None
+        release["probe_error"] = error or "ffprobe did not identify a playable video."
+        release["reason"] = f"Probe failed: {release['probe_error']}"
+    return release
+
+
+def episode_candidates_view(conn, series: Mapping[str, Any],
+                            episode: Mapping[str, Any], *, limit: int = 100,
+                            query: str | None = None,
+                            all_matches: bool = False) -> dict:
+    """Every provider episode for one Sonarr episode, with cached probe facts.
+
+    The manual search probes a small budget and then stops. This browser is
+    deliberately read-only: it lists every mapped provider episode (up to a
+    safe provider-call cap) plus any cached ffprobe result, leaving the actual
+    probe to the explicit download action.
+    """
+    if int(episode["series_id"]) != int(series["id"]):
+        raise LookupError("That episode no longer exists.")
+    query = (query or "").strip()[:120] or None
+    profile = _profile(conn, series["quality_profile_id"])
+    search_query = query
+    if all_matches and not search_query:
+        search_query = str(series.get("title") or "").strip() or None
+    candidates = matching.series_candidates(
+        conn, series, query_override=search_query, min_score=0.45, limit=500,
+    )
+    providers = _provider_maps(conn, candidates, limit=50)
+    decorated: list[dict] = []
+    season = int(episode["season"])
+    episode_number = int(episode["episode"])
+    for candidate, source, mapping in providers:
+        provider_episode = mapping.get((season, episode_number))
+        if provider_episode is None:
+            continue
+        release = _episode_release(candidate, source, provider_episode)
+        probe_row = _latest_episode_probe(
+            conn, int(candidate["source_id"]), str(candidate["remote_id"]),
+            str(provider_episode["stream_id"]),
+        )
+        decorated.append(_decorate_episode_candidate(
+            release, profile, series.get("original_language"), probe_row,
+        ))
+    decorated.sort(key=lambda item: (
+        0 if item["probe_ok"] and item["allowed"] else 1 if item["probe_ok"] else 2,
+        -float(item.get("score") or 0.0),
+        quality.RANK.get(item.get("resolution", "unknown"), len(quality.RESOLUTIONS)),
+        str(item.get("name") or "").casefold(),
+    ))
+    return {
+        "candidates": decorated[:max(1, int(limit))],
+        "total": len(decorated),
+        "probed": sum(1 for item in decorated if item["probe_ok"]),
+        "query": query,
+    }
+
+
+def _episode_selection(conn, series_id: int, episode_id: int, source_id: int,
+                       provider_remote_id: str, stream_id: str,
+                       *, refresh: bool = True) -> tuple[dict, dict, dict]:
     series = get_series(conn, series_id)
     episode = get_episode(conn, episode_id)
     if series is None or episode is None or int(episode["series_id"]) != int(series_id):
@@ -1785,7 +1945,9 @@ def grab_episode(conn, series_id: int, episode_id: int, source_id: int,
     source = _row(db.get_one(conn, "SELECT * FROM sources WHERE id = ?", (int(source_id),)))
     if source is None:
         raise LookupError("That playlist no longer exists.")
-    episodes = provider_series_episodes(conn, source, str(provider_remote_id), refresh=True)
+    episodes = provider_series_episodes(
+        conn, source, str(provider_remote_id), refresh=refresh,
+    )
     provider_episode = next(
         (entry for entry in episodes if str(entry["stream_id"]) == str(stream_id)), None
     )
@@ -1811,19 +1973,57 @@ def grab_episode(conn, series_id: int, episode_id: int, source_id: int,
         "source": parsed.source,
         "score": 1.0,
     }
+    return series, episode, release
+
+
+def probe_episode_candidate(conn, series_id: int, episode_id: int, source_id: int,
+                            provider_remote_id: str, stream_id: str, *,
+                            refresh: bool = False) -> dict:
+    _series, _episode, release = _episode_selection(
+        conn, series_id, episode_id, source_id, provider_remote_id, stream_id,
+        refresh=False,
+    )
+    return probe.probe_episode_release(
+        conn, release, refresh=refresh, acquire_timeout=30.0,
+    )
+
+
+def grab_episode(conn, series_id: int, episode_id: int, source_id: int,
+                 provider_remote_id: str, stream_id: str, *,
+                 force: bool = False) -> dict:
+    series, episode, release = _episode_selection(
+        conn, series_id, episode_id, source_id, provider_remote_id, stream_id,
+        refresh=True,
+    )
     profile = _profile(conn, series["quality_profile_id"])
     release = probe.probe_episode_release(conn, release, acquire_timeout=30.0)
     allowed, reason_text = profile.check(release, series.get("original_language"))
-    if not allowed:
+    release["allowed"] = allowed
+    release["reason"] = reason_text
+    if not allowed and not force:
         raise ValueError(f"This episode is not allowed by the profile: {reason_text}")
-    release["quality_label"] = _tier_label(profile, release)
+    probe_result = release.get("probe") or {}
+    if not allowed and force and not probe_result.get("ok"):
+        raise ValueError(
+            "ffprobe could not inspect this episode"
+            + (f": {probe_result.get('error')}" if probe_result.get("error") else ".")
+        )
+    if allowed:
+        release["quality_label"] = _tier_label(profile, release)
+    else:
+        # The caller explicitly confirmed a manual override. Keep the probe
+        # facts and mark the download so history explains why it was queued.
+        release["quality_label"] = (
+            f"{release.get('resolution') or 'unknown'} · manual override"
+        )
     if active_download(conn, episode_id=episode_id):
         raise ValueError("A download for this episode is already active.")
     from . import acquisition, downloader
 
-    download = downloader.enqueue_episode(conn, series, episode, release,
-                                          release["provider_episode"],
-                                          reason="manual")
+    download = downloader.enqueue_episode(
+        conn, series, episode, release, release["provider_episode"],
+        reason="manual-override" if not allowed else "manual",
+    )
     evaluation = profile.evaluate(release, series.get("original_language"))
     download = (acquisition.annotate_download(
         conn, int(download["id"]), evaluation) or download)

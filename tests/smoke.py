@@ -984,6 +984,31 @@ def test_manager_foundations() -> None:
     check("probe lists subtitle languages", normalised["subtitle_languages"], ["eng"])
     check("probe counts audio tracks", normalised["audio_track_count"], 2)
     check("probe reads size", normalised["size"], 123456)
+    check("probe lists video codecs", normalised["video_codecs"], ["hevc"])
+    check("probe lists audio codecs", normalised["audio_codecs"], ["eac3", "aac"])
+    check("probe lists subtitle codecs", normalised["subtitle_codecs"], ["subrip"])
+
+    # Cached probes written before the aggregate fields existed must still
+    # expose codec and language facts to the candidate browser.
+    legacy = probe.apply({}, {
+        "ok": True,
+        "resolution": "1080p",
+        "size": 42,
+        "video": [{"codec": "h264"}],
+        "audio": [{"codec": "aac", "language": "eng"},
+                  {"codec": "ac3", "language": "spa"}],
+        "subtitles": [{"codec": "subrip", "language": "eng"}],
+    })
+    check("legacy probe gains video codecs", legacy["video_codecs"], ["h264"])
+    check("legacy probe gains audio codecs", legacy["audio_codecs"], ["aac", "ac3"])
+    check("legacy probe gains subtitle codecs", legacy["subtitle_codecs"], ["subrip"])
+    check("legacy probe gains track counts", legacy["audio_track_count"], 2)
+    check("legacy probe keeps language facts",
+          legacy["audio_languages"], ["eng", "spa"])
+    hls = probe.apply({"size": 12345}, {
+        "ok": True, "size": None, "video": [{"codec": "h264"}],
+    })
+    check("HLS probe keeps the catalog size hint", hls["size"], 12345)
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "connections.db"

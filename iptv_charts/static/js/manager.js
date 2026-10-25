@@ -124,11 +124,64 @@
     return `/api/images/tmdb/${size}/${String(path).replace(/^\/+/, '')}`;
   }
 
+  function unique(values) {
+    return Array.from(new Set((values || []).filter(Boolean)));
+  }
+
+  function trackPairs(tracks, codecKey, languageKey) {
+    const pairs = [];
+    (Array.isArray(tracks) ? tracks : []).forEach((track) => {
+      const codec = track?.[codecKey];
+      const language = track?.[languageKey];
+      const label = [codec, language ? `(${language})` : null].filter(Boolean).join(' ');
+      if (label && !pairs.includes(label)) pairs.push(label);
+    });
+    return pairs;
+  }
+
+  function mediaFacts(release) {
+    const probe = release.probe || {};
+    const facts = element('div', 'release-facts');
+    const add = (label, value) => {
+      if (value === undefined || value === null || value === '') return;
+      const item = element('span', 'release-fact');
+      item.append(element('strong', '', value), element('small', '', label));
+      facts.append(item);
+    };
+    const size = release.size ?? probe.size;
+    const resolution = release.resolution || probe.resolution;
+    const video = unique([
+      ...(release.video_codecs || probe.video_codecs || []),
+      release.video_codec || probe.video_codec,
+    ]);
+    const audioPairs = trackPairs(probe.audio, 'codec', 'language');
+    const subtitlePairs = trackPairs(probe.subtitles, 'codec', 'language');
+    const audioCodecs = unique(release.audio_codecs || probe.audio_codecs);
+    const subtitleCodecs = unique(release.subtitle_codecs || probe.subtitle_codecs);
+    const audioLanguages = unique(release.audio_languages || probe.audio_languages);
+    const subtitleLanguages = unique(
+      release.subtitle_languages || probe.subtitle_languages,
+    );
+    add('Size', size ? formatBytes(size) : 'unknown');
+    add('Resolution', resolution || 'unknown');
+    add('Video', video.join('/') || 'unknown');
+    add('Audio', audioPairs.join(', ')
+      || [audioCodecs.join('/'), audioLanguages.length ? `(${audioLanguages.join('/')})` : '']
+        .filter(Boolean).join(' ')
+      || 'none');
+    add('Subtitles', subtitlePairs.join(', ')
+      || [subtitleCodecs.join('/'),
+        subtitleLanguages.length ? `(${subtitleLanguages.join('/')})` : '']
+        .filter(Boolean).join(' ')
+      || 'none');
+    return facts;
+  }
+
   bindDialogs();
 
   window.Manager = {
     $, $$, request, get, post, patch, del,
     setStatus, feedback, debounce, element, formatBytes, timeAgo,
-    open, close, imageUrl,
+    open, close, imageUrl, mediaFacts,
   };
 })();

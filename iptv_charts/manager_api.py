@@ -312,7 +312,12 @@ def movie_candidates(movie_id: int):
         movie = library.get_movie(conn, movie_id)
         if movie is None:
             return _fail("That movie no longer exists.", 404)
-        view = library.movie_candidates_view(conn, movie)
+        query = (request.args.get("q") or "").strip()[:120] or None
+        limit = max(1, min(500, _int(request.args.get("limit"), 80) or 80))
+        view = library.movie_candidates_view(
+            conn, movie, limit=limit, query=query,
+            all_matches=_bool(request.args.get("all"), False),
+        )
         return jsonify({"ok": True, **view, "movie": movie})
     except Exception as exc:
         return _error(exc)
@@ -369,8 +374,10 @@ def select_movie_candidate(movie_id: int):
         if mode not in ("only", "also"):
             return _fail("Choose whether to use only this version or download it too.")
         grab = _bool(payload.get("grab"), True)
+        probe_if_needed = _bool(payload.get("probe_if_needed"), False)
         result = library.select_movie_candidate(
             conn, movie_id, source_id, remote_id, mode, grab=grab,
+            probe_if_needed=probe_if_needed,
         )
         search_queued = False
         if result.pop("search_needed", False):
@@ -636,6 +643,55 @@ def episode_releases(series_id: int, episode_id: int):
         return _error(exc)
 
 
+@bp.get("/series/<int:series_id>/episodes/<int:episode_id>/candidates")
+def episode_candidates(series_id: int, episode_id: int):
+    conn = _conn()
+    try:
+        series = library.get_series(conn, series_id)
+        episode = library.get_episode(conn, episode_id)
+        if series is None or episode is None:
+            return _fail("That episode no longer exists.", 404)
+        query = (request.args.get("q") or "").strip()[:120] or None
+        limit = max(1, min(500, _int(request.args.get("limit"), 100) or 100))
+        view = library.episode_candidates_view(
+            conn, series, episode, limit=limit, query=query,
+            all_matches=_bool(request.args.get("all"), False),
+        )
+        return jsonify({"ok": True, **view})
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.post("/series/<int:series_id>/episodes/<int:episode_id>/candidates/probe")
+def probe_episode_candidate(series_id: int, episode_id: int):
+    conn = _conn()
+    try:
+        payload = _payload()
+        source_id = _int(payload.get("source_id"))
+        provider_remote_id = str(payload.get("provider_remote_id") or "").strip()
+        stream_id = str(payload.get("stream_id") or "").strip()
+        if not source_id or not provider_remote_id or not stream_id:
+            return _fail("Choose a candidate first.")
+        result = jobs.submit_and_wait(
+            "probe_episode_candidate", {
+                "series_id": series_id, "episode_id": episode_id,
+                "source_id": source_id,
+                "provider_remote_id": provider_remote_id,
+                "stream_id": stream_id,
+                "refresh": _bool(payload.get("refresh"), False),
+            },
+            priority=50,
+            dedupe_key=(
+                f"probe_episode:{series_id}:{episode_id}:{source_id}:"
+                f"{provider_remote_id}:{stream_id}"
+            ),
+            timeout=600.0,
+        ) or {}
+        return jsonify({"ok": True, **(result or {})})
+    except Exception as exc:
+        return _error(exc)
+
+
 @bp.post("/series/<int:series_id>/episodes/<int:episode_id>/grab")
 def grab_episode(series_id: int, episode_id: int):
     conn = _conn()
@@ -652,6 +708,7 @@ def grab_episode(series_id: int, episode_id: int):
                 "source_id": source_id,
                 "provider_remote_id": provider_remote_id,
                 "stream_id": stream_id,
+                "force": _bool(payload.get("force"), False),
             },
             priority=55,
             dedupe_key=(

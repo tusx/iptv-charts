@@ -259,7 +259,7 @@ def test_cards_and_controls(movie_id: int) -> None:
         'id="candidate-filters"', 'id="movie-edit-form"',
         'id="movie-monitored-edit"', 'id="movie-profile-edit"',
         'id="movie-availability-edit"', 'id="movie-priority-edit"',
-        'id="movie-stage-refresh"',
+        'id="movie-stage-refresh"', 'id="movie-all-candidates"',
     )
     for control in controls:
         check(f"control {control} is present", control in page)
@@ -285,6 +285,13 @@ def test_cards_and_controls(movie_id: int) -> None:
           and "post(`/api/import/metadata/movies/${movieId}`" in js)
     check("manual metadata copy promises file/download preservation",
           "file, download state, quality profile" in page)
+    check("manual search exposes the all-candidates browser",
+          'id="movie-all-candidates"' in template
+          and "/api/movies/${movieId}/candidates" in js
+          and "probe_if_needed" in js)
+    check("candidate cards render the full ffprobe facts",
+          "Audio codecs" in template and "Subtitle codecs" in template
+          and "mediaFacts(release)" in js)
 
 
 def test_server_rendered_stage_and_score(movie_id: int) -> None:
@@ -517,6 +524,22 @@ def test_assets_and_responsive_css(movie_id: int) -> None:
           "{% from \"_macros.html\" import" in template and "icon(" in template)
 
 
+def test_candidate_browser_api(movie_id: int) -> None:
+    section("candidate browser API")
+    response = CLIENT.get(
+        f"/api/movies/{movie_id}/candidates?q=stage&limit=25",
+    )
+    check("candidate browser returns JSON", response.status_code == 200,
+          str(response.status_code))
+    payload = response.get_json() or {}
+    check("candidate browser reports ok", payload.get("ok"), True)
+    check("candidate browser returns a list",
+          isinstance(payload.get("candidates"), list), True)
+    check("candidate browser echoes the query", payload.get("query"), "stage")
+    check("candidate browser reports a total",
+          isinstance(payload.get("total"), int), True)
+
+
 def test_missing_movie() -> None:
     section("missing movie")
     response = CLIENT.get("/movies/999999")
@@ -534,6 +557,7 @@ def main() -> int:
         test_history_cap_and_order(movie_id)
         test_derived_states_and_fallback(movie_id)
         test_assets_and_responsive_css(movie_id)
+        test_candidate_browser_api(movie_id)
         test_missing_movie()
     finally:
         clear_stage(movie_id)

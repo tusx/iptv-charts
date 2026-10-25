@@ -5,6 +5,7 @@
 
   const {
     $, $$, get, post, patch, del, setStatus, debounce, element, open, close, feedback,
+    mediaFacts,
   } = Manager;
 
   const movieId = window.MOVIE_ID;
@@ -15,9 +16,11 @@
   const releaseStatus = $('#movie-release-status');
   const releaseList = $('#movie-release-list');
   const releaseQuery = $('#movie-release-query');
+  const allCandidatesButton = $('#movie-all-candidates');
   const candidateStatus = $('#candidate-action-status');
   const candidateFilterStatus = $('#candidate-filter-status');
   let releaseToken = 0;
+  let allCandidatesMode = false;
 
   // ------------------------------------------------------- stage / history
   // Both panels are server-rendered, so the tabs only reveal markup that is
@@ -158,14 +161,35 @@
   });
 
   // ---------------------------------------------------------- candidates
+  function setAllCandidatesMode(enabled) {
+    allCandidatesMode = enabled;
+    if (allCandidatesButton) {
+      allCandidatesButton.textContent = enabled
+        ? 'Show release matches'
+        : 'Show all candidates';
+      allCandidatesButton.classList.toggle('is-active', enabled);
+    }
+  }
+
   function openManualSearch() {
     releaseQuery.value = '';
+    setAllCandidatesMode(false);
     open(releasesDialog);
     loadReleases('');
   }
 
   $('#movie-manual-search')?.addEventListener('click', openManualSearch);
   $('#movie-manual-search-section')?.addEventListener('click', openManualSearch);
+  allCandidatesButton?.addEventListener('click', () => {
+    setAllCandidatesMode(!allCandidatesMode);
+    loadReleases(releaseQuery.value.trim());
+  });
+  releaseQuery.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      loadReleases(releaseQuery.value.trim());
+    }
+  });
 
   $('#candidate-probe-all')?.addEventListener('click', async (event) => {
     const button = event.currentTarget;
@@ -294,18 +318,49 @@
 
   async function loadReleases(query) {
     const request = ++releaseToken;
-    releaseList.replaceChildren(element('p', 'muted', 'Searching your playlists…'));
-    setStatus(releaseStatus, '');
+    const manualMode = allCandidatesMode;
+    releaseList.replaceChildren(element(
+      'p', 'muted',
+      manualMode
+        ? 'Loading every catalog candidate…'
+        : 'Searching your playlists and probing the best releases…',
+    ));
+    setStatus(releaseStatus, manualMode
+      ? 'All candidates are shown, including ones outside the quality profile.'
+      : '');
     try {
-      const params = query ? `?q=${encodeURIComponent(query)}` : '';
-      const data = await get(`/api/movies/${movieId}/releases${params}`);
+      const params = new URLSearchParams();
+      if (query) params.set('q', query);
+      if (manualMode) {
+        params.set('all', '1');
+        params.set('limit', '500');
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : '';
+      const data = await get(
+        manualMode
+          ? `/api/movies/${movieId}/candidates${suffix}`
+          : `/api/movies/${movieId}/releases${suffix}`,
+      );
       if (request !== releaseToken) return;
+      const rows = manualMode ? (data.candidates || []) : (data.releases || []);
       releaseList.replaceChildren();
-      if (!data.releases.length) {
-        releaseList.append(element('p', 'muted', 'No matching releases found. Try a different search.'));
+      if (!rows.length) {
+        releaseList.append(element(
+          'p', 'muted',
+          manualMode
+            ? 'No catalog candidates matched. Try a shorter or different search.'
+            : 'No matching releases found. Try a different search or “Show all candidates”.',
+        ));
         return;
       }
-      data.releases.forEach((release) => releaseList.append(renderRelease(release)));
+      rows.forEach((release) => releaseList.append(renderRelease(release, manualMode)));
+      const allowed = rows.filter((release) => release.allowed).length;
+      setStatus(
+        releaseStatus,
+        `${rows.length} ${manualMode ? 'catalog candidate' : 'release'}${rows.length === 1 ? '' : 's'}`
+        + ` · ${allowed} allowed by the profile`
+        + (manualMode ? '. Download any candidate to override the profile.' : '.'),
+      );
     } catch (error) {
       if (request === releaseToken) {
         releaseList.replaceChildren();
@@ -314,28 +369,29 @@
     }
   }
 
-  function renderRelease(release) {
+  function renderRelease(release, manualMode = false) {
     const row = element('div', 'release-row');
     const main = element('div', 'release-main');
     const probe = release.probe || {};
     main.append(element('strong', '', release.name));
     const bits = [
       release.source_name || 'Unknown playlist',
-      release.candidate_year || 'year ?',
+      release.candidate_year || release.year || 'year ?',
       release.resolution || 'unknown',
       release.source && release.source !== 'unknown' ? release.source.toUpperCase() : null,
       release.quality_label || null,
     ].filter(Boolean);
     main.append(element('span', 'muted', bits.join(' · ')));
     if (probe.ok) {
-      const tracks = `${probe.audio_track_count || 0} audio · ${probe.subtitle_track_count || 0} subtitle`;
-      const langs = [];
-      if ((release.audio_languages || []).length) langs.push(`audio ${release.audio_languages.join('/')}`);
-      if ((release.subtitle_languages || []).length) langs.push(`subs ${release.subtitle_languages.join('/')}`);
       main.append(element('span', 'muted small',
-        `${probe.video_codec || 'video'}${probe.hdr && probe.hdr !== 'SDR' ? ` ${probe.hdr}` : ''} · ${tracks}${langs.length ? ` · ${langs.join(' · ')}` : ''}`));
+        `${probe.audio_track_count || 0} audio track${probe.audio_track_count === 1 ? '' : 's'} · `
+        + `${probe.subtitle_track_count || 0} subtitle track${probe.subtitle_track_count === 1 ? '' : 's'}`
+        + `${probe.hdr && probe.hdr !== 'SDR' ? ` · ${probe.hdr}` : ''}`));
+      main.append(mediaFacts(release));
     } else if (probe.error) {
       main.append(element('span', 'queue-error small', `Probe failed: ${probe.error}`));
+    } else if (manualMode) {
+      main.append(element('span', 'hint', 'Not probed yet. Probe it, or Download to probe and queue it.'));
     }
     if (release.reason) {
       main.append(element('span', release.allowed ? 'muted small' : 'queue-error small', release.reason));
@@ -344,29 +400,79 @@
 
     const badge = element('span', `badge ${release.allowed ? 'badge-downloaded' : 'badge-missing'}`,
       release.allowed ? 'Profile allows' : 'Outside profile');
-    const grab = element('button', 'btn btn-primary btn-sm', 'Grab');
+    const actions = element('div', 'release-actions');
+
+    if (manualMode) {
+      const probeButton = element(
+        'button', 'btn btn-ghost btn-sm',
+        release.probe_status === 'not_probed' ? 'Probe' : 'Re-probe',
+      );
+      probeButton.type = 'button';
+      probeButton.addEventListener('click', async () => {
+        probeButton.disabled = true;
+        probeButton.textContent = 'Probing…';
+        setStatus(releaseStatus, 'Running ffprobe on this candidate…');
+        try {
+          await post(`/api/movies/${movieId}/candidates/probe`, {
+            source_id: release.source_id,
+            remote_id: release.remote_id,
+            refresh: release.probe_status !== 'not_probed',
+          });
+          setStatus(releaseStatus, 'Probe finished.', 'ok');
+          await loadReleases(releaseQuery.value.trim());
+        } catch (error) {
+          setStatus(releaseStatus, error.message, 'bad');
+          probeButton.disabled = false;
+          probeButton.textContent = 'Probe';
+        }
+      });
+      actions.append(probeButton);
+    }
+
+    const grab = element('button', 'btn btn-primary btn-sm',
+      manualMode ? 'Download' : 'Grab');
     grab.type = 'button';
-    grab.disabled = !release.allowed;
-    if (!release.allowed) grab.title = 'This release does not satisfy the quality profile or stream probe.';
+    if (!manualMode) {
+      grab.disabled = !release.allowed;
+      if (!release.allowed) grab.title = 'This release does not satisfy the quality profile or stream probe.';
+    } else if (!release.allowed) {
+      grab.title = 'Download this candidate manually, overriding the quality profile.';
+    }
     grab.addEventListener('click', async () => {
+      if (manualMode && !window.confirm(
+        'Download this candidate as the main file? This overrides the quality profile '
+        + 'and cancels other active downloads for this movie. ffprobe runs first if the '
+        + 'candidate is not probed yet.',
+      )) return;
       grab.disabled = true;
       grab.textContent = 'Queuing…';
       try {
-        await post(`/api/movies/${movieId}/grab`, {
-          source_id: release.source_id,
-          remote_id: release.remote_id,
-        });
+        if (manualMode) {
+          await post(`/api/movies/${movieId}/candidate`, {
+            source_id: release.source_id,
+            remote_id: release.remote_id,
+            mode: 'only',
+            grab: true,
+            probe_if_needed: true,
+          });
+        } else {
+          await post(`/api/movies/${movieId}/grab`, {
+            source_id: release.source_id,
+            remote_id: release.remote_id,
+          });
+        }
         setStatus(releaseStatus, 'Download queued.', 'ok');
         close(releasesDialog);
         window.setTimeout(() => window.location.reload(), 500);
       } catch (error) {
         setStatus(releaseStatus, error.message, 'bad');
         grab.disabled = false;
-        grab.textContent = 'Grab';
+        grab.textContent = manualMode ? 'Download' : 'Grab';
       }
     });
+    actions.append(grab);
 
-    row.append(main, badge, grab);
+    row.append(main, badge, actions);
     return row;
   }
 

@@ -379,6 +379,20 @@ def main() -> int:
     check("dark theme attribute", 'data-theme="dark"' in page)
     check("no Vue runtime", "vue" not in page.lower())
 
+    response = client.get(
+        f"/api/series/{main_id}/episodes/{stage_episodes['search']}"
+        "/candidates?q=Stage&limit=10",
+    )
+    candidates_payload = response.get_json() or {}
+    check("episode candidate browser returns JSON",
+          response.status_code == 200, str(response.status_code))
+    check("episode candidate browser reports ok",
+          candidates_payload.get("ok"), True)
+    check("episode candidate browser returns a list",
+          isinstance(candidates_payload.get("candidates"), list), True)
+    check("episode candidate browser echoes the query",
+          candidates_payload.get("query"), "Stage")
+
     # Vendored assets only.
     contains("bootstrap css link", page,
              '/static/vendor/bootstrap/css/bootstrap.min.css')
@@ -401,7 +415,8 @@ def main() -> int:
         "series-profile-edit", "series-new-seasons-edit",
         "series-priority-edit", "series-edit-status", "episode-search-dialog",
         "episode-release-query", "episode-release-status",
-        "episode-release-list", "series-delete-dialog", "series-delete-files",
+        "episode-release-list", "episode-all-candidates",
+        "series-delete-dialog", "series-delete-files",
         "series-delete-confirm",
     ):
         contains(f"id {element_id}", page, f'id="{element_id}"')
@@ -723,6 +738,11 @@ def main() -> int:
     contains("js storage delete", js, "/api/storage/file")
     contains("js bworker reset", js, "/api/bworker/reset")
     contains("js remove file control", js, "data-episode-remove-file")
+    contains("js all candidates endpoint", js,
+             "/episodes/${targetEpisode}/candidates")
+    contains("js manual episode override", js, "force: manualMode && !release.allowed")
+    contains("js episode probe endpoint", js, "candidates/probe")
+    contains("js renders probe media facts", js, "mediaFacts(release)")
     check("js has no broken task call", "/api/tasks/" not in js)
     check("js has no external URL", "http://" not in js and "https://" not in js)
     contains("css accordion", css, ".series-accordions")

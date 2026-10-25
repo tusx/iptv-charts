@@ -601,6 +601,7 @@ def test_workflow_structure() -> None:
     check_in("checksum file name", ".tar.gz.sha256", text)
     check_in("fetch depth", "fetch-depth: 0", text)
     check_in("archives exclude git", "--exclude='./.git'", text)
+    check_in("archives exclude worktrees", "--exclude='./.claude'", text)
     check_in("archives exclude venv", "--exclude='./.venv'", text)
     check_in("archives exclude data", "--exclude='./data'", text)
     check_in("archives exclude cache", "--exclude='./cache'", text)

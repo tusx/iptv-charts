@@ -311,17 +311,20 @@ class _JobProgressWatcher(threading.Thread):
         self.activity = activity
         self.interval = max(0.2, float(interval))
         self.attempt = attempt
-        self._stop = threading.Event()
+        # Do not assign ``self._stop``: that name is Thread._stop(), which
+        # threading.Thread.join() calls internally on Python 3.12. An Event
+        # there makes every join raise "'Event' object is not callable".
+        self._stop_event = threading.Event()
         self.parent_stop = parent_stop
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def run(self) -> None:
         previous: tuple[Any, Any] | None = None
-        while not self._stop.wait(self.interval):
+        while not self._stop_event.wait(self.interval):
             if self.parent_stop.is_set():
-                continue
+                break
             conn = None
             try:
                 conn = self.connection_factory()
@@ -428,6 +431,30 @@ def _episode_releases(job: Mapping[str, Any], _stop: threading.Event) -> dict:
         conn.close()
 
 
+def _probe_episode_candidate(job: Mapping[str, Any], _stop: threading.Event) -> dict:
+    payload = job.get("payload") or {}
+    conn = _conn_scope()
+    try:
+        release = library.probe_episode_candidate(
+            conn, int(payload["series_id"]), int(payload["episode_id"]),
+            int(payload["source_id"]), str(payload["provider_remote_id"]),
+            str(payload["stream_id"]), refresh=bool(payload.get("refresh")),
+        )
+        probe_result = release.get("probe") or {}
+        return {
+            "status": "done",
+            "message": (
+                f"Probe finished: {release.get('resolution') or 'unknown'} "
+                f"{release.get('video_codec') or ''}".strip()
+                if probe_result.get("ok") else
+                f"Probe failed: {probe_result.get('error') or 'unknown error'}"
+            ),
+            "result": {"release": release},
+        }
+    finally:
+        conn.close()
+
+
 def _grab_movie(job: Mapping[str, Any], _stop: threading.Event) -> dict:
     payload = job.get("payload") or {}
     conn = _conn_scope()
@@ -449,7 +476,7 @@ def _grab_episode(job: Mapping[str, Any], _stop: threading.Event) -> dict:
         download = library.grab_episode(
             conn, int(payload["series_id"]), int(payload["episode_id"]),
             int(payload["source_id"]), str(payload["provider_remote_id"]),
-            str(payload["stream_id"]),
+            str(payload["stream_id"]), force=bool(payload.get("force")),
         )
         return {"status": "done", "message": "Download queued.",
                 "result": {"download": download}}
@@ -826,6 +853,7 @@ _JOB_LABELS = {
     "refresh_series": "Refreshing metadata",
     "probe_movie_candidate": "Probing stream",
     "probe_movie_candidates": "Probing streams",
+    "probe_episode_candidate": "Probing stream",
     "scan_import": "Importing file",
     "scan_import_all": "Importing files",
 }
@@ -904,7 +932,8 @@ def _job_target(conn, job: Mapping[str, Any]) -> dict:
             if series is not None:
                 label = f"{_JOB_LABELS.get(kind, 'Working')} \"{series['title']}\""
                 entity_type, entity_id = "series", int(series["id"])
-        elif kind in ("grab_episode", "scan_import", "scan_import_all"):
+        elif kind in ("grab_episode", "probe_episode_candidate",
+                      "scan_import", "scan_import_all"):
             episode_id = payload.get("episode_id")
             if episode_id is not None:
                 text = _episode_label(conn, int(episode_id))
@@ -1915,6 +1944,7 @@ def _register_defaults() -> None:
         "refresh_series": _refresh_series,
         "probe_movie_candidate": _probe_movie_candidate,
         "probe_movie_candidates": _probe_movie_candidates,
+        "probe_episode_candidate": _probe_episode_candidate,
         "scan_import": _scan_import,
         "scan_import_all": _scan_import_all,
     }.items():

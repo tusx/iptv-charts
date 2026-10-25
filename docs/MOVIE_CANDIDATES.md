@@ -121,8 +121,11 @@ jobs.
 
 Manual search accepts a query override. A movie candidate list normally uses
 identity lookup; a typed query switches to title matching so the user's intent
-wins. `matching.movie_candidates` returns at most 200 rows, sorted by identity
-precedence, match score, preferred resolution and name.
+wins. The manual browser requests up to 500 rows, sorted by identity
+precedence, match score, preferred resolution and name. The manual search
+dialog also has **Show all candidates**, which lists every catalog match
+(probed or not, allowed or not) so one can be inspected and downloaded
+explicitly.
 
 The movie detail page is also the **candidate workspace**. It combines:
 
@@ -130,11 +133,19 @@ The movie detail page is also the **candidate workspace**. It combines:
 - the latest `stream_probes` row for each `(source_id, provider_remote_id)`;
 - the current weighted profile's decision for each candidate.
 
-Each card shows provider, source, resolution, match type/score, probe state
-(`Probed`, `Probe failed`, `Not probed`), video/HDR, audio and subtitle counts,
-size and the profile score/target/needs-upgrade reason. Cards can be filtered
-to all, probed, profile-allowed or pinned candidates. **Probe** and **Probe
-unprobed** enqueue jobs; re-probe reuses or refreshes the cache.
+Each card shows provider, source, match type/score, probe state (`Probed`,
+`Probe failed`, `Not probed`), file size, resolution, video codec/HDR, audio
+and subtitle track counts, audio codecs and languages, subtitle codecs and
+languages, and the profile score/target/needs-upgrade reason. Cards can be
+filtered to all, probed, profile-allowed or pinned candidates. **Probe** and
+**Probe unprobed** enqueue jobs; re-probe reuses or refreshes the cache.
+
+The **Show all candidates** browser can also queue an explicit selection.
+Movies are probed first when necessary (`probe_if_needed`) and then pinned as
+**Only this**. Episode candidates support the same browse, probe and explicit
+download flow; an outside-profile episode download requires confirmation and
+is recorded as a `manual-override`. If ffprobe fails, the stream is not
+downloaded even when the manual override was confirmed.
 
 ## Pinning
 

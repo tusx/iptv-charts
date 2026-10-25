@@ -1241,10 +1241,40 @@ def run_section(name: str, func) -> None:
         traceback.print_exc()
 
 
+def test_progress_watcher() -> None:
+    # Regression: the watcher used to assign self._stop = Event(), shadowing
+    # Thread._stop(). Python 3.12's Thread.join() calls that method internally,
+    # so every completed job crashed the bworker loop instead of returning to
+    # idle.
+    activity = activity_log.MemoryActivityLog()
+    watcher = bworker._JobProgressWatcher(
+        connection_factory=db.connect,
+        job_id=999_999,
+        activity_id=0,
+        activity=activity,
+        interval=0.01,
+        attempt=1,
+        parent_stop=threading.Event(),
+    )
+    watcher.start()
+    time.sleep(0.03)
+    watcher.stop()
+    try:
+        watcher.join(timeout=2.0)
+        joined = True
+        error = ""
+    except Exception as exc:
+        joined = False
+        error = f"{type(exc).__name__}: {exc}"
+    check("progress watcher joins without shadowing Thread._stop", joined, error)
+    check("progress watcher stopped after join", not watcher.is_alive())
+
+
 def main() -> int:
     db.init_db()
     sections = [
         ("claim order", test_claim_order),
+        ("progress watcher", test_progress_watcher),
         ("due and idle entries", test_due_and_idle_entries),
         ("pause and resume", test_pause_resume),
         ("retry and reset", test_retry_and_reset),

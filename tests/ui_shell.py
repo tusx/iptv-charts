@@ -244,8 +244,8 @@ def test_topbar_and_home(client) -> None:
     section("home: icons and action buttons")
     for icon in ("fa-chart-line", "fa-gear"):
         check_true(f"page actions use {icon}", icon in page)
-    for icon in ("fa-server", "fa-arrows-rotate", "fa-sliders", "fa-magnifying-glass",
-                 "fa-pen-to-square", "fa-xmark", "fa-trash", "fa-gear"):
+    for icon in ("fa-server", "fa-plus", "fa-compass", "fa-arrows-rotate",
+                 "fa-gear"):
         check_true(f"IPTV card uses {icon}", icon in iptv)
     for icon in ("fa-film", "fa-plus", "fa-calendar-days", "fa-bullseye", "fa-gear"):
         check_true(f"movies card uses {icon}", icon in movies)
@@ -283,10 +283,20 @@ def test_topbar_and_home(client) -> None:
           page.count("data-search-missing"), 0)
     check_true("no retired search-missing task endpoint in home",
                "/api/tasks/search_missing/run" not in page)
-    check_true("playlist edit link kept",
-               re.search(r'href="/playlists/\d+/edit"', iptv) is not None)
-    check_true("playlist browse link kept",
-               re.search(r'href="/sources/\d+/browse"', iptv) is not None)
+    check_true("IPTV card offers Explore playlists",
+               'href="/playlists"' in iptv and "Explore playlists" in iptv)
+    check_true("Explore playlists is a blue primary button",
+               re.search(r'class="btn btn-primary btn-sm"[^>]*href="/playlists"',
+                         iptv) is not None
+               or 'class="btn btn-primary btn-sm" href="/playlists"' in iptv)
+    check_true("home no longer lists each playlist",
+               "home-playlist-list" not in iptv
+               and "/sources/" not in iptv
+               and "/playlists/" not in iptv)
+
+    playlists = client.get("/playlists").get_data(as_text=True)
+    check_true("manage page Browse buttons are blue",
+               'class="btn btn-primary js-browse"' in playlists)
 
     shell_css = SHELL_CSS.read_text(encoding="utf-8")
     check_true("search-missing icon is defined without child nodes",
@@ -321,6 +331,19 @@ def test_responsive_and_assets(client) -> None:
                ".home-card-actions .btn" in css and "flex-basis: 100%" in css)
     check_true("stats reflow to two columns on tablets",
                "repeat(2, minmax(0, 1fr))" in css)
+
+    section("unified header and section rhythm")
+    check_true("scrollbar gutter is stable across pages",
+               "scrollbar-gutter: stable" in css)
+    check_true("top bar height is fixed", "height: 58px" in css
+               and "min-height: 58px" in css)
+    check_true("top bar stays on one row on mobile",
+               "flex-wrap: nowrap" in css)
+    check_true("content uses one section gap",
+               re.search(r"\.content\s*\{[^}]*display:\s*flex", css, re.DOTALL)
+               is not None and "gap: 20px" in css)
+    check_true("direct page children have normalized margins",
+               ".content > *" in css and "margin-top: 0" in css)
 
 
 def main() -> int:

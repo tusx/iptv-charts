@@ -5,6 +5,7 @@
 
   const {
     $, $$, get, post, patch, del, setStatus, debounce, element, open, close,
+    mediaFacts,
   } = Manager;
 
   const seriesId = window.SERIES_ID;
@@ -15,8 +16,10 @@
   const releaseList = $('#episode-release-list');
   const releaseStatus = $('#episode-release-status');
   const releaseQuery = $('#episode-release-query');
+  const allCandidatesButton = $('#episode-all-candidates');
   let targetEpisode = null;
   let releaseToken = 0;
+  let allCandidatesMode = false;
 
   // ------------------------------------------------------- stage / history
   // Both panels are server-rendered. Switching tabs only reveals markup that
@@ -208,6 +211,7 @@
     if (manualButton) {
       targetEpisode = manualButton.dataset.episodeManual;
       releaseQuery.value = '';
+      setAllCandidatesMode(false);
       open(releasesDialog);
       loadReleases('');
       return;
@@ -274,27 +278,76 @@
   });
 
   // ------------------------------------------------------------ manual search
+  function setAllCandidatesMode(enabled) {
+    allCandidatesMode = enabled;
+    if (allCandidatesButton) {
+      allCandidatesButton.textContent = enabled
+        ? 'Show search results'
+        : 'Show all candidates';
+      allCandidatesButton.classList.toggle('is-active', enabled);
+    }
+  }
+
+  allCandidatesButton?.addEventListener('click', () => {
+    setAllCandidatesMode(!allCandidatesMode);
+    loadReleases(releaseQuery.value.trim());
+  });
+  releaseQuery.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      loadReleases(releaseQuery.value.trim());
+    }
+  });
+
   const debouncedLoad = debounce(() => loadReleases(releaseQuery.value.trim()), 300);
   releaseQuery.addEventListener('input', debouncedLoad);
 
   async function loadReleases(query) {
     if (!targetEpisode) return;
     const request = ++releaseToken;
-    releaseList.replaceChildren(element('p', 'muted', 'Searching your playlists…'));
-    setStatus(releaseStatus, '');
+    const manualMode = allCandidatesMode;
+    releaseList.replaceChildren(element(
+      'p', 'muted',
+      manualMode
+        ? 'Loading every provider episode candidate…'
+        : 'Searching your playlists and probing the best episodes…',
+    ));
+    setStatus(releaseStatus, manualMode
+      ? 'All candidates are shown, including ones outside the quality profile.'
+      : '');
     try {
-      const params = query ? `?q=${encodeURIComponent(query)}` : '';
+      const params = new URLSearchParams();
+      if (query) params.set('q', query);
+      if (manualMode) {
+        params.set('all', '1');
+        params.set('limit', '500');
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : '';
       const data = await get(
-        `/api/series/${seriesId}/episodes/${targetEpisode}/releases${params}`,
+        manualMode
+          ? `/api/series/${seriesId}/episodes/${targetEpisode}/candidates${suffix}`
+          : `/api/series/${seriesId}/episodes/${targetEpisode}/releases${suffix}`,
       );
       if (request !== releaseToken) return;
+      const rows = manualMode ? (data.candidates || []) : (data.releases || []);
       releaseList.replaceChildren();
-      if (!data.releases.length) {
-        releaseList.append(element('p', 'muted',
-          'No matching provider episode found. Try a different search.'));
+      if (!rows.length) {
+        releaseList.append(element(
+          'p', 'muted',
+          manualMode
+            ? 'No provider episode candidates matched. Try a shorter or different search.'
+            : 'No matching provider episode found. Try a different search or “Show all candidates”.',
+        ));
         return;
       }
-      data.releases.forEach((release) => releaseList.append(renderRelease(release)));
+      rows.forEach((release) => releaseList.append(renderRelease(release, manualMode)));
+      const allowed = rows.filter((release) => release.allowed).length;
+      setStatus(
+        releaseStatus,
+        `${rows.length} ${manualMode ? 'catalog candidate' : 'release'}${rows.length === 1 ? '' : 's'}`
+        + ` · ${allowed} allowed by the profile`
+        + (manualMode ? '. Download any candidate to override the profile.' : '.'),
+      );
     } catch (error) {
       if (request === releaseToken) {
         releaseList.replaceChildren();
@@ -303,28 +356,32 @@
     }
   }
 
-  function renderRelease(release) {
+  function renderRelease(release, manualMode = false) {
     const row = element('div', 'release-row');
     const main = element('div', 'release-main');
     const probe = release.probe || {};
+    const providerEpisode = release.provider_episode || {};
     main.append(element('strong', '', release.name));
     const bits = [
       release.source_name || 'Unknown playlist',
       release.resolution || 'unknown',
       release.source && release.source !== 'unknown' ? release.source.toUpperCase() : null,
-      `S${String(release.provider_episode.season).padStart(2, '0')}E${String(release.provider_episode.episode).padStart(2, '0')}`,
+      providerEpisode.season !== undefined
+        ? `S${String(providerEpisode.season).padStart(2, '0')}E${String(providerEpisode.episode).padStart(2, '0')}`
+        : null,
+      release.quality_label || null,
     ].filter(Boolean);
     main.append(element('span', 'muted', bits.join(' · ')));
     if (probe.ok) {
-      const langs = [];
-      if ((release.audio_languages || []).length) langs.push(`audio ${release.audio_languages.join('/')}`);
-      if ((release.subtitle_languages || []).length) langs.push(`subs ${release.subtitle_languages.join('/')}`);
       main.append(element('span', 'muted small',
-        `${probe.video_codec || 'video'}${probe.hdr && probe.hdr !== 'SDR' ? ` ${probe.hdr}` : ''} · ` +
-        `${probe.audio_track_count || 0} audio · ${probe.subtitle_track_count || 0} subtitle` +
-        (langs.length ? ` · ${langs.join(' · ')}` : '')));
+        `${probe.audio_track_count || 0} audio track${probe.audio_track_count === 1 ? '' : 's'} · `
+        + `${probe.subtitle_track_count || 0} subtitle track${probe.subtitle_track_count === 1 ? '' : 's'}`
+        + `${probe.hdr && probe.hdr !== 'SDR' ? ` · ${probe.hdr}` : ''}`));
+      main.append(mediaFacts(release));
     } else if (probe.error) {
       main.append(element('span', 'queue-error small', `Probe failed: ${probe.error}`));
+    } else if (manualMode) {
+      main.append(element('span', 'hint', 'Not probed yet. Probe it, or Download to probe and queue it.'));
     }
     if (release.reason) {
       main.append(element('span', release.allowed ? 'muted small' : 'queue-error small', release.reason));
@@ -332,11 +389,53 @@
     main.append(element('span', 'release-score', `match ${Math.round((release.score || 0) * 100)}%`));
     const badge = element('span', `badge ${release.allowed ? 'badge-downloaded' : 'badge-missing'}`,
       release.allowed ? 'Profile allows' : 'Outside profile');
-    const grab = element('button', 'btn btn-primary btn-sm', 'Grab');
+    const actions = element('div', 'release-actions');
+
+    if (manualMode) {
+      const probeButton = element(
+        'button', 'btn btn-ghost btn-sm',
+        release.probe_status === 'not_probed' ? 'Probe' : 'Re-probe',
+      );
+      probeButton.type = 'button';
+      probeButton.addEventListener('click', async () => {
+        probeButton.disabled = true;
+        probeButton.textContent = 'Probing…';
+        setStatus(releaseStatus, 'Running ffprobe on this candidate…');
+        try {
+          await post(
+            `/api/series/${seriesId}/episodes/${targetEpisode}/candidates/probe`,
+            {
+              source_id: release.source_id,
+              provider_remote_id: release.remote_id,
+              stream_id: providerEpisode.stream_id,
+              refresh: release.probe_status !== 'not_probed',
+            },
+          );
+          setStatus(releaseStatus, 'Probe finished.', 'ok');
+          await loadReleases(releaseQuery.value.trim());
+        } catch (error) {
+          setStatus(releaseStatus, error.message, 'bad');
+          probeButton.disabled = false;
+          probeButton.textContent = 'Probe';
+        }
+      });
+      actions.append(probeButton);
+    }
+
+    const grab = element('button', 'btn btn-primary btn-sm',
+      manualMode ? 'Download' : 'Grab');
     grab.type = 'button';
-    grab.disabled = !release.allowed;
-    if (!release.allowed) grab.title = 'This release does not satisfy the quality profile or stream probe.';
+    if (!manualMode) {
+      grab.disabled = !release.allowed;
+      if (!release.allowed) grab.title = 'This release does not satisfy the quality profile or stream probe.';
+    } else if (!release.allowed) {
+      grab.title = 'Download this candidate manually, overriding the quality profile.';
+    }
     grab.addEventListener('click', async () => {
+      if (manualMode && !release.allowed && !window.confirm(
+        'Download this candidate even though it is outside the quality profile? '
+        + 'ffprobe runs first and the download is marked as a manual override.',
+      )) return;
       grab.disabled = true;
       grab.textContent = 'Queuing…';
       try {
@@ -345,7 +444,8 @@
           {
             source_id: release.source_id,
             provider_remote_id: release.remote_id,
-            stream_id: release.provider_episode.stream_id,
+            stream_id: providerEpisode.stream_id,
+            force: manualMode && !release.allowed,
           },
         );
         setStatus(releaseStatus, 'Download queued.', 'ok');
@@ -354,10 +454,12 @@
       } catch (error) {
         setStatus(releaseStatus, error.message, 'bad');
         grab.disabled = false;
-        grab.textContent = 'Grab';
+        grab.textContent = manualMode ? 'Download' : 'Grab';
       }
     });
-    row.append(main, badge, grab);
+    actions.append(grab);
+
+    row.append(main, badge, actions);
     return row;
   }
 

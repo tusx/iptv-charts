@@ -388,7 +388,7 @@ check(not remote_assets,
       + ", ".join(sorted(set(remote_assets))[:8]))
 
 # -------------------------------------------------------------- ignore context
-for pattern in (".git/", ".venv/", "__pycache__", "tests/", "scripts/"):
+for pattern in (".git/", ".claude/", ".venv/", "__pycache__", "tests/", "scripts/"):
     check(pattern in containerignore,
           f".containerignore must exclude {pattern}")
 check(re.search(r"(?m)^/?iptv_charts/?\s*$", containerignore) is None,

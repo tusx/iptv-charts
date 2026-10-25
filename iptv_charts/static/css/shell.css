@@ -33,9 +33,80 @@
 }
 
 /* ---------------------------------------------------------------- top bar */
-/* The brand is the only top-bar navigation now; keep it comfortably alone. */
+/* The brand is the only top-bar navigation now; keep it comfortably alone.
+   A stable scrollbar gutter and fixed height keep the bar identical on short
+   and long pages instead of shifting when a vertical scrollbar appears. */
+html {
+  scrollbar-gutter: stable;
+}
+
 .topbar {
   gap: 12px;
+  height: 58px;
+  min-height: 58px;
+  flex-wrap: nowrap;
+}
+
+/* One vertical rhythm for every page. The content column is a flex stack so
+   direct children (page heads, settings cards, candidate sections, tables and
+   empty states) always get the same distance from one another. Their old
+   block margins would otherwise double that gap, so normalize them here. */
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.content > * {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+/* Candidate lists and dialogs */
+.release-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 2px 0 4px;
+}
+
+.release-tools .hint {
+  margin: 0;
+}
+
+.release-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 92px;
+}
+
+.release-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 14px;
+  margin-top: 4px;
+}
+
+.release-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+}
+
+.release-fact strong {
+  font-size: 11px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.release-fact small {
+  color: var(--fg-faint);
+  font-size: 9px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
 }
 
 /* ------------------------------------------------------------------- home */
@@ -84,6 +155,31 @@ body {
 }
 
 /* ------------------------------------------------------------- responsive */
+@media (max-width: 860px) {
+  /* app.css lets the empty nav strip wrap the bar; there is no nav any more,
+     so keep one predictable height at tablet and phone widths too. */
+  .topbar {
+    height: 56px;
+    min-height: 56px;
+    padding: 0 14px;
+    flex-wrap: nowrap;
+  }
+
+  .content {
+    gap: 16px;
+  }
+
+  .release-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .release-actions {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}
+
 @media (max-width: 768px) {
   .home-grid {
     grid-template-columns: minmax(0, 1fr);
