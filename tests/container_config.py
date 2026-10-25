@@ -387,6 +387,12 @@ check(not remote_assets,
       "frontend assets must be vendored locally, not loaded from a CDN: "
       + ", ".join(sorted(set(remote_assets))[:8]))
 
+# Static assets must revalidate: a container replacement reuses the same URLs.
+check('add_header Cache-Control "no-cache" always;' in nginx,
+      "nginx static assets need no-cache so a refreshed page loads matching JS/CSS")
+check("expires 1h" not in nginx,
+      "a long max-age hides updated JS/CSS after a container replacement")
+
 # -------------------------------------------------------------- ignore context
 for pattern in (".git/", ".claude/", ".venv/", "__pycache__", "tests/", "scripts/"):
     check(pattern in containerignore,
