@@ -229,6 +229,67 @@
       return;
     }
 
+    const refindRow = event.target.closest('[data-episode-refind]');
+    if (refindRow) {
+      const episodeId = refindRow.dataset.episodeRefind;
+      refindRow.disabled = true;
+      setStatus(status, 'Resetting this episode’s candidate scan…');
+      try {
+        await post(
+          `/api/series/${seriesId}/episodes/${episodeId}/refind`, {},
+        );
+        setStatus(status, 'Candidate scan reset; a fresh search is queued.', 'ok');
+        window.setTimeout(() => window.location.reload(), 800);
+      } catch (error) {
+        setStatus(status, error.message, 'bad');
+        refindRow.disabled = false;
+      }
+      return;
+    }
+
+    const reprobeRow = event.target.closest('[data-episode-reprobe-all]');
+    if (reprobeRow) {
+      const episodeId = reprobeRow.dataset.episodeReprobeAll;
+      reprobeRow.disabled = true;
+      setStatus(status, 'Queueing ffprobe for every candidate of this episode…');
+      try {
+        const result = await post(
+          `/api/series/${seriesId}/episodes/${episodeId}/candidates/probe-all`,
+          { all: true, refresh: true },
+        );
+        setStatus(status,
+          `Probed ${result.probed || 0} candidate(s); ${result.failed || 0} failed.`,
+          'ok');
+        window.setTimeout(() => window.location.reload(), 900);
+      } catch (error) {
+        setStatus(status, error.message, 'bad');
+        reprobeRow.disabled = false;
+      }
+      return;
+    }
+
+    const removeRefindRow = event.target.closest('[data-episode-remove-refind]');
+    if (removeRefindRow) {
+      if (!window.confirm(
+        'Delete this episode file and search again? The episode metadata is kept; '
+        + 'the file and candidate scan are rebuilt.',
+      )) return;
+      const episodeId = removeRefindRow.dataset.episodeRemoveRefind;
+      removeRefindRow.disabled = true;
+      setStatus(status, 'Removing the file and resetting the candidate scan…');
+      try {
+        await post(
+          `/api/series/${seriesId}/episodes/${episodeId}/remove-and-refind`, {},
+        );
+        setStatus(status, 'File removed; a fresh episode search is queued.', 'ok');
+        window.setTimeout(() => window.location.reload(), 900);
+      } catch (error) {
+        setStatus(status, error.message, 'bad');
+        removeRefindRow.disabled = false;
+      }
+      return;
+    }
+
     // A season action is a loop over the existing per-episode search endpoint;
     // no separate season-search API exists. Only monitored episodes are
     // queued, matching bworker's own scope.

@@ -423,6 +423,8 @@ def main() -> int:
     for marker in (
         "data-season-monitor=", "data-episode-monitor=",
         "data-episode-search=", "data-episode-manual=",
+        "data-episode-all=", "data-episode-refind=",
+        "data-episode-reprobe-all=", "data-episode-remove-refind=",
     ):
         contains(f"marker {marker}", page, marker)
 
@@ -745,6 +747,9 @@ def main() -> int:
     contains("js episode probe endpoint", js, "candidates/probe")
     contains("js renders probe media facts", js, "mediaFacts(release)")
     contains("js opens all candidates next to manual", js, "data-episode-all")
+    contains("js episode row refind", js, "data-episode-refind")
+    contains("js episode row reprobe all", js, "data-episode-reprobe-all")
+    contains("js episode row remove and refind", js, "data-episode-remove-refind")
     contains("js refinds episode candidates", js, "/refind`")
     contains("js reprobes all episode candidates", js, "candidates/probe-all")
     contains("js remove and refind episode", js, "/remove-and-refind")

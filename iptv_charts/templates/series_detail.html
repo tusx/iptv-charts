@@ -359,6 +359,23 @@
                                     title="Show every candidate for this episode">
                               {{ icon('layer-group') }} All candidates
                             </button>
+                            <button class="btn btn-sm btn-ghost" type="button"
+                                    data-episode-refind="{{ episode.id }}"
+                                    title="Discard this episode's candidate scan and search fresh">
+                              {{ icon('rotate-left') }} ReFind
+                            </button>
+                            <button class="btn btn-sm btn-ghost" type="button"
+                                    data-episode-reprobe-all="{{ episode.id }}"
+                                    title="Probe every candidate for this episode again">
+                              {{ icon('rotate') }} Re-Probe
+                            </button>
+                            {% if episode.file_key %}
+                              <button class="btn btn-sm btn-danger" type="button"
+                                      data-episode-remove-refind="{{ episode.id }}"
+                                      title="Delete the file, reset the scan and search again">
+                                {{ icon('trash-can') }} Remove &amp; re-find
+                              </button>
+                            {% endif %}
                             {% if episode.stage_work_id and (episode.stage == 'failed' or episode.stage_status in ('retry', 'failed_stopped')) %}
                               <button class="btn btn-sm btn-ghost" type="button"
                                       data-episode-retry="{{ episode.id }}"
