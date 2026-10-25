@@ -932,7 +932,7 @@ def movie_candidate_diagnostics(conn, movie_id: int, *, limit: int = 200) -> dic
         elif status == "failed":
             reason = str(details.get("probe_error") or details.get("reason")
                          or "ffprobe could not read this stream.")
-        elif status == "probed":
+        elif status in ("probed", "selected"):
             reason = str(details.get("skip_reason") or details.get("reason") or "")
             if not reason:
                 reason = ("Passed the profile with score "
