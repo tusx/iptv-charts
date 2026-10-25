@@ -825,15 +825,12 @@ def main() -> int:
 
         # --------------------------------------------------------------- movie
         section("add a movie, download and import")
-        # Start on the lower-weight HDTV source so the later WEB-DL switch is
-        # a strictly higher score, not an equal-score sidegrade.
         response = client.post("/api/quality-profiles", json={
             "name": "1080p HDTV",
             "resolution": "1080p",
             "resolution_weight": 10,
-            "quality_options": [{"value": "hdtv", "weight": 5}],
             "audio_languages": [{"value": "any", "weight": 5}],
-            "target_score": 20,
+            "target_score": 15,
             "upgrades": True,
         })
         check("HDTV starter profile created", response.status_code, 201)
@@ -862,18 +859,14 @@ def main() -> int:
         check("movie row resolution", stored["resolution"], "1080p")
 
         section("quality upgrade replaces the old file")
-        # Switching to the 4K builtin alone would be a sidegrade: both the
-        # stored 1080p file and the 2160p candidate score 20, and the contract
-        # only upgrades on a strictly better score. A weighted 4K profile that
-        # values the probed AAC track gives the exact release score 30 against
-        # the current file's 20, which is the real upgrade path.
+        # The 2160p release meets its exact-resolution target while the stored
+        # 1080p file no longer matches this profile's resolution.
         response = client.post("/api/quality-profiles", json={
             "name": "4K Cinema",
             "resolution": "2160p",
             "resolution_weight": 10,
-            "quality_options": [{"value": "web-dl", "weight": 10}],
             "audio_codecs": [{"value": "aac", "weight": 10}],
-            "target_score": 30,
+            "target_score": 20,
             "upgrades": True,
         })
         check("upgrade profile created", response.status_code, 201)
@@ -1032,17 +1025,15 @@ def main() -> int:
             "name": "4K WEB-DL English",
             "resolution": "2160p",
             "resolution_weight": 10,
-            "quality_options": [{"value": "web-dl", "weight": 10}],
             "audio_languages": [{"value": "original", "weight": 5}],
             "subtitle_languages": [{"value": "eng", "weight": 5}],
-            "target_score": 30,
+            "target_score": 20,
             "upgrades": True,
         })
         check("custom profile created", response.status_code, 201)
         custom_profile = response.get_json()["profile"]
-        check("custom profile quality option round-trips",
-              [option["value"] for option in custom_profile["quality_options"]],
-              ["web-dl"])
+        check("custom profile source options removed",
+              custom_profile["quality_options"], [])
         check("custom profile audio preference round-trips",
               [option["value"] for option in custom_profile["audio_languages"]],
               ["original"])
@@ -1050,9 +1041,9 @@ def main() -> int:
               [option["value"] for option in custom_profile["subtitle_languages"]],
               ["eng"])
         check("custom profile target round-trips",
-              custom_profile["target_score"], 30)
+              custom_profile["target_score"], 20)
         check("custom profile maximum round-trips",
-              custom_profile["max_score"], 30)
+              custom_profile["max_score"], 20)
 
         response = client.post("/api/movies", json={
             "tmdb_id": 611, "quality_profile_id": custom_profile["id"],
@@ -1073,8 +1064,12 @@ def main() -> int:
             check("profile allows WEB-DL", webdl_release["allowed"], True)
             check("quality tier label attached", webdl_release["quality_label"], "2160p WEB-DL")
         if cam_release:
-            check("CAM is outside the WEB-DL profile", cam_release["allowed"], False)
-            check_true("CAM rejection says why", "source" in (cam_release.get("reason") or ""))
+            check("CAM source no longer blocks eligibility",
+                  cam_release["allowed"], True)
+            check("CAM is below the track-preference target",
+                  cam_release.get("target_met"), False)
+            check("CAM quality label still shows the source",
+                  cam_release["quality_label"], "2160p CAM")
         response = client.get(f"/api/movies/{probe_movie['id']}/releases")
         check("manual releases status", response.status_code, 200)
         conn = db.connect()
@@ -1490,7 +1485,7 @@ def main() -> int:
             ("/activity", "Queue"),
             ("/scan", "Library scan"),
             ("/settings", "Metadata providers"),
-            ("/settings/profiles", "Quality / source"),
+            ("/settings/profiles", "Quality profiles"),
             ("/movies/settings", "Movie settings"),
             ("/series/settings", "Series settings"),
             ("/playlists", "IPTV settings"),
@@ -1543,8 +1538,8 @@ def main() -> int:
         check("v3 key error names the metadata section",
               response.get_json()["section"], "metadata")
         profiles_page = page_text(client, "/settings/profiles")
-        check_true("profiles page shows the custom tier",
-                   "2160p WEB-DL" in profiles_page)
+        check_true("profiles page shows the custom profile",
+                   "4K WEB-DL English" in profiles_page)
 
         activity_payload = client.get("/api/activity").get_json()
         check("activity API has a queue", isinstance(activity_payload.get("active"), list), True)
@@ -1609,11 +1604,7 @@ def main() -> int:
         response = client.post("/api/quality-profiles", json={
             "name": "Test profile",
             "resolution": "1080p",
-            "quality_options": [
-                {"value": "web-dl", "weight": 10},
-                {"value": "hdtv", "weight": 8},
-            ],
-            "target_score": 20,
+            "target_score": 10,
             "upgrades": True,
         })
         check("profile created", response.status_code, 201)

@@ -88,8 +88,7 @@ exists or belongs to a different source.
 
 ### Automatic selection and retries
 
-A candidate that fails the mandatory resolution or source rule is not
-downloaded. A release that matches but misses the target stays in the pool for
+A candidate that fails the mandatory resolution rule is not downloaded. A release that matches but misses the target stays in the pool for
 a later comparison. After the pool is exhausted, the best eligible fallback is
 used only when there is no current file or the current file is not eligible;
 a current eligible file must be beaten by a strictly higher score.

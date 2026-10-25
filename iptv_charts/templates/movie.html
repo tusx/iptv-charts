@@ -37,6 +37,7 @@
       <div class="detail-actions">
         <button class="btn btn-primary" id="movie-search-now" type="button">{{ icon('magnifying-glass') }} Search now</button>
         <button class="btn" id="movie-manual-search" type="button">{{ icon('list-check') }} Manual search</button>
+        <button class="btn" id="movie-show-all" type="button">{{ icon('layer-group') }} Show all candidates</button>
         <button class="btn btn-ghost" id="movie-refresh" type="button">{{ icon('rotate') }} Refresh metadata</button>
         <button class="btn btn-ghost" id="movie-manual-metadata" type="button"
                 {% if not tmdb_configured %}disabled title="Add a TMDB token on the settings page first"{% endif %}>
@@ -188,9 +189,12 @@
         </p>
       </div>
       <div class="section-actions">
-        <button class="btn btn-sm" type="button" id="candidate-probe-all"
-                {% if not candidates %}disabled title="No catalog candidates to probe"{% endif %}>Probe unprobed</button>
+        <button class="btn btn-sm" type="button" id="movie-show-all-section">{{ icon('layer-group') }} Show all candidates</button>
         <button class="btn btn-sm btn-ghost" type="button" id="movie-manual-search-section">Manual search</button>
+        <button class="btn btn-sm" type="button" id="movie-refind"
+                title="Discard this scan and look for fresh catalog candidates">ReFind candidates</button>
+        <button class="btn btn-sm" type="button" id="movie-reprobe-all"
+                {% if not candidates %}disabled title="No catalog candidates to probe"{% endif %}>Re-Probe all</button>
       </div>
     </div>
 
@@ -338,6 +342,38 @@
     <p class="hint" id="candidate-action-status" role="status"></p>
   </section>
 
+  {% if candidate_checks.candidates %}
+    <section class="candidate-section" id="movie-candidate-checks">
+      <div class="section-head">
+        <div>
+          <h2>{{ icon('clipboard-check') }} Candidate checks</h2>
+          <p class="hint">
+            Latest automatic scan decisions. Every skipped or deferred candidate
+            keeps its reason here, including the probe batch limit.
+          </p>
+        </div>
+      </div>
+      <div class="candidate-check-list">
+        {% for candidate in candidate_checks.candidates %}
+          <article class="candidate-check" data-candidate-check-status="{{ candidate.status }}">
+            <div class="candidate-check-main">
+              <strong>{{ candidate.release_name or candidate.provider_remote_id }}</strong>
+              <span class="muted small">
+                {{ candidate.resolution or 'unknown' }}
+                {% if candidate.match_kind %} · matched by {{ candidate.match_kind }}{% endif %}
+                {% if candidate.score is not none %} · score {{ candidate.score }}{% endif %}
+              </span>
+              <span class="{{ 'muted' if candidate.status == 'probed' else 'queue-error' }} small">
+                {{ candidate.display_reason }}
+              </span>
+            </div>
+            <span class="badge badge-{{ candidate.status_tone }}">{{ candidate.status_label }}</span>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+
   {# --------------------------------------------------- file / edit cards #}
   <div class="movie-detail-grid">
     <div class="movie-detail-main">
@@ -369,6 +405,12 @@
           </dl>
         {% else %}
           <p class="muted">No file on disk yet. The bworker searches and downloads according to the profile and availability above.</p>
+        {% endif %}
+
+        {% if movie.file_path %}
+          <button class="btn btn-sm btn-danger" id="movie-remove-refind" type="button">
+            {{ icon('trash-can') }} Remove downloaded file &amp; re-find
+          </button>
         {% endif %}
 
         {% for download in downloads %}
@@ -479,7 +521,9 @@
       <button class="btn btn-primary btn-sm" type="button" id="movie-all-candidates">Show all candidates</button>
       <span class="hint">Browse every catalog match, including unprobed and outside-profile versions.</span>
     </div>
-    <p class="hint" id="movie-release-status" role="status"></p>
+    <p class="hint" id="movie-release-status" role="status">
+      Type at least two characters. This searches all playlist items and may take some time.
+    </p>
     <div class="release-list" id="movie-release-list"></div>
   </div>
   <div class="dialog-foot">
@@ -536,6 +580,7 @@
 
 <script>
   window.MOVIE_ID = {{ movie.id }};
+  window.MOVIE_TITLE = {{ movie.title|tojson }};
   window.MOVIE_STAGE_SIGNATURE = {{ stage.signature|tojson }};
   {% if stage.stage_api_url %}window.MOVIE_STAGE_URL = {{ stage.stage_api_url|tojson }};{% endif %}
 </script>

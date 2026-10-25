@@ -138,25 +138,24 @@ numbers and air dates when configured, with TMDB as the fallback.
 
 ### Weighted quality profiles
 
-Quality profiles no longer use an ordered list of quality levels and a
-stopping point. A profile is a **single mandatory resolution plus weighted
-quality/source and optional criteria**. Three immutable defaults ship with the
-app:
+A profile is now **one required resolution plus optional weighted criteria**.
+Source/quality is not required or scored: provider catalogues frequently omit
+or mislabel it, so it must never block a release. Three immutable defaults ship
+with the app:
 
-| Profile | Mandatory resolution | Selected quality/source | Target and maximum |
-|---|---|---|---|
-| **4K** | 2160p | REMUX, BluRay, BDRip, WEB-DL, WEBRip, HDTV, SD-TV, DVD | 20 / 20 |
-| **1080p** (default) | 1080p | the same eight options | 20 / 20 |
-| **720p** | 720p | the same eight options | 20 / 20 |
+| Profile | Required resolution | Target and maximum |
+|---|---|---|
+| **4K** | 2160p | 10 / 10 |
+| **1080p** (default) | 1080p | 10 / 10 |
+| **720p** | 720p | 10 / 10 |
 
-Every selected option is worth 10 points and the resolution is worth 10, so a
-built-in candidate that matches both has a base score of 20. The built-ins are
+The resolution is worth 10 points and sets the minimum score. Built-ins are
 immutable and cannot be edited or deleted; their names are reserved. The
-site-wide default profile is one of the built-ins and starts at **1080p**.
+site-wide default profile starts at **1080p**.
 
 The **custom profile builder** lets you choose any resolution in 2160p, 1080p,
-720p, 480p or 360p, assign a weight (1–1000) to the resolution and to each
-selected quality/source option, set a target score and optionally add:
+720p, 480p or 360p, assign a weight (1–1000) to the resolution, set a target
+score and optionally add:
 
 | Section | Matching |
 |---|---|
@@ -167,15 +166,13 @@ selected quality/source option, set a target score and optionally add:
 | Subtitle format | Multi |
 | Subtitle language | Multi |
 
-The full source vocabulary is REMUX, BluRay, BDRip, WEB-DL, WEBRip, HDTV,
-SD-TV, DVD, Unknown, Workprint, CAM, Telesync, Telecine, Screener and R5. A
-candidate must use the exact selected resolution and one of the selected
-sources; a lower resolution is eligible only when upgrades are enabled. Higher
-resolutions, unknown resolutions and unselected sources are rejected.
-Mandatory matches form the base score; unmatched optional criteria add zero
-and never reject a candidate. The maximum is the mandatory maximum plus every
-optional section's maximum. The target must be between 20 and the maximum.
+A candidate must use the exact selected resolution; a lower resolution is
+eligible only when upgrades are enabled. Higher and unknown resolutions are
+rejected. Optional criteria add zero when unmatched and never reject a
+candidate. The target must be between 10 and the computed maximum.
 `target_met` requires the exact resolution and a score at least the target.
+When scores tie, an exact-resolution candidate beats a lower-resolution
+fallback, so switching profiles can replace a fallback even at the same score.
 
 When a candidate is selected, one meeting the target always wins. Otherwise a
 lower-resolution fallback may be downloaded as a stopgap and is marked

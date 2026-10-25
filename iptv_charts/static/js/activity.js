@@ -6,10 +6,10 @@
  * task state. Everything returned by those endpoints is untrusted data and is
  * inserted with textContent/DOM APIs, never as HTML strings.
  *
- * Auto-refresh is deliberately conservative: it stops while the page or the
- * log is scrolled away from the top, while the tab is hidden, or when the user
- * pauses it manually. The user's manual choice survives every automatic
- * pause/resume and every poll. */
+ * Auto-refresh keeps running while the page or log is scrolled: new activity
+ * is the point of this page. It pauses only while the tab is hidden or when
+ * the user pauses it manually. The user's manual choice survives every
+ * automatic pause/resume and every poll. */
 
 (() => {
   'use strict';
@@ -88,8 +88,6 @@
     remaining: 5,
     userPaused: false,
     hidden: Boolean(document.hidden),
-    scrolledAway: window.scrollY > 0,
-    logScrolled: false,
     inFlight: false,
     pendingPoll: false,
     generation: 0,
@@ -161,7 +159,7 @@
     if (value === 'success' || value === 'done' || value === 'complete') return 'pill-ok';
     if (value === 'failure' || value === 'failed' || value === 'error') return 'pill-bad';
     if (value === 'retry' || value === 'paused' || value === 'interrupted'
-        || value === 'warning') return 'pill-warn';
+        || value === 'warning' || value === 'skipped') return 'pill-warn';
     return 'pill-muted';
   }
 
@@ -639,8 +637,7 @@
 
   // ------------------------------------------------------- refresh scheduling
   function isRefreshActive() {
-    return !state.userPaused && !state.hidden && !state.scrolledAway
-      && !state.logScrolled;
+    return !state.userPaused && !state.hidden;
   }
 
   function updateRefreshUI() {
@@ -663,8 +660,6 @@
     let hint;
     if (state.userPaused) hint = 'Paused manually.';
     else if (state.hidden) hint = 'Paused while this tab is hidden.';
-    else if (state.scrolledAway) hint = 'Paused while scrolled away from the top.';
-    else if (state.logScrolled) hint = 'Paused while the activity log is scrolled.';
     else hint = `Refreshes every ${intervalText(state.interval)}.`;
     nodes.refreshHint.textContent = hint;
   }
@@ -682,22 +677,6 @@
 
   function toggleManualPause() {
     state.userPaused = !state.userPaused;
-    state.remaining = state.interval;
-    refreshConditionsChanged();
-  }
-
-  function onScroll() {
-    const away = window.scrollY > 0;
-    if (away === state.scrolledAway) return;
-    state.scrolledAway = away;
-    state.remaining = state.interval;
-    refreshConditionsChanged();
-  }
-
-  function onLogScroll() {
-    const scrolled = nodes.log.scrollTop > 0;
-    if (scrolled === state.logScrolled) return;
-    state.logScrolled = scrolled;
     state.remaining = state.interval;
     refreshConditionsChanged();
   }
@@ -1109,8 +1088,6 @@
   nodes.refreshToggle.addEventListener('click', toggleManualPause);
   nodes.refreshPause.addEventListener('click', toggleManualPause);
   nodes.interval.addEventListener('change', onIntervalChange);
-  nodes.log.addEventListener('scroll', onLogScroll, { passive: true });
-  window.addEventListener('scroll', onScroll, { passive: true });
   document.addEventListener('visibilitychange', onVisibility);
 
   updateRefreshUI();

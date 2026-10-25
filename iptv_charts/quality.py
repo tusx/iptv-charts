@@ -1,15 +1,12 @@
 """Weighted quality profiles, stream facts and upgrade decisions.
 
-A 0.8.0 profile is a single mandatory resolution plus a weighted set of
-quality/source options. Two things are always mandatory:
+A profile has one mandatory resolution. The candidate resolution must equal
+the selected resolution, or be a *lower* resolution when ``upgrades`` is
+enabled. Source/quality is deliberately not part of the profile: provider
+catalogues frequently omit or mislabel it, so it must never block a release.
 
-* the candidate resolution must equal the selected resolution, or be a
-  *lower* resolution when ``upgrades`` is enabled;
-* the candidate source/quality must match one of the selected quality options.
-
-Those two mandatory matches form the base score (resolution weight + best
-matching source weight). Every other criterion is optional and only adds
-weight when it matches:
+The resolution match forms the base score (default 10). Optional criteria add
+weight only when they match:
 
 * video codec, audio codec and audio channels are exclusive sections -- only
   the best matching selected option in each section adds its weight;
@@ -20,8 +17,8 @@ An unmatched optional option contributes zero; it never rejects a candidate.
 A section with no selected options contributes zero. The stored ``max_score``
 is the sum of the mandatory maximum and every optional section's maximum.
 
-``target_score`` is the score needed for a candidate to count as complete, but
-only when it also used the exact selected resolution. A lower-resolution
+``target_score`` is the score needed for a candidate to count as complete
+(minimum 10), but only when it also used the exact selected resolution. A lower-resolution
 fallback can be eligible, score highly and still not be ``target_met``; it is
 downloaded as a stopgap and flagged ``needs_upgrade``.
 
@@ -168,7 +165,7 @@ _SECTION_VOCABULARIES = {
 _ANY = "any"
 _WEIGHT_MIN = 1
 _WEIGHT_MAX = 1000
-_TARGET_FLOOR = 20
+_TARGET_FLOOR = 10
 
 #: Old 0.7.0 source names mapped onto the 0.8.0 vocabulary.
 _SOURCE_ALIASES = {
@@ -771,6 +768,10 @@ class Profile:
     def __post_init__(self) -> None:
         if self.target_score is None:
             object.__setattr__(self, "target_score", self.max_score)
+        elif int(self.target_score) > self.max_score:
+            # A profile saved when source contributed to the maximum must not
+            # become permanently unattainable after source was removed.
+            object.__setattr__(self, "target_score", self.max_score)
         if self.resolution:
             value = normalise_resolution(self.resolution)
             object.__setattr__(self, "resolution", value if value in RESOLUTIONS else None)
@@ -811,17 +812,8 @@ class Profile:
         if resolution not in RESOLUTIONS:
             resolution = None
 
-        quality_raw = criteria.get("quality_options")
-        if quality_raw is None:
-            quality_raw = get("qualities")
-        quality_options = _options_from_raw(
-            _quality_values_from_legacy(quality_raw), QUALITY_LABELS, 10
-        )
-        if not quality_options and get("resolution") is None:
-            quality_options = _options_from_raw(
-                DEFAULT_QUALITY_SELECTION, QUALITY_LABELS, 10
-            )
-
+        # Source/quality choices from older profiles are intentionally ignored:
+        # provider metadata is too incomplete to gate downloads on them.
         try:
             resolution_weight = int(get("resolution_weight") or 10)
         except (TypeError, ValueError):
@@ -838,7 +830,7 @@ class Profile:
         return cls(
             resolution=resolution,
             resolution_weight=resolution_weight,
-            quality_options=quality_options,
+            quality_options=(),
             video_codecs=_section_options(row, criteria, "video_codecs"),
             audio_codecs=_section_options(row, criteria, "audio_codecs"),
             audio_languages=_section_options(row, criteria, "audio_languages"),
@@ -860,9 +852,7 @@ class Profile:
         return cls(
             resolution=values.get("resolution"),
             resolution_weight=int(values.get("resolution_weight", 10)),
-            quality_options=_options_from_mapping(
-                values.get("quality_options"), QUALITY_LABELS, 10
-            ),
+            quality_options=(),
             video_codecs=_options_from_mapping(
                 values.get("video_codecs"), _SECTION_VOCABULARIES["video_codecs"],
                 VIDEO_CODEC_WEIGHT,
@@ -899,7 +889,7 @@ class Profile:
             "name": self.name,
             "resolution": self.resolution,
             "resolution_weight": self.resolution_weight,
-            "quality_options": [option.to_dict() for option in self.quality_options],
+            "quality_options": [],
             "video_codecs": [option.to_dict() for option in self.video_codecs],
             "audio_codecs": [option.to_dict() for option in self.audio_codecs],
             "audio_languages": [option.to_dict() for option in self.audio_languages],
@@ -920,10 +910,7 @@ class Profile:
 
     @property
     def mandatory_max_score(self) -> int:
-        source_max = max(
-            (option.weight for option in self.quality_options), default=0
-        )
-        return max(0, int(self.resolution_weight)) + source_max
+        return max(0, int(self.resolution_weight))
 
     @property
     def max_score(self) -> int:
@@ -1032,21 +1019,8 @@ class Profile:
         else:
             reason = f"{resolution} is not in this quality profile."
 
-        source_option = self._best_quality_option(facts)
         source = facts.get("source")
-        if not reason:
-            if not self.quality_options:
-                reason = "This profile does not select a quality/source option."
-            elif source_option is None:
-                if source in (None, "", "unknown"):
-                    reason = "The release source is unknown."
-                else:
-                    reason = (
-                        f"{source_label(source)} is not a selected "
-                        "quality/source option."
-                    )
-
-        eligible = bool(resolution_ok and source_option is not None and not reason)
+        eligible = bool(resolution_ok and not reason)
         if not eligible:
             return {
                 "eligible": False,
@@ -1068,7 +1042,7 @@ class Profile:
                 "size": facts.get("size", 0),
             }
 
-        base_score = int(self.resolution_weight) + int(source_option.weight)
+        base_score = int(self.resolution_weight)
         components: list[dict] = [
             {
                 "section": "resolution",
@@ -1076,13 +1050,6 @@ class Profile:
                 "value": resolution,
                 "label": resolution,
                 "weight": int(self.resolution_weight),
-            },
-            {
-                "section": "quality",
-                "kind": "mandatory",
-                "value": source_option.value,
-                "label": source_option.label,
-                "weight": int(source_option.weight),
             },
         ]
         section_scores: dict[str, int] = {}
@@ -1145,7 +1112,7 @@ class Profile:
             "exact_resolution": exact,
             "resolution": resolution,
             "source": source,
-            "source_weight": int(source_option.weight),
+            "source_weight": 0,
             "components": components,
             "section_scores": section_scores,
             "section_maxima": section_maxima,
@@ -1357,8 +1324,15 @@ def choose_release(
         if current_evaluation["target_met"]:
             return None
         if current_evaluation["eligible"]:
-            if best_evaluation["score"] <= current_evaluation["score"]:
+            if best_evaluation["score"] < current_evaluation["score"]:
                 return None
+            if best_evaluation["score"] == current_evaluation["score"]:
+                # Equal scores are not a sidegrade when one candidate has the
+                # exact selected resolution and the current file is only a
+                # lower-resolution fallback.
+                if not (best_evaluation["exact_resolution"]
+                        and not current_evaluation["exact_resolution"]):
+                    return None
     return best_release
 
 
@@ -1434,21 +1408,21 @@ def _validate_options(raw: Any, vocabulary: Mapping[str, str],
 def _target_value(raw: Any, max_score: int) -> int:
     if max_score < _TARGET_FLOOR:
         raise ValueError(
-            "The profile's maximum score must be at least 20; "
-            "increase the resolution, source or optional weights."
+            "The profile's maximum score must be at least 10; "
+            "increase the resolution or optional weights."
         )
     if raw is None or raw == "":
         return max_score
     if isinstance(raw, bool):
-        raise ValueError(f"Target score must be between 20 and {max_score}.")
+        raise ValueError(f"Target score must be between 10 and {max_score}.")
     try:
         target = int(raw)
     except (TypeError, ValueError):
-        raise ValueError(f"Target score must be between 20 and {max_score}.")
+        raise ValueError(f"Target score must be between 10 and {max_score}.")
     if isinstance(raw, float) and not raw.is_integer():
-        raise ValueError(f"Target score must be between 20 and {max_score}.")
+        raise ValueError(f"Target score must be between 10 and {max_score}.")
     if not _TARGET_FLOOR <= target <= max_score:
-        raise ValueError(f"Target score must be between 20 and {max_score}.")
+        raise ValueError(f"Target score must be between 10 and {max_score}.")
     return target
 
 
@@ -1478,7 +1452,8 @@ def validate_profile(payload: Mapping[str, Any] | None = None, **overrides: Any)
 
     Raises :class:`ValueError` with a user-facing reason. Unknown resolutions,
     unknown/duplicate options, weights outside 1..1000 and a target outside
-    ``20..max_score`` are all rejected.
+    ``10..max_score`` are all rejected. Legacy ``quality_options`` input is
+    accepted but ignored; source no longer gates or scores a release.
     """
     if payload is None:
         data: dict[str, Any] = {}
@@ -1499,17 +1474,11 @@ def validate_profile(payload: Mapping[str, Any] | None = None, **overrides: Any)
     resolution_weight = _weight(
         data.get("resolution_weight"), 10, "Resolution weight"
     )
-    quality_options = _validate_options(
-        data.get("quality_options"), QUALITY_LABELS, 10, "quality/source"
-    )
-    if not quality_options:
-        raise ValueError("Select at least one quality/source option.")
-
     values: dict[str, Any] = {
         "name": str(data.get("name") or "").strip()[:80],
         "resolution": resolution,
         "resolution_weight": resolution_weight,
-        "quality_options": quality_options,
+        "quality_options": [],
     }
     for spec in OPTIONAL_SECTIONS:
         key = spec["key"]
@@ -1533,11 +1502,7 @@ def validate_profile(payload: Mapping[str, Any] | None = None, **overrides: Any)
 
 
 def _compute_max_score(values: Mapping[str, Any]) -> int:
-    resolution_weight = int(values.get("resolution_weight") or 0)
-    quality = values.get("quality_options") or []
-    total = resolution_weight + max(
-        (int(option["weight"]) for option in quality), default=0
-    )
+    total = int(values.get("resolution_weight") or 0)
     for spec in OPTIONAL_SECTIONS:
         options = values.get(spec["key"]) or []
         if not options:
@@ -1628,13 +1593,6 @@ def builder_schema() -> dict:
         })
     return {
         "resolutions": list(RESOLUTIONS),
-        "quality_options": [
-            {"value": value, "label": label, "weight": 10}
-            for value, label in QUALITY_OPTIONS
-        ],
-        "default_quality_options": [
-            dict(option) for option in DEFAULT_QUALITY_SELECTION
-        ],
         "sections": sections,
         "target_floor": _TARGET_FLOOR,
         "weight_min": _WEIGHT_MIN,

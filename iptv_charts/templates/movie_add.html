@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon %}
+{% block title %}Add movie · {{ app_name }}{% endblock %}
+
+{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/add_media.css') }}">
+<section class="page-head">
+  <div>
+    <p class="crumb"><a href="{{ url_for('manager.movies') }}">Movies</a> / Add movie</p>
+    <h1>Add a movie</h1>
+    <p class="subtitle">Search TMDB, choose the defaults, then add it to your library.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-ghost" href="{{ url_for('manager.movies') }}">{{ icon('arrow-left') }} Back to movies</a>
+  </div>
+</section>
+
+{% if not tmdb_configured %}
+  <div class="note note-warn">
+    Add a TMDB API Read Access Token on the
+    <a href="{{ url_for('settings') }}#metadata-settings">settings page</a>
+    before searching for movies.
+  </div>
+{% endif %}
+
+<section class="add-media-page" id="add-movie-page"
+         data-search-url="/api/metadata/movie/search"
+         data-add-url="/api/movies"
+         data-detail-base="/movies/">
+  <form class="add-search-form" id="add-movie-search-form" role="search">
+    <label class="field add-search-field">
+      <span>Search TMDB</span>
+      <div class="add-search-row">
+        <input type="search" id="add-movie-query" placeholder="Movie title" autocomplete="off"
+               autofocus {% if not tmdb_configured %}disabled{% endif %}>
+        <button class="btn btn-primary" type="submit" id="add-movie-search-btn"
+                {% if not tmdb_configured %}disabled{% endif %}>
+          {{ icon('magnifying-glass') }} Search
+        </button>
+      </div>
+    </label>
+  </form>
+
+  <div class="add-options">
+    <label class="field">
+      <span>Quality profile</span>
+      <select id="add-movie-profile">
+        {% for profile in profiles %}
+          <option value="{{ profile.id }}" {% if profile.is_default %}selected{% endif %}>
+            {{ profile.name }} ({{ profile.resolutions|join(', ') }})
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span>Download when</span>
+      <select id="add-movie-availability">
+        <option value="released" selected>Released (avoid cams)</option>
+        <option value="in_cinemas">In cinemas / release date reached</option>
+        <option value="announced">Announced (search immediately)</option>
+      </select>
+    </label>
+    <label class="field">
+      <span>Queue priority <small class="muted">higher runs first</small></span>
+      <input type="number" id="add-movie-priority" min="-100" max="100" step="1" value="0">
+    </label>
+    <label class="check"><input type="checkbox" id="add-movie-monitored" checked> Monitored</label>
+    <label class="check"><input type="checkbox" id="add-movie-search-now" checked> Search and download now</label>
+  </div>
+
+  <p class="hint add-search-status" id="add-movie-status" role="status" aria-live="polite">
+    Type a title and press Search.
+  </p>
+  <div class="add-results" id="add-movie-results"></div>
+</section>
+
+{% if not profiles %}
+  <p class="note note-bad">No quality profiles exist. Create one on the
+    <a href="{{ url_for('manager.profiles_page') }}">profiles page</a> first.</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/add_media.js') }}"></script>
+{% endblock %}

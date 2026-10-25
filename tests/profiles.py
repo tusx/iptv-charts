@@ -75,10 +75,6 @@ def payload(**overrides) -> dict:
         "name": "Test profile",
         "resolution": "1080p",
         "resolution_weight": 10,
-        "quality_options": [
-            {"value": "web-dl", "label": "WEB-DL", "weight": 10},
-            {"value": "bluray", "label": "BluRay", "weight": 15},
-        ],
         "upgrades": True,
     }
     data.update(overrides)
@@ -115,14 +111,12 @@ def test_builtins(conn) -> None:
     for key, row in rows.items():
         check(f"{key} is builtin", row["is_builtin"], 1)
         check(f"{key} resolution weight", row["resolution_weight"], 10)
-        check(f"{key} target score", row["target_score"], 20)
-        check(f"{key} max score", row["max_score"], 20)
+        check(f"{key} target score", row["target_score"], 10)
+        check(f"{key} max score", row["max_score"], 10)
         check(f"{key} revision", row["revision"], 1)
         criteria = json.loads(row["criteria_json"])
         check(f"{key} criteria version", criteria["version"], 1)
-        check(f"{key} eight quality options",
-              [entry["value"] for entry in criteria["quality_options"]],
-              list(quality.DEFAULT_QUALITY_VALUES))
+        check(f"{key} source options removed", criteria["quality_options"], [])
         for optional in (
             "video_codecs", "audio_codecs", "audio_languages",
             "audio_channels", "subtitle_formats", "subtitle_languages",
@@ -131,9 +125,9 @@ def test_builtins(conn) -> None:
 
     profile = quality.Profile.from_row(rows["1080p"])
     check("builtin profile resolution", profile.resolution, "1080p")
-    check("builtin profile base score", profile.max_score, 20)
-    check("builtin profile target", profile.target_score, 20)
-    check("builtin profile option count", len(profile.quality_options), 8)
+    check("builtin profile base score", profile.max_score, 10)
+    check("builtin profile target", profile.target_score, 10)
+    check("builtin profile option count", len(profile.quality_options), 0)
     check("builtin profile immutable flag", profile.is_builtin, True)
 
     check("default setting", db.get_setting(conn, "default_profile_key"), "1080p")
@@ -155,22 +149,22 @@ def test_builtins(conn) -> None:
 
 
 def test_mandatory() -> None:
-    section("mandatory eligibility: resolution and selected quality")
-    profile = build(target_score=20)
+    section("mandatory eligibility: resolution only, source ignored")
+    profile = build(target_score=10)
     exact = detail(profile, {"resolution": "1080p", "source": "web-dl"})
     check("exact resolution eligible", exact["eligible"], True)
-    check("base score", exact["score"], 20)
+    check("base score is the resolution weight", exact["score"], 10)
     check("exact target met", exact["target_met"], True)
     check("exact does not need upgrade", exact["needs_upgrade"], False)
 
     lower = detail(profile, {"resolution": "720p", "source": "web-dl"})
     check("lower resolution eligible with upgrades", lower["eligible"], True)
-    check("lower resolution base score", lower["score"], 20)
+    check("lower resolution base score", lower["score"], 10)
     check("lower resolution never target_met", lower["target_met"], False)
     check("lower resolution needs upgrade", lower["needs_upgrade"], True)
     check("lower resolution exact flag", lower["exact_resolution"], False)
 
-    no_upgrades = build(target_score=20, upgrades=False)
+    no_upgrades = build(target_score=10, upgrades=False)
     blocked = detail(no_upgrades, {"resolution": "720p", "source": "web-dl"})
     check("lower resolution rejected without upgrades", blocked["eligible"], False)
     check_true("rejection mentions upgrades", "upgrades" in blocked["reason"])
@@ -182,38 +176,54 @@ def test_mandatory() -> None:
     unknown = detail(profile, {"resolution": "unknown", "source": "web-dl"})
     check("unknown resolution rejected", unknown["eligible"], False)
 
-    bad_source = detail(profile, {"resolution": "1080p", "source": "cam"})
-    check("unselected source rejected", bad_source["eligible"], False)
-    check_true("source rejection names CAM", "CAM" in bad_source["reason"])
+    for source in ("cam", "unknown", "web-dl", "bluray"):
+        candidate = detail(profile, {"resolution": "1080p", "source": source})
+        check(f"source {source} is ignored", candidate["eligible"], True)
+        check(f"source {source} does not score", candidate["score"], 10)
+        check(f"source {source} has no source weight",
+              candidate["source_weight"], 0)
 
-    unknown_source = detail(profile, {"resolution": "1080p", "source": "unknown"})
-    check("unknown source rejected", unknown_source["eligible"], False)
-
-    # Optional matches cannot compensate for a mandatory mismatch.
+    # Optional matches add to the resolution base; they never make a release
+    # eligible when the resolution is outside the profile.
     fancy = build(
         target_score=20,
         video_codecs=[{"value": "hevc", "label": "HEVC", "weight": 10}],
     )
-    rejected = detail(fancy, {
+    accepted = detail(fancy, {
         "resolution": "1080p",
         "source": "cam",
         "probe": probe(video=[{"codec": "hevc"}]),
     })
-    check("optional match does not rescue a bad source",
+    check("optional match adds to resolution base", accepted["score"], 20)
+    rejected = detail(fancy, {
+        "resolution": "2160p",
+        "source": "cam",
+        "probe": probe(resolution="2160p", video=[{"codec": "hevc"}]),
+    })
+    check("optional match cannot rescue a bad resolution",
           rejected["eligible"], False)
     check("ineligible score is zero", rejected["score"], 0)
 
 
 def test_target_and_fallback() -> None:
     section("target score, exact vs lower fallback")
-    profile = build(target_score=25)
+    profile = build(
+        target_score=20,
+        video_codecs=[{"value": "hevc", "label": "HEVC", "weight": 10}],
+    )
     exact_low = detail(profile, {"resolution": "1080p", "source": "web-dl"})
     check("exact score below target eligible", exact_low["eligible"], True)
     check("exact below target not target_met", exact_low["target_met"], False)
-    exact_high = detail(profile, {"resolution": "1080p", "source": "bluray"})
+    exact_high = detail(profile, {
+        "resolution": "1080p", "source": "bluray",
+        "probe": probe(video=[{"codec": "hevc"}]),
+    })
     check("exact at target target_met", exact_high["target_met"], True)
-    lower_high = detail(profile, {"resolution": "720p", "source": "bluray"})
-    check("lower fallback can reach target score", lower_high["score"], 25)
+    lower_high = detail(profile, {
+        "resolution": "720p", "source": "bluray",
+        "probe": probe(resolution="720p", video=[{"codec": "hevc"}]),
+    })
+    check("lower fallback can reach target score", lower_high["score"], 20)
     check("lower fallback not target_met", lower_high["target_met"], False)
     check("lower fallback flagged for upgrade", lower_high["needs_upgrade"], True)
 
@@ -248,8 +258,8 @@ def test_optional_scoring() -> None:
             {"value": "any", "label": "Any", "weight": 5},
         ],
     )
-    check("max score adds exclusive maxima and multi sums",
-          profile.max_score, 84)
+    check("max score adds resolution and exclusive/multi maxima",
+          profile.max_score, 69)
     rich = detail(profile, {
         "resolution": "1080p",
         "source": "bluray",
@@ -268,7 +278,7 @@ def test_optional_scoring() -> None:
         ),
     })
     check("rich candidate eligible", rich["eligible"], True)
-    check("rich candidate score", rich["score"], 84)
+    check("rich candidate score", rich["score"], 69)
     check("exclusive video uses best match", rich["section_scores"]["video_codecs"], 10)
     check("exclusive audio codec uses best match",
           rich["section_scores"]["audio_codecs"], 10)
@@ -286,8 +296,8 @@ def test_optional_scoring() -> None:
     check("empty optional sections do not reject", plain["eligible"], True)
     check("empty optional sections add zero",
           sum(plain["section_scores"].values()), 0)
-    check("empty optional sections score base", plain["score"], 20)
-    check("empty optional target_met", plain["target_met"], True)
+    check("empty optional sections score base", plain["score"], 10)
+    check("empty optional target_met", plain["target_met"], False)
 
     mismatch = build(
         target_score=20,
@@ -306,7 +316,7 @@ def test_optional_scoring() -> None:
         ),
     })
     check("nonmatching optional sections stay eligible", none["eligible"], True)
-    check("nonmatching optional score is base only", none["score"], 20)
+    check("nonmatching optional score is base only", none["score"], 10)
     check("nonmatching optional contributions zero",
           sum(none["section_scores"].values()), 0)
 
@@ -315,10 +325,6 @@ def test_validation() -> None:
     section("profile payload validation and max score")
     values = quality.validate_profile(payload(
         resolution_weight=12,
-        quality_options=[
-            {"value": "web-dl", "weight": 10},
-            {"value": "bluray", "weight": 15},
-        ],
         video_codecs=[
             {"value": "hevc", "weight": 10},
             {"value": "h264", "weight": 7},
@@ -329,42 +335,26 @@ def test_validation() -> None:
             {"value": "any", "weight": 5},
         ],
     ))
-    check("default target equals max", values["target_score"], 52)
-    check("computed max score", values["max_score"], 52)
+    check("default target equals max", values["target_score"], 37)
+    check("computed max score", values["max_score"], 37)
     check("criteria version", values["criteria"]["version"], 1)
-    check("criteria quality labels filled",
-          values["criteria"]["quality_options"][0]["label"], "WEB-DL")
+    check("source criteria removed", values["criteria"]["quality_options"], [])
     check("omitted optional option weight defaults to section default",
           values["audio_languages"][0]["weight"], 5)
-    check("omitted quality weight defaults to 10",
-          values["quality_options"][0]["weight"], 10)
     check("criteria JSON round-trips",
-          json.loads(values["criteria_json"])["quality_options"][1]["weight"], 15)
+          json.loads(values["criteria_json"])["video_codecs"][0]["weight"], 10)
 
     check("target may equal max",
-          quality.validate_profile(payload(target_score=25))["target_score"], 25)
+          quality.validate_profile(payload(
+              resolution_weight=25, target_score=25))["target_score"], 25)
     check("target may be the floor",
-          quality.validate_profile(payload(target_score=20))["target_score"], 20)
+          quality.validate_profile(payload(target_score=10))["target_score"], 10)
     raises("missing resolution rejected",
            lambda: quality.validate_profile(payload(resolution=None)),
            message="resolution")
     raises("unknown resolution rejected",
            lambda: quality.validate_profile(payload(resolution="1440p")),
            message="resolution")
-    raises("missing quality rejected",
-           lambda: quality.validate_profile(payload(quality_options=[])),
-           message="quality")
-    raises("unknown quality rejected",
-           lambda: quality.validate_profile(payload(
-               quality_options=[{"value": "hddvd", "weight": 10}])),
-           message="unknown")
-    raises("duplicate quality rejected",
-           lambda: quality.validate_profile(payload(
-               quality_options=[
-                   {"value": "web-dl", "weight": 10},
-                   {"value": "web-dl", "weight": 20},
-               ])),
-           message="duplicate")
     raises("duplicate language alias rejected",
            lambda: quality.validate_profile(payload(
                audio_languages=[
@@ -372,33 +362,24 @@ def test_validation() -> None:
                    {"value": "eng", "weight": 5},
                ])),
            message="duplicate")
-    raises("weight zero rejected",
-           lambda: quality.validate_profile(payload(
-               quality_options=[{"value": "web-dl", "weight": 0}])),
-           message="between 1 and 1000")
-    raises("weight above 1000 rejected",
-           lambda: quality.validate_profile(payload(
-               quality_options=[{"value": "web-dl", "weight": 1001}])),
-           message="between 1 and 1000")
     raises("unknown optional value rejected",
            lambda: quality.validate_profile(payload(
                video_codecs=[{"value": "mpeg1", "weight": 5}])),
            message="unknown")
-    raises("target below 20 rejected",
-           lambda: quality.validate_profile(payload(target_score=19)),
-           message="between 20")
+    raises("target below 10 rejected",
+           lambda: quality.validate_profile(payload(target_score=9)),
+           message="between 10")
     raises("target above max rejected",
-           lambda: quality.validate_profile(payload(target_score=26)),
-           message="between 20 and 25")
+           lambda: quality.validate_profile(payload(target_score=11)),
+           message="between 10 and 10")
     raises("target must be an integer",
-           lambda: quality.validate_profile(payload(target_score=20.5)),
-           message="between 20")
-    raises("maximum below 20 rejected",
+           lambda: quality.validate_profile(payload(target_score=10.5)),
+           message="between 10")
+    raises("maximum below 10 rejected",
            lambda: quality.validate_profile({
                "name": "tiny", "resolution": "1080p",
                "resolution_weight": 1,
-               "quality_options": [{"value": "web-dl", "weight": 1}],
-           }), message="at least 20")
+           }), message="at least 10")
 
     mapped = quality.validate_profile(payload(
         audio_languages=[{"value": "en", "weight": 5}],
@@ -507,26 +488,36 @@ def test_selection() -> None:
     check("highest total score wins over source weight and name",
           quality.choose_release([lower_score, higher_score], profile)["name"],
           "zzz")
+    profile_exact = build(
+        target_score=20,
+        video_codecs=[{"value": "hevc", "label": "HEVC", "weight": 10}],
+    )
     check("target_met pool beats a higher-scoring fallback",
           quality.choose_release([
-              {"name": "exact", "resolution": "1080p", "source": "web-dl"},
-              {"name": "lower", "resolution": "720p", "source": "bluray"},
-          ], profile)["name"], "exact")
+              {"name": "exact", "resolution": "1080p", "source": "web-dl",
+               "probe": probe(video=[{"codec": "hevc"}])},
+              {"name": "lower", "resolution": "720p", "source": "bluray",
+               "probe": probe(video=[{"codec": "hevc"}])},
+          ], profile_exact)["name"], "exact")
 
     tie_profile = build(
-        target_score=20,
+        target_score=15,
         video_codecs=[{"value": "hevc", "label": "HEVC", "weight": 5}],
     )
-    source_win = quality.choose_release([
+    tie_win = quality.choose_release([
         {
-            "name": "web", "resolution": "1080p", "source": "web-dl",
+            "name": "aaa", "resolution": "1080p", "source": "web-dl",
             "probe": probe(video=[{"codec": "hevc"}]),
         },
-        {"name": "disc", "resolution": "1080p", "source": "bluray"},
+        {
+            "name": "zzz", "resolution": "1080p", "source": "bluray",
+            "probe": probe(video=[{"codec": "hevc"}]),
+        },
     ], tie_profile)
-    check("source weight breaks an equal-score tie", source_win["name"], "disc")
+    check("equal optional score uses the deterministic name tie-break",
+          tie_win["name"], "aaa")
 
-    match_profile = build(target_score=20, upgrades=False)
+    match_profile = build(target_score=10, upgrades=False)
     match_win = quality.choose_release([
         {"name": "weak", "resolution": "1080p", "source": "web-dl",
          "score": 0.5},
@@ -544,7 +535,7 @@ def test_selection() -> None:
     check("size breaks an equal-score tie", size_win["name"], "large")
 
     fallback_profile = build(
-        target_score=30,
+        target_score=25,
         video_codecs=[{"value": "hevc", "label": "HEVC", "weight": 5}],
         audio_codecs=[{"value": "eac3", "label": "E-AC-3", "weight": 10}],
     )
@@ -559,20 +550,26 @@ def test_selection() -> None:
           exact_win["name"], "exact")
     score_win = quality.choose_release([
         {"name": "exact-low", "resolution": "1080p", "source": "web-dl"},
-        {"name": "lower-high", "resolution": "720p", "source": "bluray"},
+        {"name": "lower-high", "resolution": "720p", "source": "bluray",
+         "probe": probe(video=[{"codec": "hevc"}],
+                        audio=[{"codec": "eac3"}])},
     ], fallback_profile)
     check("highest-scoring fallback wins over exact resolution",
           score_win["name"], "lower-high")
 
     no_eligible = quality.choose_release(
-        [{"name": "cam", "resolution": "1080p", "source": "cam"}], profile
+        [{"name": "unknown", "resolution": "unknown", "source": "web-dl"}],
+        profile,
     )
     check("no eligible candidate returns None", no_eligible, None)
 
 
 def test_current_file() -> None:
     section("current file re-scoring and upgrade decisions")
-    profile = build(target_score=25)
+    profile = build(
+        target_score=20,
+        video_codecs=[{"value": "hevc", "label": "HEVC", "weight": 10}],
+    )
     current = {
         "resolution": "1080p",
         "source": "web-dl",
@@ -585,7 +582,10 @@ def test_current_file() -> None:
         )),
     }
     check("current file below target", profile.cutoff_met(current), False)
-    better = {"name": "better", "resolution": "1080p", "source": "bluray"}
+    better = {
+        "name": "better", "resolution": "1080p", "source": "bluray",
+        "probe": probe(video=[{"codec": "hevc"}]),
+    }
     chosen = quality.choose_release([better], profile, current=current)
     check("stale file_score does not block a better release",
           chosen["name"], "better")
@@ -595,10 +595,12 @@ def test_current_file() -> None:
           ], profile, current=current), None)
     check("upgrades disabled never replaces",
           quality.choose_release(
-              [better], build(target_score=25, upgrades=False), current=current
+              [better], build(target_score=20, upgrades=False,
+                              video_codecs=[{"value": "hevc", "weight": 10}]),
+              current=current,
           ), None)
 
-    met = build(target_score=20)
+    met = build(target_score=10)
     check("current file target_met via media_info",
           met.cutoff_met(current), True)
     check("current target_met blocks a higher release",
@@ -617,7 +619,7 @@ def test_current_file() -> None:
     check("media_info resolution overrides a stale column",
           met.cutoff_met(stale_column), True)
 
-    ineligible_current = {"resolution": "1080p", "source": "cam"}
+    ineligible_current = {"resolution": "unknown", "source": "web-dl"}
     chosen = quality.choose_release([better], profile, current=ineligible_current)
     check("ineligible current is replaced", chosen["name"], "better")
 
@@ -650,8 +652,8 @@ def test_api(conn) -> None:
         "qualities", "resolutions", "cutoff", "audio_mode", "subtitle_mode",
     ):
         check_true(f"GET summary has {field}", field in summary)
-    check("GET summary target", summary["target_score"], 20)
-    check("GET summary max", summary["max_score"], 20)
+    check("GET summary target", summary["target_score"], 10)
+    check("GET summary max", summary["max_score"], 10)
 
     builtin_id = summary["id"]
     response = client.patch(f"/api/quality-profiles/{builtin_id}",
@@ -661,19 +663,15 @@ def test_api(conn) -> None:
     check("DELETE builtin refused", response.status_code, 409)
     row = db.get_one(conn, "SELECT * FROM quality_profiles WHERE id = ?",
                      (builtin_id,))
-    check("builtin unchanged after refused PATCH", row["target_score"], 20)
+    check("builtin unchanged after refused PATCH", row["target_score"], 10)
 
     custom = {
         "name": "Profile API",
         "resolution": "1080p",
         "resolution_weight": 12,
-        "quality_options": [
-            {"value": "web-dl", "label": "WEB-DL", "weight": 10},
-            {"value": "bluray", "label": "BluRay", "weight": 15},
-        ],
         "video_codecs": [{"value": "hevc", "label": "HEVC", "weight": 10}],
         "audio_languages": [{"value": "eng", "label": "English", "weight": 5}],
-        "target_score": 30,
+        "target_score": 25,
         "upgrades": False,
     }
 
@@ -682,20 +680,16 @@ def test_api(conn) -> None:
         body.update(overrides or {})
         return client.post("/api/quality-profiles", json=body)
 
-    response = create({"quality_options": []})
-    check("POST missing quality refused", response.status_code, 400)
     response = create({"resolution": "1440p"})
     check("POST unknown resolution refused", response.status_code, 400)
-    response = create({"quality_options": [{"value": "hddvd", "weight": 10}]})
-    check("POST unknown quality refused", response.status_code, 400)
-    response = create({"quality_options": [
-        {"value": "web-dl", "weight": 10},
-        {"value": "web-dl", "weight": 20},
-    ]})
-    check("POST duplicate quality refused", response.status_code, 400)
-    response = create({"quality_options": [{"value": "web-dl", "weight": 0}]})
-    check("POST bad weight refused", response.status_code, 400)
-    response = create({"target_score": 19})
+    response = create({"name": "Legacy source profile",
+                       "quality_options": [{"value": "hddvd", "weight": 10}]})
+    check("POST legacy source options are ignored", response.status_code, 201)
+    if response.status_code == 201:
+        client.delete(
+            f"/api/quality-profiles/{response.get_json()['profile']['id']}"
+        )
+    response = create({"target_score": 9})
     check("POST target below floor refused", response.status_code, 400)
     response = create({"target_score": 99})
     check("POST target above max refused", response.status_code, 400)
@@ -709,21 +703,17 @@ def test_api(conn) -> None:
     check("custom not builtin", created["is_builtin"], False)
     check("custom not default", created["is_default"], False)
     check("custom revision", created["revision"], 1)
-    check("custom max score", created["max_score"], 42)
-    check("custom target", created["target_score"], 30)
+    check("custom max score", created["max_score"], 27)
+    check("custom target", created["target_score"], 25)
     check("custom upgrades", created["upgrades"], False)
     check("custom resolution", created["resolution"], "1080p")
-    check("custom quality round-trip",
-          [(entry["value"], entry["weight"])
-           for entry in created["quality_options"]],
-          [("web-dl", 10), ("bluray", 15)])
+    check("custom source options removed", created["quality_options"], [])
     check("custom optional round-trip",
           created["video_codecs"][0]["value"], "hevc")
     check("custom label from server",
           created["audio_languages"][0]["label"], "English")
     check("legacy resolutions mirror", created["resolutions"], ["1080p"])
-    check("legacy qualities mirror",
-          created["qualities"][0]["sources"], ["web-dl"])
+    check("legacy qualities mirror is empty", created["qualities"], [])
     check("legacy audio mode", created["audio_mode"], "any")
     check("legacy cutoff empty", created["cutoff"], None)
 
@@ -737,21 +727,20 @@ def test_api(conn) -> None:
     check("builtin name is reserved", response.status_code, 409)
 
     response = client.patch(f"/api/quality-profiles/{profile_id}",
-                            json={"target_score": 35})
+                            json={"target_score": 26})
     check("PATCH custom status", response.status_code, 200)
     edited = response.get_json()["profile"]
-    check("PATCH preserves quality options",
-          len(edited["quality_options"]), 2)
-    check("PATCH target updated", edited["target_score"], 35)
-    check("PATCH max preserved", edited["max_score"], 42)
+    check("PATCH keeps source removed", edited["quality_options"], [])
+    check("PATCH target updated", edited["target_score"], 26)
+    check("PATCH max preserved", edited["max_score"], 27)
     check("PATCH revision bumped", edited["revision"], 2)
     response = client.patch(f"/api/quality-profiles/{profile_id}",
-                            json={"video_codecs": [], "target_score": 30})
+                            json={"video_codecs": [], "target_score": 16})
     check("PATCH clears optional section", response.status_code, 200)
     cleared = response.get_json()["profile"]
     check("PATCH cleared optional", cleared["video_codecs"], [])
-    check("PATCH recomputed max after clearing", cleared["max_score"], 32)
-    check("PATCH target kept in range", cleared["target_score"], 30)
+    check("PATCH recomputed max after clearing", cleared["max_score"], 17)
+    check("PATCH target kept in range", cleared["target_score"], 16)
     check("PATCH second revision bump", cleared["revision"], 3)
     response = client.patch(f"/api/quality-profiles/{profile_id}",
                             json={"target_score": 99})
@@ -782,17 +771,17 @@ def test_api(conn) -> None:
     check("GET default follows setting", len(defaults), 1)
     check("GET default is 4K", defaults[0]["builtin_key"], "4k")
     four_k_id = defaults[0]["id"]
-    movies_page = client.get("/movies").get_data(as_text=True)
-    series_page = client.get("/series").get_data(as_text=True)
-    check_true("movies add dialog selects 4K",
+    movies_page = client.get("/movies/add").get_data(as_text=True)
+    series_page = client.get("/series/add").get_data(as_text=True)
+    check_true("movies add page selects 4K",
                re.search(rf'value="{four_k_id}"\s+selected', movies_page) is not None)
-    check_true("series add dialog selects 4K",
+    check_true("series add page selects 4K",
                re.search(rf'value="{four_k_id}"\s+selected', series_page) is not None)
     db.set_setting(conn, "default_profile_key", "1080p")
     hd = next(entry for entry in fresh["profiles"]
               if entry["builtin_key"] == "1080p")
-    movies_page = client.get("/movies").get_data(as_text=True)
-    check_true("movies add dialog selects 1080p after restore",
+    movies_page = client.get("/movies/add").get_data(as_text=True)
+    check_true("movies add page selects 1080p after restore",
                re.search(rf'value="{hd["id"]}"\s+selected', movies_page) is not None)
 
     page = client.get("/settings/profiles")

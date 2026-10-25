@@ -51,20 +51,10 @@ BUILTIN_PROFILES_BY_KEY = {
 
 _BUILTIN_INSERT_ORDER = ("1080p", "4k", "720p")
 
-#: Required quality/source selections for every builtin, in preference order.
-#: The full option vocabulary (including Unknown, Workprint, CAM, Telesync,
-#: Telecine, Screener and R5) is documented in the contracts file; a builtin
-#: selects only these eight, each worth 10 points.
-_BUILTIN_QUALITY_OPTIONS = (
-    ("remux", "REMUX"),
-    ("bluray", "BluRay"),
-    ("bdrip", "BDRip"),
-    ("web-dl", "WEB-DL"),
-    ("webrip", "WEBRip"),
-    ("hdtv", "HDTV"),
-    ("sd-tv", "SD-TV"),
-    ("dvd", "DVD"),
-)
+#: Builtins score the resolution only. Source/quality is not part of a
+#: profile any more: provider catalogues frequently omit it, so it must not
+#: block a release. The minimum/target is therefore 10.
+_BUILTIN_QUALITY_OPTIONS: tuple[tuple[str, str], ...] = ()
 
 #: Settings introduced with schema v5. They are also seeded in schema.sql for
 #: fresh databases; this copy lets the v5 migration and startup repair run
@@ -181,9 +171,8 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 def _builtin_criteria() -> dict:
     """The canonical criteria_json shared by all three builtin profiles.
 
-    Builtins configure only the mandatory resolution and eight quality
-    selections. Optional sections start empty, so their maximum and target are
-    both the mandatory base score of 20.
+    Builtins configure only the mandatory resolution. Optional sections start
+    empty, so their maximum and target are both the resolution weight of 10.
     """
     return {
         "version": 1,
@@ -271,7 +260,7 @@ def ensure_builtin_profiles(conn: sqlite3.Connection, *,
                  resolution, resolution_weight, target_score, max_score,
                  revision, updated_at, criteria_json)
             VALUES (?, ?, ?, 1, ?, 'any', '[]', 'any', '[]', 1, ?,
-                    ?, 1, ?, 10, 20, 20, 1, ?, ?)
+                    ?, 1, ?, 10, 10, 10, 1, ?, ?)
             """,
             (
                 spec["name"], json.dumps([resolution]), resolution,
@@ -287,7 +276,7 @@ def ensure_builtin_profiles(conn: sqlite3.Connection, *,
                 qualities = ?, audio_mode = 'any', audio_languages = '[]',
                 subtitle_mode = 'any', subtitle_languages = '[]',
                 probe_required = 1, is_builtin = 1, resolution = ?,
-                resolution_weight = 10, target_score = 20, max_score = 20,
+                resolution_weight = 10, target_score = 10, max_score = 10,
                 revision = 1, updated_at = COALESCE(updated_at, ?),
                 criteria_json = ?
             WHERE builtin_key = ?
@@ -683,7 +672,7 @@ def migrate(conn: sqlite3.Connection) -> None:
             ("quality_profiles", "is_builtin", "INTEGER NOT NULL DEFAULT 0"),
             ("quality_profiles", "resolution", "TEXT"),
             ("quality_profiles", "resolution_weight", "INTEGER NOT NULL DEFAULT 10"),
-            ("quality_profiles", "target_score", "INTEGER NOT NULL DEFAULT 20"),
+            ("quality_profiles", "target_score", "INTEGER NOT NULL DEFAULT 10"),
             ("quality_profiles", "max_score", "INTEGER"),
             ("quality_profiles", "revision", "INTEGER NOT NULL DEFAULT 1"),
             ("quality_profiles", "updated_at", "INTEGER"),

@@ -352,11 +352,42 @@ def probe_movie_candidates(movie_id: int):
     try:
         payload = request.get_json(silent=True)
         refresh = _bool(payload.get("refresh")) if isinstance(payload, dict) else False
+        all_candidates = (_bool(payload.get("all")) if isinstance(payload, dict)
+                          else False)
         result = jobs.submit_and_wait(
-            "probe_movie_candidates", {"movie_id": movie_id, "refresh": refresh},
-            priority=50, dedupe_key=f"probe_movies:{movie_id}", timeout=3600.0,
+            "probe_movie_candidates", {
+                "movie_id": movie_id, "refresh": refresh, "all": all_candidates,
+            },
+            priority=50,
+            dedupe_key=f"probe_movies:{movie_id}:{'all' if all_candidates else 'batch'}",
+            timeout=3600.0,
         )
         return jsonify({"ok": True, **(result or {})})
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.post("/movies/<int:movie_id>/refind")
+def refind_movie_candidates(movie_id: int):
+    conn = _conn()
+    try:
+        return jsonify({"ok": True, **library.refind_movie_candidates(conn, movie_id)})
+    except LookupError as exc:
+        return _fail(str(exc), 404)
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.post("/movies/<int:movie_id>/remove-and-refind")
+def remove_movie_download_and_refind(movie_id: int):
+    conn = _conn()
+    try:
+        return jsonify({
+            "ok": True,
+            **library.remove_movie_download_and_refind(conn, movie_id),
+        })
+    except LookupError as exc:
+        return _fail(str(exc), 404)
     except Exception as exc:
         return _error(exc)
 
@@ -688,6 +719,58 @@ def probe_episode_candidate(series_id: int, episode_id: int):
             timeout=600.0,
         ) or {}
         return jsonify({"ok": True, **(result or {})})
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.post("/series/<int:series_id>/episodes/<int:episode_id>/candidates/probe-all")
+def probe_episode_candidates(series_id: int, episode_id: int):
+    conn = _conn()
+    try:
+        payload = _payload()
+        all_candidates = _bool(payload.get("all"), True)
+        result = jobs.submit_and_wait(
+            "probe_episode_candidates", {
+                "series_id": series_id, "episode_id": episode_id,
+                "refresh": _bool(payload.get("refresh"), True),
+                "all": all_candidates,
+            },
+            priority=50,
+            dedupe_key=(f"probe_episode_candidates:{series_id}:{episode_id}:"
+                        f"{'all' if all_candidates else 'batch'}"),
+            timeout=3600.0,
+        ) or {}
+        return jsonify({"ok": True, **(result or {})})
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.post("/series/<int:series_id>/episodes/<int:episode_id>/refind")
+def refind_episode_candidates(series_id: int, episode_id: int):
+    conn = _conn()
+    try:
+        return jsonify({
+            "ok": True,
+            **library.refind_episode_candidates(conn, series_id, episode_id),
+        })
+    except LookupError as exc:
+        return _fail(str(exc), 404)
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.post("/series/<int:series_id>/episodes/<int:episode_id>/remove-and-refind")
+def remove_episode_download_and_refind(series_id: int, episode_id: int):
+    conn = _conn()
+    try:
+        return jsonify({
+            "ok": True,
+            **library.remove_episode_download_and_refind(
+                conn, series_id, episode_id,
+            ),
+        })
+    except LookupError as exc:
+        return _fail(str(exc), 404)
     except Exception as exc:
         return _error(exc)
 

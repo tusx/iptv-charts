@@ -354,6 +354,11 @@
                                     title="Pick a specific provider episode">
                               {{ icon('list-check') }} Manual
                             </button>
+                            <button class="btn btn-sm btn-ghost" type="button"
+                                    data-episode-all="{{ episode.id }}"
+                                    title="Show every candidate for this episode">
+                              {{ icon('layer-group') }} All candidates
+                            </button>
                             {% if episode.stage_work_id and (episode.stage == 'failed' or episode.stage_status in ('retry', 'failed_stopped')) %}
                               <button class="btn btn-sm btn-ghost" type="button"
                                       data-episode-retry="{{ episode.id }}"
@@ -449,9 +454,14 @@
       </div>
       <div class="release-tools">
         <button class="btn btn-primary btn-sm" type="button" id="episode-all-candidates">Show all candidates</button>
-        <span class="hint">Browse every provider episode, including unprobed and outside-profile versions.</span>
+        <button class="btn btn-sm" type="button" id="episode-refind">ReFind candidates</button>
+        <button class="btn btn-sm" type="button" id="episode-reprobe-all">Re-Probe all</button>
+        <button class="btn btn-sm btn-danger" type="button" id="episode-remove-refind">Remove file &amp; re-find</button>
+        <span class="hint">Search every provider episode, including unprobed and outside-profile versions.</span>
       </div>
-      <p class="hint" id="episode-release-status" role="status"></p>
+      <p class="hint" id="episode-release-status" role="status">
+        Type at least two characters. This searches all playlist items and may take some time.
+      </p>
       <div class="release-list" id="episode-release-list"></div>
     </div>
     <div class="dialog-foot">
@@ -534,6 +544,7 @@
 
   <script>
     window.SERIES_ID = {{ series.id }};
+    window.SERIES_TITLE = {{ series.title|tojson }};
     window.SERIES_STAGE_URL = {{ (stage.stage_api_url or '')|tojson }};
     window.SERIES_STAGE_SIGNATURE = {{ stage.signature|tojson }};
   </script>

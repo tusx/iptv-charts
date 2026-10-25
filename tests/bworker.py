@@ -1270,6 +1270,58 @@ def test_progress_watcher() -> None:
     check("progress watcher stopped after join", not watcher.is_alive())
 
 
+def test_candidate_activity() -> None:
+    conn = db.connect()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO movies (tmdb_id, title, added_at) VALUES (?, ?, ?)",
+            (987001, "Candidate Activity Movie", int(time.time())),
+        )
+        movie_id = int(cursor.lastrowid)
+        conn.commit()
+        store.ensure_movie_work(conn, movie_id)
+        work = store.get_work_by_key(conn, f"movie:{movie_id}:search")
+        activity = activity_log.MemoryActivityLog()
+        runner = bworker.Bworker(activity=activity, stop=threading.Event())
+        ctx = bworker.WorkContext(
+            runner=runner, conn=conn, work=work, activity_id=None,
+            stop=runner.stop,
+        )
+        ctx.candidate_event({
+            "event": "probe_started", "candidate_id": 7,
+            "message": "Checking candidate “Fixture 1080p”",
+        })
+        entries = activity.recent(5)
+        running = next((entry for entry in entries
+                        if entry.get("status") == "running"), None)
+        check("candidate activity shows a running probe", running is not None)
+        check("candidate activity names the movie target",
+              running and running.get("target", {}).get("label")
+              == "Candidate Activity Movie",
+              repr(running))
+        ctx.candidate_event({
+            "event": "probe_skipped", "status": "skipped",
+            "candidate_id": 7,
+            "message": "Skipped “Fixture 1080p”: resolution unknown",
+        })
+        entries = activity.recent(5)
+        finished = next((entry for entry in entries
+                         if entry.get("candidate_id") == 7
+                         or entry.get("status") == "skipped"), None)
+        # The in-place update keeps one entry, not a second finished row.
+        check("candidate probe result updates the same entry",
+              finished and finished.get("status") == "skipped",
+              repr(entries))
+        check("candidate skip reason is in the feed",
+              finished and "resolution unknown" in str(finished.get("message")),
+              repr(finished))
+        check("candidate skip has a finished timestamp",
+              finished and finished.get("finished_at") is not None,
+              repr(finished))
+    finally:
+        conn.close()
+
+
 def main() -> int:
     db.init_db()
     sections = [
@@ -1286,6 +1338,7 @@ def main() -> int:
         ("policy toggles and scheduler", test_policy_toggle_and_scheduler),
         ("status and compatibility", test_status_and_compat),
         ("reset all", test_reset_all),
+        ("candidate activity", test_candidate_activity),
     ]
     for name, func in sections:
         run_section(name, func)

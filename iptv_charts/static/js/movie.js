@@ -9,6 +9,7 @@
   } = Manager;
 
   const movieId = window.MOVIE_ID;
+  const movieTitle = window.MOVIE_TITLE || '';
   if (!movieId) return;
 
   const status = $('#movie-action-status');
@@ -171,23 +172,104 @@
     }
   }
 
-  function openManualSearch() {
-    releaseQuery.value = '';
-    setAllCandidatesMode(false);
-    open(releasesDialog);
-    loadReleases('');
+  function releaseSpinner() {
+    const icon = element('i', 'fa-solid fa-spinner fa-spin');
+    icon.setAttribute('aria-hidden', 'true');
+    return icon;
   }
 
-  $('#movie-manual-search')?.addEventListener('click', openManualSearch);
-  $('#movie-manual-search-section')?.addEventListener('click', openManualSearch);
+  function showSearchHint() {
+    releaseList.replaceChildren();
+    setStatus(releaseStatus,
+      'Type at least two characters. This searches all playlist items and may take some time.');
+  }
+
+  function openManualSearch({ all = false, query = '' } = {}) {
+    releaseQuery.value = query;
+    setAllCandidatesMode(all);
+    open(releasesDialog);
+    releaseQuery.focus();
+    if (query.trim().length >= 2) {
+      loadReleases(query.trim());
+    } else {
+      showSearchHint();
+    }
+  }
+
+  function openAllCandidates() {
+    openManualSearch({ all: true, query: movieTitle });
+  }
+
+  $('#movie-manual-search')?.addEventListener('click', () => openManualSearch());
+  $('#movie-manual-search-section')?.addEventListener('click', () => openManualSearch());
+  $('#movie-show-all')?.addEventListener('click', openAllCandidates);
+  $('#movie-show-all-section')?.addEventListener('click', openAllCandidates);
   allCandidatesButton?.addEventListener('click', () => {
-    setAllCandidatesMode(!allCandidatesMode);
-    loadReleases(releaseQuery.value.trim());
+    const enabled = !allCandidatesMode;
+    setAllCandidatesMode(enabled);
+    if (enabled && releaseQuery.value.trim().length < 2) {
+      releaseQuery.value = movieTitle;
+    }
+    const query = releaseQuery.value.trim();
+    if (query.length >= 2) loadReleases(query);
+    else showSearchHint();
   });
   releaseQuery.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
-      loadReleases(releaseQuery.value.trim());
+      const query = releaseQuery.value.trim();
+      if (query.length >= 2) loadReleases(query);
+      else showSearchHint();
+    }
+  });
+
+  $('#movie-refind')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    setStatus(candidateStatus, 'Resetting the candidate scan and queuing a fresh search…');
+    try {
+      await post(`/api/movies/${movieId}/refind`);
+      setStatus(candidateStatus, 'Candidate scan reset; a fresh search is queued.', 'ok');
+      window.setTimeout(() => window.location.reload(), 800);
+    } catch (error) {
+      setStatus(candidateStatus, error.message, 'bad');
+      button.disabled = false;
+    }
+  });
+
+  $('#movie-reprobe-all')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    setStatus(candidateStatus, 'Queueing ffprobe for every matching candidate…');
+    try {
+      const result = await post(`/api/movies/${movieId}/candidates/probe-all`, {
+        all: true,
+        refresh: true,
+      });
+      setStatus(candidateStatus,
+        `Probed ${result.probed || 0} candidate(s); ${result.failed || 0} failed.`, 'ok');
+      window.setTimeout(() => window.location.reload(), 900);
+    } catch (error) {
+      setStatus(candidateStatus, error.message, 'bad');
+      button.disabled = false;
+    }
+  });
+
+  $('#movie-remove-refind')?.addEventListener('click', async (event) => {
+    if (!window.confirm(
+      'Delete the downloaded movie file and search again? The library entry and '
+      + 'metadata are kept; the file and candidate scan are rebuilt.',
+    )) return;
+    const button = event.currentTarget;
+    button.disabled = true;
+    setStatus(candidateStatus, 'Removing the file and resetting the candidate scan…');
+    try {
+      await post(`/api/movies/${movieId}/remove-and-refind`);
+      setStatus(candidateStatus, 'File removed; a fresh search is queued.', 'ok');
+      window.setTimeout(() => window.location.reload(), 900);
+    } catch (error) {
+      setStatus(candidateStatus, error.message, 'bad');
+      button.disabled = false;
     }
   });
 
@@ -313,21 +395,31 @@
   });
 
   // ------------------------------------------------------------ manual search
-  const debouncedLoad = debounce(() => loadReleases(releaseQuery.value.trim()), 300);
+  const debouncedLoad = debounce(() => {
+    const query = releaseQuery.value.trim();
+    if (query.length >= 2) loadReleases(query);
+    else {
+      releaseToken += 1;
+      showSearchHint();
+    }
+  }, 300);
   releaseQuery.addEventListener('input', debouncedLoad);
 
   async function loadReleases(query) {
+    if (!String(query || '').trim()) {
+      showSearchHint();
+      return;
+    }
     const request = ++releaseToken;
     const manualMode = allCandidatesMode;
-    releaseList.replaceChildren(element(
-      'p', 'muted',
-      manualMode
-        ? 'Loading every catalog candidate…'
-        : 'Searching your playlists and probing the best releases…',
-    ));
-    setStatus(releaseStatus, manualMode
-      ? 'All candidates are shown, including ones outside the quality profile.'
-      : '');
+    const loading = element('p', 'muted');
+    loading.append(
+      releaseSpinner(),
+      document.createTextNode(' Searching all playlist items — this can take some time…'),
+    );
+    releaseList.replaceChildren(loading);
+    setStatus(releaseStatus,
+      'Searching all playlist items. This can take some time; results appear when the search finishes.');
     try {
       const params = new URLSearchParams();
       if (query) params.set('q', query);

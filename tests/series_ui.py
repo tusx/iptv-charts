@@ -436,6 +436,7 @@ def main() -> int:
         "series-metadata-search", "series-metadata-status",
         "series-metadata-results", "episode-remove-dialog",
         "episode-remove-label", "episode-remove-confirm",
+        "episode-refind", "episode-reprobe-all", "episode-remove-refind",
     ):
         contains(f"new id {element_id}", page, f'id="{element_id}"')
     refresh_at = page.find('id="series-refresh"')
@@ -743,6 +744,12 @@ def main() -> int:
     contains("js manual episode override", js, "force: manualMode && !release.allowed")
     contains("js episode probe endpoint", js, "candidates/probe")
     contains("js renders probe media facts", js, "mediaFacts(release)")
+    contains("js opens all candidates next to manual", js, "data-episode-all")
+    contains("js refinds episode candidates", js, "/refind`")
+    contains("js reprobes all episode candidates", js, "candidates/probe-all")
+    contains("js remove and refind episode", js, "/remove-and-refind")
+    contains("js waits for a search query", js, "query.length >= 2")
+    contains("js shows a loading spinner", js, "fa-spinner")
     check("js has no broken task call", "/api/tasks/" not in js)
     check("js has no external URL", "http://" not in js and "https://" not in js)
     contains("css accordion", css, ".series-accordions")

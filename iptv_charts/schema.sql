@@ -275,7 +275,7 @@ CREATE TABLE IF NOT EXISTS quality_profiles (
                resolution IN ('2160p', '1080p', '720p', '480p', '360p')),
     resolution_weight INTEGER NOT NULL DEFAULT 10,
     -- target_score is the old plan's min_score: minimum score for target_met.
-    target_score      INTEGER NOT NULL DEFAULT 20,
+    target_score      INTEGER NOT NULL DEFAULT 10,
     -- Computed maximum score; stored so the API/UI can show it without
     -- re-deriving the algebra. NULL for a legacy row until saved.
     max_score         INTEGER,

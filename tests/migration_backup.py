@@ -182,15 +182,15 @@ def test_fresh_v5() -> None:
                   {row["is_builtin"] for row in builtins.values()}, {1})
             check("builtins have upgrades on",
                   {row["upgrades"] for row in builtins.values()}, {1})
-            check("builtins target and max are 20",
+            check("builtins target and max are 10",
                   {(row["target_score"], row["max_score"])
-                   for row in builtins.values()}, {(20, 20)})
+                   for row in builtins.values()}, {(10, 10)})
             check("builtin resolution weight is 10",
                   {row["resolution_weight"] for row in builtins.values()}, {10})
             for key, row in builtins.items():
                 criteria = json.loads(row["criteria_json"])
-                check(f"{key} has eight source choices",
-                      len(criteria["quality_options"]), 8)
+                check(f"{key} has no source choices",
+                      criteria["quality_options"], [])
                 check(f"{key} leaves optional sections empty",
                       [section_name for section_name in (
                           "video_codecs", "audio_codecs", "audio_languages",
@@ -509,9 +509,9 @@ def test_builtin_repair() -> None:
                   four_k["resolution"], "2160p")
             check("damaged builtin weights repaired",
                   (four_k["resolution_weight"], four_k["target_score"],
-                   four_k["max_score"]), (10, 20, 20))
+                   four_k["max_score"]), (10, 10, 10))
             check("damaged builtin criteria repaired",
-                  len(json.loads(four_k["criteria_json"])["quality_options"]), 8)
+                  json.loads(four_k["criteria_json"])["quality_options"], [])
             names = [row["name"] for row in conn.execute(
                 "SELECT name FROM quality_profiles ORDER BY id")]
             check("canonical names are unique", len(names), len(set(names)))

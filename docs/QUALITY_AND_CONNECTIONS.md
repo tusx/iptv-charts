@@ -31,31 +31,20 @@ A 0.8.0 profile has two mandatory facts and six optional sections:
 
 ### Mandatory matching
 
-1. **Resolution.** The candidate's resolution must equal the profile's
-   resolution. A lower resolution is eligible only when `upgrades` is enabled;
-   a higher resolution, an unknown resolution, or no profile resolution is
-   rejected.
-2. **Quality/source.** The candidate's source must match one of the selected
-   `quality_options`. The best matching option (highest weight) contributes.
-   An unknown source is rejected unless the `unknown` option is selected.
+1. **Resolution.** The candidate must use the profile's selected resolution.
+   A lower resolution is eligible only when `upgrades` is enabled; a higher
+   resolution, an unknown resolution, or no profile resolution is rejected.
+   Source/quality is deliberately not part of a profile: provider metadata is
+   frequently missing, so it must not block a release.
 
-These two matches form the **base score**:
+The resolution match sets the **base score**:
 
 ```
-base_score = resolution_weight + best matching quality option weight
+base_score = resolution_weight
 ```
 
-The default weight for both parts is 10, so the base score is normally 20.
-Weights are whole numbers from **1 to 1000**.
-
-The complete source vocabulary, in display order, is:
-
-`REMUX`, `BluRay`, `BDRip`, `WEB-DL`, `WEBRip`, `HDTV`, `SD-TV`, `DVD`,
-`Unknown`, `Workprint`, `CAM`, `Telesync`, `Telecine`, `Screener`, `R5`.
-
-Source detection reads the provider release name with word boundaries, so
-titles such as "Camelot" are not treated as CAM. The probe can correct the
-resolution; the source is always read from the release/provider name.
+The default resolution weight is 10, so the minimum score is 10. Weights are
+whole numbers from **1 to 1000**.
 
 ### Optional sections
 
@@ -78,11 +67,11 @@ by `languages.normalise()`.
 `max_score` is computed as the mandatory maximum plus each optional section's
 maximum:
 
-- mandatory maximum = resolution weight + highest selected quality option;
+- mandatory maximum = resolution weight;
 - exclusive section maximum = highest selected option in that section;
 - multi section maximum = sum of every selected option in that section.
 
-`target_score` must be between **20** and `max_score`. It defaults to
+`target_score` must be between **10** and `max_score`. It defaults to
 `max_score`.
 
 ### Target and fallback
@@ -100,10 +89,10 @@ Selection follows this order:
 1. Among eligible candidates, target-met candidates always win.
 2. If none meets the target, the best eligible fallback is chosen after the
    candidate pool is exhausted.
-3. Ties are broken by score, exact resolution, source weight, provider
-   match score, size and finally name (deterministic).
-4. A candidate that fails the mandatory resolution or source rules is never
-   downloaded. If nothing is eligible, the item stays missing/no-candidates.
+3. Ties are broken by score, exact resolution, provider match score, size and
+   finally name (deterministic).
+4. A candidate that fails the mandatory resolution rule is never downloaded.
+   If nothing is eligible, the item stays missing/no-candidates.
 
 A downloaded fallback is stored as `awaiting_upgrade`. The interval search can
 later replace it only with a better score; a target-met file is not replaced
@@ -123,25 +112,25 @@ longer selected), any eligible candidate can replace it.
 
 Three profiles are inserted and repaired at startup:
 
-| Name | Resolution | Selected quality/source options |
+| Name | Resolution | Target / maximum |
 |---|---|---|
-| **4K** | 2160p | REMUX, BluRay, BDRip, WEB-DL, WEBRip, HDTV, SD-TV, DVD |
-| **1080p** (default) | 1080p | the same eight |
-| **720p** | 720p | the same eight |
+| **4K** | 2160p | 10 / 10 |
+| **1080p** (default) | 1080p | 10 / 10 |
+| **720p** | 720p | 10 / 10 |
 
-The eight options are each worth 10, the resolution is worth 10, no optional
-sections are selected, and both target and maximum are **20**. Built-ins are
+The resolution is worth 10, no optional sections are selected, and both target
+and maximum are **10**. Built-ins are
 immutable: edit/delete requests return HTTP 409 and the names `4K`, `1080p` and
 `720p` are reserved for them. Startup repairs a missing or damaged built-in row
 without deleting a custom profile that happens to use a reserved name; the
 custom row is renamed instead.
 
 Custom profiles are created, edited and deleted through the profile API and the
-builder page. Validation rejects an unknown resolution, an empty quality
-selection, duplicate or unknown options, weights outside 1–1000, a maximum
-below 20, and a target outside 20–maximum. The default profile used by add and
-import dialogs is one of the built-ins and starts at 1080p; a custom profile is
-still selectable per movie or series.
+builder page. Validation rejects an unknown resolution, duplicate or unknown
+optional options, weights outside 1–1000, a maximum below 10, and a target
+outside 10–maximum. The default profile used by the add pages and import flow
+is one of the built-ins and starts at 1080p; a custom profile is still
+selectable per movie or series.
 
 The legacy ordered-quality columns remain only for database compatibility and
 old backup readers. They are not part of the 0.8.0 model and are not exposed as

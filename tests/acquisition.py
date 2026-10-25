@@ -36,6 +36,7 @@ sys.path.insert(0, str(ROOT))
 from iptv_charts import (  # noqa: E402
     acquisition,
     bworker_store as store,
+    config,
     db,
     downloader,
     items,
@@ -531,9 +532,36 @@ def test_batch_and_probe_limits() -> None:
         add_item(source, "vod", f"bounds-{index}",
                  f"Bounds Movie (2020) 720p WEB-DL {index}", tmdb_id="801")
         PROBE_RESULTS[(source, str(index))] = probe_payload("720p")
-    first = acquisition.run_movie_iteration(conn, get_movie(movie),
-                                            now=3_000_000)
+    events: list[dict] = []
+    first = acquisition.run_movie_iteration(
+        conn, get_movie(movie), now=3_000_000, on_event=events.append,
+    )
     eq("Default discovery batch is 25", first["candidates"]["candidates"], 25)
+    check("Candidate probe starts are reported",
+          any(event.get("event") == "probe_started" for event in events),
+          repr(events[:2]))
+    check("Candidate probe results are reported",
+          any(event.get("event") == "probe_finished" for event in events),
+          repr(events[:4]))
+    deferred = [event for event in events
+                if event.get("event") == "probe_skipped"
+                and "probe batch limit" in str(event.get("reason") or "")]
+    check("Candidates beyond the probe limit report a skip reason",
+          len(deferred) >= 20, str(len(deferred)))
+    check("Deferred activity names the candidate",
+          all("Deferred" in str(event.get("message") or "") for event in deferred),
+          repr(deferred[:2]))
+    diagnostics = library.movie_candidate_diagnostics(conn, movie)
+    check("Candidate diagnostics list every scanned candidate",
+          len(diagnostics["candidates"]), 25)
+    pending_diagnostics = [row for row in diagnostics["candidates"]
+                           if row["status"] == "pending"]
+    check("Pending candidates explain the probe limit",
+          pending_diagnostics
+          and all("probe batch limit" in row["display_reason"]
+                  for row in pending_diagnostics),
+          repr([(row["status"], row["display_reason"])
+                for row in pending_diagnostics[:2]]))
     check("At most three probes in one iteration", len(PROBE_CALLS) <= 3,
           str(len(PROBE_CALLS)))
     check("Discovery batch is reported in progress",
@@ -640,7 +668,7 @@ def test_epoch_and_fingerprint() -> None:
 def _audio_profile(name: str, *, target: int, upgrades=True) -> int:
     return add_profile(
         name,
-        quality_options=(("web-dl", "WEB-DL", 10),),
+        resolution_weight=20,
         audio_codecs=(("atmos", "Dolby Atmos", 10), ("ac3", "AC-3", 5)),
         target=target, upgrades=upgrades,
     )
@@ -650,7 +678,7 @@ def test_target_over_fallback() -> None:
     section("Selection: target_met wins over an earlier fallback")
     source = add_source("m3u", "target-source")
     profile = add_profile(
-        "Strict Target", quality_options=(("web-dl", "WEB-DL", 10),),
+        "Strict Target", resolution_weight=20,
         audio_codecs=(("atmos", "Dolby Atmos", 10),), target=30,
     )
     movie = add_movie(title="Target Movie", year=2020, tmdb_id=1001,
@@ -695,8 +723,7 @@ def test_fallback_only_after_exhaustion() -> None:
     section("Selection: fallback waits for the candidate pool to exhaust")
     source = add_source("m3u", "fallback-source")
     profile = add_profile("Fallback Profile", upgrades=True,
-                          quality_options=(("web-dl", "WEB-DL", 10),),
-                          target=20)
+                          resolution_weight=20, target=20)
     movie = add_movie(title="Fallback Movie", year=2020, tmdb_id=1101,
                       profile_id=profile)
     reset_runtime()
@@ -753,7 +780,7 @@ def test_highest_score() -> None:
     if outcome["queued"]:
         eq("Highest score chosen", outcome["download"]["provider_remote_id"],
            "highest-atmos")
-        eq("Chosen score", json.loads(outcome["download"]["score_details"])["score"], 30)
+        eq("Chosen score", json.loads(outcome["download"]["score_details"])["score"], 20)
 
 
 def test_never_redownload_or_downgrade() -> None:
@@ -812,7 +839,7 @@ def test_never_redownload_or_downgrade() -> None:
     # Upgrades disabled: even a lower-scoring current file is kept.
     movie3 = add_movie(title="Locked Movie", year=2020, tmdb_id=1303,
                        profile_id=add_profile("Locked Profile", upgrades=False,
-                                              target=20),
+                                              resolution_weight=20, target=20),
                        file_path="/media/locked.mkv", main_source_id=source,
                        main_remote_id="locked-old",
                        media_info=json.dumps(probe_payload(
@@ -835,7 +862,7 @@ def test_never_redownload_or_downgrade() -> None:
 def test_stale_candidates() -> None:
     section("Selection: stale catalog rows are rejected")
     source = add_source("m3u", "stale-source")
-    profile = add_profile("Stale Profile", target=30,
+    profile = add_profile("Stale Profile", target=30, resolution_weight=20,
                           audio_codecs=(("atmos", "Dolby Atmos", 10),))
     movie = add_movie(title="Stale Movie", year=2020, tmdb_id=1401,
                       profile_id=profile, file_path="/media/stale.mkv",
@@ -1080,6 +1107,11 @@ def test_manual_search_and_grab() -> None:
           selected["candidate"]["probe_ok"])
     eq("Manual selection keeps the probed facts",
        selected["candidate"]["resolution"], "1080p")
+    reprobe = library.probe_movie_candidates(
+        conn, movie, refresh=True, all_candidates=True,
+    )
+    check("Movie Re-Probe all probes every matching candidate",
+          reprobe["probed"] >= 3, repr(reprobe))
     conn.execute("UPDATE movies SET candidate_source_id = NULL, "
                  "candidate_remote_id = NULL, candidate_mode = NULL, "
                  "candidate_name = NULL, candidate_selected_at = NULL WHERE id = ?",
@@ -1145,11 +1177,81 @@ def test_manual_episode_paths() -> None:
         conn, series, episode, source, "manual-series", "41",
     )
     check("Episode candidate probe returns facts", probe_result["probe"]["ok"])
+    episode_reprobe = library.probe_episode_candidates(
+        conn, series, episode, refresh=True, all_candidates=True,
+    )
+    check("Episode Re-Probe all probes every provider candidate",
+          episode_reprobe["probed"] >= 1, repr(episode_reprobe))
     forced = library.grab_episode(
         conn, series, episode, source, "manual-series", "41", force=True,
     )
     eq("Forced episode grab is labelled as a manual override",
        forced["reason"], "manual-override")
+
+
+def test_refind_and_remove() -> None:
+    section("ReFind, remove downloaded file and refind")
+    source = add_source("m3u", "refind-source")
+    movie = add_movie(title="Refind Movie", year=2020, tmdb_id=1901)
+    add_item(source, "vod", "refind-1",
+             "Refind Movie (2020) 1080p WEB-DL", tmdb_id="1901")
+    reset_runtime()
+    PROBE_RESULTS[(source, "refind-1")] = probe_payload("1080p")
+    outcome = acquisition.run_movie_iteration(conn, get_movie(movie),
+                                              now=10_000_000)
+    work_id = int(outcome["work_id"])
+    check("A scan exists before refind",
+          len(scan_rows(work_id)) > 0 and len(candidate_rows_for(work_id)) > 0)
+    result = library.refind_movie_candidates(conn, movie)
+    eq("Refind returns the work unit", result["work_id"], work_id)
+    eq("Refind deletes the scan", len(scan_rows(work_id)), 0)
+    eq("Refind deletes candidates", len(candidate_rows_for(work_id)), 0)
+    work = store.get_work(conn, work_id)
+    eq("Refind makes the work pending", work["status"], "pending")
+    check("Refind makes the work due now",
+          int(work["next_run_at"] or 0) <= int(time.time()) + 1)
+
+    movie_dir = config.movie_library_dir() / "Refind Movie (2020)"
+    movie_dir.mkdir(parents=True, exist_ok=True)
+    movie_file = movie_dir / "Refind Movie (2020) [1080p].mkv"
+    movie_file.write_bytes(b"fixture")
+    conn.execute(
+        "UPDATE movies SET file_path = ?, file_size = 7, file_score = 10, "
+        "main_source_id = ?, main_remote_id = 'refind-1' WHERE id = ?",
+        (str(movie_file), source, movie),
+    )
+    conn.commit()
+    removed = library.remove_movie_download_and_refind(conn, movie)
+    check("Remove-and-refind deletes the movie file", not movie_file.exists())
+    eq("Remove-and-refind clears the movie path",
+       removed["movie"]["file_path"], None)
+    eq("Remove-and-refind clears the movie score",
+       removed["movie"]["file_score"], None)
+    eq("Remove-and-refind clears the candidate scan",
+       len(scan_rows(work_id)), 0)
+
+    series = add_series(title="Refind Series", tmdb_id=1902)
+    episode = add_episode(series, 1, 1)
+    series_dir = config.series_library_dir() / "Refind Series (2020)" / "Season 01"
+    series_dir.mkdir(parents=True, exist_ok=True)
+    episode_file = series_dir / "Refind Series - S01E01.mkv"
+    episode_file.write_bytes(b"fixture")
+    conn.execute(
+        "UPDATE series_episodes SET file_path = ?, file_size = 7, "
+        "file_score = 10 WHERE id = ?", (str(episode_file), episode),
+    )
+    conn.commit()
+    episode_work = store.get_work_by_key(conn, f"episode:{episode}:search")
+    library.refind_episode_candidates(conn, series, episode)
+    check("Episode refind resets its work",
+          store.get_work(conn, int(episode_work["id"]))["status"] == "pending")
+    removed_episode = library.remove_episode_download_and_refind(
+        conn, series, episode,
+    )
+    check("Remove-and-refind deletes the episode file",
+          not episode_file.exists())
+    eq("Remove-and-refind clears the episode path",
+       removed_episode["episode"]["file_path"], None)
 
 
 # ===========================================================================
@@ -1179,6 +1281,7 @@ def main() -> int:
         test_episode_library_hook,
         test_manual_search_and_grab,
         test_manual_episode_paths,
+        test_refind_and_remove,
     ]
     for test in tests:
         try:

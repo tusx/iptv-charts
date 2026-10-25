@@ -85,7 +85,7 @@
     <div class="home-card-actions">
       <a class="btn btn-primary btn-sm" href="{{ url_for('manager.movies') }}">{{ icon('film') }} Open movies</a>
       {% if tmdb_configured %}
-        <a class="btn btn-sm" href="{{ url_for('manager.movies') }}?add=1">{{ icon('plus') }} Add movie</a>
+        <a class="btn btn-sm" href="{{ url_for('manager.add_movie_page') }}">{{ icon('plus') }} Add movie</a>
       {% else %}
         <a class="btn btn-sm" href="{{ url_for('settings') }}#metadata-settings">{{ icon('key') }} Set up TMDB</a>
       {% endif %}
@@ -119,7 +119,7 @@
     <div class="home-card-actions">
       <a class="btn btn-primary btn-sm" href="{{ url_for('manager.series') }}">{{ icon('tv') }} Open series</a>
       {% if tmdb_configured %}
-        <a class="btn btn-sm" href="{{ url_for('manager.series') }}?add=1">{{ icon('plus') }} Add series</a>
+        <a class="btn btn-sm" href="{{ url_for('manager.add_series_page') }}">{{ icon('plus') }} Add series</a>
       {% else %}
         <a class="btn btn-sm" href="{{ url_for('settings') }}#metadata-settings">{{ icon('key') }} Set up TMDB</a>
       {% endif %}

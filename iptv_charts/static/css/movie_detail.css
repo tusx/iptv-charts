@@ -270,6 +270,29 @@
 #movie-metadata-dialog .dialog-options .field { flex: 1 1 220px; }
 #movie-metadata-dialog .dialog-options .btn { align-self: end; }
 
+.candidate-check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.candidate-check {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+}
+.candidate-check-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.candidate-check-main strong { overflow-wrap: anywhere; font-size: 13px; }
+
 @media (max-width: 860px) {
   .movie-detail-grid { grid-template-columns: 1fr; }
   .movie-detail-side { position: static; }

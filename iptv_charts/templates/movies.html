@@ -15,7 +15,7 @@
   </div>
   <div class="page-actions">
     {% if tmdb_configured %}
-      <button type="button" class="btn btn-primary" id="add-movie-btn">Add movie</button>
+      <a class="btn btn-primary" id="add-movie-btn" href="{{ url_for('manager.add_movie_page') }}">Add movie</a>
     {% else %}
       <a class="btn" href="{{ url_for('settings') }}#metadata-settings">Set up TMDB</a>
     {% endif %}
@@ -74,49 +74,6 @@
 {% else %}
   {{ empty('No movies yet', 'Add a movie from TMDB, or adjust the filters above.') }}
 {% endif %}
-
-<dialog class="dialog dialog-wide" id="add-movie-dialog">
-  <div class="dialog-head">
-    <h2>Add a movie</h2>
-    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
-  </div>
-  <div class="dialog-body">
-    <div class="dialog-options">
-      <label class="field">
-        <span>Quality profile</span>
-        <select id="movie-profile">
-          {% for profile in profiles %}
-            <option value="{{ profile.id }}" {% if profile.is_default %}selected{% endif %}>{{ profile.name }} ({{ profile.resolutions|join(', ') }})</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label class="field">
-        <span>Download when</span>
-        <select id="movie-availability">
-          <option value="released" selected>Released (avoid cams)</option>
-          <option value="in_cinemas">In cinemas / release date reached</option>
-          <option value="announced">Announced (search immediately)</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>Queue priority <small class="muted">higher runs first</small></span>
-        <input type="number" id="movie-priority" min="-100" max="100" step="1" value="0">
-      </label>
-      <label class="check"><input type="checkbox" id="movie-monitored" checked> Monitored</label>
-      <label class="check"><input type="checkbox" id="movie-search-now" checked> Search and download now</label>
-    </div>
-    <div class="field">
-      <span>Search TMDB</span>
-      <input type="search" id="movie-search-input" placeholder="Movie title" autocomplete="off">
-    </div>
-    <p class="hint" id="movie-search-status" role="status"></p>
-    <div class="metadata-results" id="movie-search-results"></div>
-  </div>
-  <div class="dialog-foot">
-    <span class="spacer"></span>
-    <button class="btn btn-ghost" type="button" data-close>Close</button>
-  </div>
-</dialog>
 
 {% if not profiles %}
   <p class="note note-bad">No quality profiles exist. Create one on the

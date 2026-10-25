@@ -138,7 +138,14 @@ def _json_list(value: Any) -> str | None:
 def _tier_label(profile: quality.Profile, release: Mapping[str, Any]) -> str | None:
     rank = profile.rank(release, allow_unknown_source=True)
     if rank is None or rank >= len(profile.tiers):
-        return None
+        # Source no longer contributes to a profile or gates eligibility. It
+        # is still useful to display when the provider supplied it.
+        resolution = str(release.get("resolution") or "")
+        source = str(release.get("source") or "")
+        label = resolution
+        if source and source not in ("unknown", "none"):
+            label = (label + " " + (quality.source_label(source) or source)).strip()
+        return label or None
     return profile.tiers[rank].name
 
 
@@ -451,9 +458,13 @@ def _probe_movie_candidates(conn, candidates: list[dict], profile: quality.Profi
             conn, release, acquire_timeout=acquire_timeout
         )
         budget[0] -= 1
-        allowed, reason = profile.check(release, original_language)
+        evaluation = profile.evaluate(release, original_language)
+        allowed, reason = bool(evaluation["eligible"]), str(evaluation["reason"])
         release["allowed"] = allowed
         release["reason"] = reason
+        release["target_met"] = bool(evaluation["target_met"])
+        release["needs_upgrade"] = bool(evaluation["needs_upgrade"])
+        release["profile_score"] = int(evaluation["score"])
         release["quality_label"] = _tier_label(profile, release) if allowed else None
         annotated.append(release)
     return annotated
@@ -877,6 +888,177 @@ def _decorate_candidate(candidate: dict, profile: quality.Profile,
     return candidate
 
 
+def movie_candidate_diagnostics(conn, movie_id: int, *, limit: int = 200) -> dict:
+    """Latest automatic scan candidates, including why they were skipped.
+
+    This is read-only derived state. ``status`` is the acquisition lifecycle
+    (pending/probed/failed/rejected), while ``display_reason`` explains the
+    outcome in one line for the detail page.
+    """
+    from . import acquisition, bworker_store
+
+    work = bworker_store.get_work_by_key(
+        conn, bworker_store.movie_work_key(int(movie_id))
+    )
+    if work is None:
+        return {"work": None, "scan": None, "candidates": []}
+    snapshot = acquisition.scan_snapshot(conn, int(work["id"]))
+    try:
+        probe_limit = int(db.get_setting(conn, "probe_batch_per_loop", "3") or 3)
+    except (TypeError, ValueError):
+        probe_limit = 3
+    labels = {
+        "pending": ("Waiting", "muted"),
+        "probed": ("Probed", "downloaded"),
+        "failed": ("Probe failed", "failed"),
+        "rejected": ("Skipped", "failed"),
+        "selected": ("Selected", "downloaded"),
+    }
+    rows = []
+    for row in snapshot.get("candidates") or []:
+        item = dict(row)
+        details = item.get("score_details")
+        if not isinstance(details, dict):
+            details = {}
+        status = str(item.get("status") or "pending")
+        reason = ""
+        if status == "pending":
+            reason = (f"Not probed in this cycle: the probe batch limit "
+                      f"({probe_limit}) was reached. It stays queued for the "
+                      "next cycle.")
+        elif status == "rejected":
+            reason = str(details.get("reason") or details.get("skip_reason")
+                         or "The catalog entry changed or no longer matches this title.")
+        elif status == "failed":
+            reason = str(details.get("probe_error") or details.get("reason")
+                         or "ffprobe could not read this stream.")
+        elif status == "probed":
+            reason = str(details.get("skip_reason") or details.get("reason") or "")
+            if not reason:
+                reason = ("Passed the profile with score "
+                          f"{item.get('score') or 0}." if item.get("eligible")
+                          else "Probed; outside the current profile.")
+        item["display_reason"] = reason
+        item["status_label"], item["status_tone"] = labels.get(
+            status, (status.replace("_", " ").title(), "muted")
+        )
+        rows.append(item)
+    return {"work": work, "scan": snapshot.get("scan"), "candidates": rows[:limit]}
+
+
+def _reset_candidate_state(conn, work_key: str) -> dict | None:
+    """Delete the durable scan/candidates and make the work unit due now."""
+    from . import bworker_store
+
+    work = bworker_store.get_work_by_key(conn, work_key)
+    if work is None:
+        return None
+    conn.execute("DELETE FROM bworker_scan WHERE work_id = ?", (int(work["id"]),))
+    conn.commit()
+    bworker_store.reset_work(conn, work_id=int(work["id"]))
+    return work
+
+
+def refind_movie_candidates(conn, movie_id: int) -> dict:
+    movie = get_movie(conn, movie_id)
+    if movie is None:
+        raise LookupError("That movie no longer exists.")
+    conn.execute(
+        "UPDATE movies SET candidate_source_id = NULL, candidate_remote_id = NULL, "
+        "candidate_mode = NULL, candidate_name = NULL, candidate_selected_at = NULL, "
+        "search_message = NULL WHERE id = ?",
+        (int(movie_id),),
+    )
+    conn.commit()
+    work = _reset_candidate_state(
+        conn, f"movie:{int(movie_id)}:search",
+    )
+    return {"movie": get_movie(conn, movie_id), "work_id": work["id"] if work else None}
+
+
+def remove_movie_download_and_refind(conn, movie_id: int) -> dict:
+    movie = get_movie(conn, movie_id)
+    if movie is None:
+        raise LookupError("That movie no longer exists.")
+    from . import downloader
+
+    downloader.cancel_for(conn, movie_id=int(movie_id), mode="main")
+    if movie.get("file_path"):
+        _delete_tracked_file(movie["file_path"], config.movie_library_dir())
+    conn.execute(
+        """
+        UPDATE movies SET file_path = NULL, file_size = NULL, resolution = NULL,
+            source = NULL, quality_label = NULL, audio_languages = NULL,
+            subtitle_languages = NULL, media_info = NULL, imported_at = NULL,
+            file_score = NULL, main_source_id = NULL, main_remote_id = NULL,
+            candidate_source_id = NULL, candidate_remote_id = NULL,
+            candidate_mode = NULL, candidate_name = NULL,
+            candidate_selected_at = NULL, search_message = NULL
+        WHERE id = ?
+        """,
+        (int(movie_id),),
+    )
+    conn.commit()
+    work = _reset_candidate_state(conn, f"movie:{int(movie_id)}:search")
+    return {"movie": get_movie(conn, movie_id), "work_id": work["id"] if work else None}
+
+
+def refind_episode_candidates(conn, series_id: int, episode_id: int) -> dict:
+    series = get_series(conn, series_id)
+    episode = get_episode(conn, episode_id)
+    if series is None or episode is None or int(episode["series_id"]) != int(series_id):
+        raise LookupError("That episode no longer exists.")
+    conn.execute(
+        "UPDATE series_episodes SET last_search_at = NULL WHERE id = ?",
+        (int(episode_id),),
+    )
+    conn.commit()
+    work = _reset_candidate_state(conn, f"episode:{int(episode_id)}:search")
+    return {"episode": get_episode(conn, episode_id),
+            "work_id": work["id"] if work else None}
+
+
+def remove_episode_download_and_refind(conn, series_id: int, episode_id: int) -> dict:
+    series = get_series(conn, series_id)
+    episode = get_episode(conn, episode_id)
+    if series is None or episode is None or int(episode["series_id"]) != int(series_id):
+        raise LookupError("That episode no longer exists.")
+    rows = conn.execute(
+        "SELECT id, status FROM downloads WHERE episode_id = ? "
+        "AND status IN ('queued', 'downloading', 'importing')",
+        (int(episode_id),),
+    ).fetchall()
+    for row in rows:
+        if row["status"] == "queued":
+            conn.execute(
+                "UPDATE downloads SET status = 'cancelled', finished_at = ?, "
+                "error = 'Cancelled', cancel_requested = 0 WHERE id = ?",
+                (_now(), int(row["id"])),
+            )
+        else:
+            conn.execute(
+                "UPDATE downloads SET cancel_requested = 1 WHERE id = ?",
+                (int(row["id"]),),
+            )
+    if episode.get("file_path"):
+        _delete_tracked_file(episode["file_path"], config.series_library_dir())
+    conn.execute(
+        """
+        UPDATE series_episodes SET file_path = NULL, file_size = NULL,
+            resolution = NULL, source = NULL, quality_label = NULL,
+            audio_languages = NULL, subtitle_languages = NULL,
+            media_info = NULL, imported_at = NULL, file_score = NULL,
+            last_search_at = NULL
+        WHERE id = ?
+        """,
+        (int(episode_id),),
+    )
+    conn.commit()
+    work = _reset_candidate_state(conn, f"episode:{int(episode_id)}:search")
+    return {"episode": get_episode(conn, episode_id),
+            "work_id": work["id"] if work else None}
+
+
 def movie_candidates_view(conn, movie: Mapping[str, Any], *, limit: int = 80,
                           query: str | None = None,
                           all_matches: bool = False) -> dict:
@@ -998,12 +1180,17 @@ def probe_movie_candidate(conn, movie_id: int, source_id: int, remote_id: str,
     return result
 
 
-def probe_movie_candidates(conn, movie_id: int, *, refresh: bool = False) -> dict:
+def probe_movie_candidates(conn, movie_id: int, *, refresh: bool = False,
+                           all_candidates: bool = False) -> dict:
     movie = get_movie(conn, movie_id)
     if movie is None:
         raise LookupError("That movie no longer exists.")
-    view = movie_candidates_view(conn, movie, limit=200)["candidates"]
-    budget = max(1, int(probe.search_budget(conn)))
+    view = movie_candidates_view(
+        conn, movie, limit=500 if all_candidates else 200,
+        all_matches=all_candidates,
+    )["candidates"]
+    budget = (len(view) if all_candidates
+              else max(1, int(probe.search_budget(conn))))
     probed = ok = failed = skipped = 0
     for candidate in view:
         if probed >= budget:
@@ -1674,9 +1861,13 @@ def _probe_episode_releases(
             conn, release, acquire_timeout=acquire_timeout
         )
         budget[0] -= 1
-        allowed, reason = profile.check(release, original_language)
+        evaluation = profile.evaluate(release, original_language)
+        allowed, reason = bool(evaluation["eligible"]), str(evaluation["reason"])
         release["allowed"] = allowed
         release["reason"] = reason
+        release["target_met"] = bool(evaluation["target_met"])
+        release["needs_upgrade"] = bool(evaluation["needs_upgrade"])
+        release["profile_score"] = int(evaluation["score"])
         release["quality_label"] = _tier_label(profile, release) if allowed else None
         releases.append(release)
     return releases
@@ -1882,6 +2073,43 @@ def _decorate_episode_candidate(release: dict, profile: quality.Profile,
         release["probe_error"] = error or "ffprobe did not identify a playable video."
         release["reason"] = f"Probe failed: {release['probe_error']}"
     return release
+
+
+def probe_episode_candidates(conn, series_id: int, episode_id: int, *,
+                             refresh: bool = False,
+                             all_candidates: bool = False) -> dict:
+    series = get_series(conn, series_id)
+    episode = get_episode(conn, episode_id)
+    if series is None or episode is None or int(episode["series_id"]) != int(series_id):
+        raise LookupError("That episode no longer exists.")
+    view = episode_candidates_view(
+        conn, series, episode, limit=500 if all_candidates else 100,
+        all_matches=all_candidates,
+    )["candidates"]
+    budget = (len(view) if all_candidates
+              else max(1, int(probe.search_budget(conn))))
+    probed = ok = failed = skipped = 0
+    for candidate in view:
+        if probed >= budget:
+            break
+        if candidate.get("probe_ok") and not refresh:
+            skipped += 1
+            continue
+        release = dict(candidate)
+        result = probe.probe_episode_release(
+            conn, release,
+            refresh=bool(refresh or candidate.get("probe_status") == "failed"),
+            acquire_timeout=30.0,
+        )
+        probed += 1
+        if result.get("probe_ok"):
+            ok += 1
+        else:
+            failed += 1
+    return {
+        "probed": probed, "ok": ok, "failed": failed,
+        "skipped": skipped, "remaining": max(0, len(view) - probed - skipped),
+    }
 
 
 def episode_candidates_view(conn, series: Mapping[str, Any],

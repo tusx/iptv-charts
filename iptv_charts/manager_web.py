@@ -683,8 +683,21 @@ def _movie_stage_view(conn, movie: dict, profiles: list[dict]) -> dict:
 
 
 # -------------------------------------------------------------------- movies
+@bp.get("/movies/add")
+def add_movie_page():
+    conn = _conn()
+    return render_template(
+        "movie_add.html",
+        profiles=_profiles(conn),
+        tmdb_configured=metadata.has_tmdb(conn),
+        **_media_context(),
+    )
+
+
 @bp.get("/movies")
 def movies():
+    if request.args.get("add") == "1":
+        return redirect(url_for("manager.add_movie_page"))
     conn = _conn()
     query = (request.args.get("q") or "").strip()[:120]
     status = request.args.get("status") or ""
@@ -713,6 +726,7 @@ def movie_detail(movie_id: int):
     active, _ = _active_maps(conn)
     _decorate_movies([movie], active)
     candidates = library.movie_candidates_view(conn, movie)
+    candidate_checks = library.movie_candidate_diagnostics(conn, movie_id)
     alternates = library.movie_alternates(conn, movie_id)
     main_identity = library.main_release_identity(conn, movie)
     profiles = _profiles(conn)
@@ -726,6 +740,7 @@ def movie_detail(movie_id: int):
         candidates=candidates["candidates"],
         candidate_total=candidates["total"],
         candidate_probed=candidates["probed"],
+        candidate_checks=candidate_checks,
         alternates=alternates,
         alternate_keys={
             f"{row['source_id']}:{row['remote_id']}" for row in alternates
@@ -1415,8 +1430,21 @@ def _series_bworker_now(state: dict, paused: bool) -> str:
 
 
 # -------------------------------------------------------------------- series
+@bp.get("/series/add")
+def add_series_page():
+    conn = _conn()
+    return render_template(
+        "series_add.html",
+        profiles=_profiles(conn),
+        tmdb_configured=metadata.has_tmdb(conn),
+        **_media_context(),
+    )
+
+
 @bp.get("/series")
 def series():
+    if request.args.get("add") == "1":
+        return redirect(url_for("manager.add_series_page"))
     conn = _conn()
     query = (request.args.get("q") or "").strip()[:120]
     status = request.args.get("status") or ""

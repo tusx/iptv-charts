@@ -9,6 +9,7 @@
   } = Manager;
 
   const seriesId = window.SERIES_ID;
+  const seriesTitle = window.SERIES_TITLE || '';
   if (!seriesId) return;
 
   const status = $('#series-action-status');
@@ -213,7 +214,18 @@
       releaseQuery.value = '';
       setAllCandidatesMode(false);
       open(releasesDialog);
-      loadReleases('');
+      releaseQuery.focus();
+      showSearchHint();
+      return;
+    }
+
+    const allButton = event.target.closest('[data-episode-all]');
+    if (allButton) {
+      targetEpisode = allButton.dataset.episodeAll;
+      releaseQuery.value = seriesTitle;
+      setAllCandidatesMode(true);
+      open(releasesDialog);
+      loadReleases(seriesTitle);
       return;
     }
 
@@ -288,33 +300,63 @@
     }
   }
 
+  function releaseSpinner() {
+    const icon = element('i', 'fa-solid fa-spinner fa-spin');
+    icon.setAttribute('aria-hidden', 'true');
+    return icon;
+  }
+
+  function showSearchHint() {
+    releaseList.replaceChildren();
+    setStatus(releaseStatus,
+      'Type at least two characters. This searches all playlist items and may take some time.');
+  }
+
   allCandidatesButton?.addEventListener('click', () => {
-    setAllCandidatesMode(!allCandidatesMode);
-    loadReleases(releaseQuery.value.trim());
+    const enabled = !allCandidatesMode;
+    setAllCandidatesMode(enabled);
+    if (enabled && releaseQuery.value.trim().length < 2) {
+      releaseQuery.value = seriesTitle;
+    }
+    const query = releaseQuery.value.trim();
+    if (query.length >= 2) loadReleases(query);
+    else showSearchHint();
   });
   releaseQuery.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
-      loadReleases(releaseQuery.value.trim());
+      const query = releaseQuery.value.trim();
+      if (query.length >= 2) loadReleases(query);
+      else showSearchHint();
     }
   });
 
-  const debouncedLoad = debounce(() => loadReleases(releaseQuery.value.trim()), 300);
+  const debouncedLoad = debounce(() => {
+    const query = releaseQuery.value.trim();
+    if (query.length >= 2) loadReleases(query);
+    else {
+      releaseToken += 1;
+      showSearchHint();
+    }
+  }, 300);
   releaseQuery.addEventListener('input', debouncedLoad);
 
   async function loadReleases(query) {
     if (!targetEpisode) return;
+    if (!String(query || '').trim()) {
+      showSearchHint();
+      return;
+    }
     const request = ++releaseToken;
     const manualMode = allCandidatesMode;
-    releaseList.replaceChildren(element(
-      'p', 'muted',
-      manualMode
-        ? 'Loading every provider episode candidate…'
-        : 'Searching your playlists and probing the best episodes…',
-    ));
-    setStatus(releaseStatus, manualMode
-      ? 'All candidates are shown, including ones outside the quality profile.'
-      : '');
+    const loading = element('p', 'muted');
+    loading.append(
+      releaseSpinner(),
+      document.createTextNode(' Searching all playlist items — this can take some time…'),
+    );
+    releaseList.replaceChildren(loading);
+    setStatus(releaseStatus,
+      'Searching all playlist items. This can take some time; results appear when the search finishes.');
     try {
       const params = new URLSearchParams();
       if (query) params.set('q', query);
@@ -462,6 +504,54 @@
     row.append(main, badge, actions);
     return row;
   }
+
+  async function episodeAction(button, url, body, message) {
+    if (!targetEpisode) return;
+    button.disabled = true;
+    setStatus(releaseStatus, 'Working…');
+    try {
+      await post(url, body || {});
+      setStatus(releaseStatus, message, 'ok');
+      window.setTimeout(() => window.location.reload(), 900);
+    } catch (error) {
+      setStatus(releaseStatus, error.message, 'bad');
+      button.disabled = false;
+    }
+  }
+
+  $('#episode-refind')?.addEventListener('click', (event) => {
+    if (!targetEpisode) return;
+    episodeAction(
+      event.currentTarget,
+      `/api/series/${seriesId}/episodes/${targetEpisode}/refind`,
+      {},
+      'Candidate scan reset; a fresh episode search is queued.',
+    );
+  });
+
+  $('#episode-reprobe-all')?.addEventListener('click', (event) => {
+    if (!targetEpisode) return;
+    episodeAction(
+      event.currentTarget,
+      `/api/series/${seriesId}/episodes/${targetEpisode}/candidates/probe-all`,
+      { all: true, refresh: true },
+      'Queueing ffprobe for every candidate of this episode.',
+    );
+  });
+
+  $('#episode-remove-refind')?.addEventListener('click', (event) => {
+    if (!targetEpisode) return;
+    if (!window.confirm(
+      'Delete any downloaded file for this episode and search again? The episode '
+      + 'metadata is kept; the file and candidate scan are rebuilt.',
+    )) return;
+    episodeAction(
+      event.currentTarget,
+      `/api/series/${seriesId}/episodes/${targetEpisode}/remove-and-refind`,
+      {},
+      'File removed; a fresh episode search is queued.',
+    );
+  });
 
   // ------------------------------------------------------- manual metadata
   const metadataDialog = $('#series-metadata-dialog');

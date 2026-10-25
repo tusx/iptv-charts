@@ -266,12 +266,12 @@ def test_topbar_and_home(client) -> None:
                'href="/import?tab=series"' in series)
 
     check_true("movies open button keeps its href", 'href="/movies"' in movies)
-    check_true("movies add button keeps its href", 'href="/movies?add=1"' in movies)
+    check_true("movies add button keeps its href", 'href="/movies/add"' in movies)
     check_true("movies calendar button keeps its href",
                'href="/movies/calendar"' in movies)
     check_true("movies wanted button keeps its href", 'href="/movies/wanted"' in movies)
     check_true("series open button keeps its href", 'href="/series"' in series)
-    check_true("series add button keeps its href", 'href="/series?add=1"' in series)
+    check_true("series add button keeps its href", 'href="/series/add"' in series)
     check_true("series calendar button keeps its href",
                'href="/series/calendar"' in series)
     check_true("series wanted button keeps its href", 'href="/series/wanted"' in series)
@@ -297,6 +297,36 @@ def test_topbar_and_home(client) -> None:
     playlists = client.get("/playlists").get_data(as_text=True)
     check_true("manage page Browse buttons are blue",
                'class="btn btn-primary js-browse"' in playlists)
+
+    section("dedicated add pages")
+    movie_add = client.get("/movies/add")
+    series_add = client.get("/series/add")
+    movie_add_body = movie_add.get_data(as_text=True)
+    series_add_body = series_add.get_data(as_text=True)
+    check("movie add page renders", movie_add.status_code, 200)
+    check("series add page renders", series_add.status_code, 200)
+    check_true("movie add page has a search form",
+               'id="add-movie-search-form"' in movie_add_body
+               and 'id="add-movie-query"' in movie_add_body
+               and 'id="add-movie-results"' in movie_add_body)
+    check_true("series add page has a search form",
+               'id="add-series-search-form"' in series_add_body
+               and 'id="add-series-query"' in series_add_body
+               and 'id="add-series-results"' in series_add_body)
+    check("old movie add modal is gone", 'id="add-movie-dialog"' in page, False)
+    check("old series add modal is gone",
+          'id="add-series-dialog"' in client.get("/series").get_data(as_text=True),
+          False)
+    check_true("add pages load the shared add script",
+               'js/add_media.js' in movie_add_body
+               and 'js/add_media.js' in series_add_body)
+    add_js = (ROOT / "iptv_charts/static/js/add_media.js").read_text(
+        encoding="utf-8")
+    check_true("add page shows an added state",
+               "Added to library" in add_js and "showAdded" in add_js
+               and "Open movie" in add_js and "Open series" in add_js)
+    check_true("add page links to the new detail page",
+               "detailBase" in add_js and "open.href" in add_js)
 
     shell_css = SHELL_CSS.read_text(encoding="utf-8")
     check_true("search-missing icon is defined without child nodes",

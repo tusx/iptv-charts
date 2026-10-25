@@ -757,17 +757,12 @@ def test_manager_foundations() -> None:
             "size": 1000,
         }
 
-    # The 0.8.0 engine has one mandatory resolution and a weighted list of
-    # quality/source options. Lower resolutions are a fallback only when
-    # upgrades are enabled; higher ones are never eligible.
+    # The engine now has one mandatory resolution (minimum score 10). Source
+    # is deliberately ignored because provider metadata is unreliable.
     profile = quality.Profile(
         resolution="1080p",
         resolution_weight=10,
-        quality_options=(
-            quality.Option("web-dl", "WEB-DL", 10),
-            quality.Option("bluray", "Blu-ray", 8),
-        ),
-        target_score=20,
+        target_score=10,
         upgrades=True,
     )
 
@@ -789,14 +784,13 @@ def test_manager_foundations() -> None:
     check("lower fallback does not meet the target",
           profile.evaluate(fallback)["target_met"], False)
     check("higher resolution is rejected", profile.allows(higher), False)
-    check("unselected source is rejected", profile.allows(cam), False)
-    check("untagged source is rejected", profile.allows(untagged), False)
+    check("a CAM source is ignored", profile.allows(cam), True)
+    check("an untagged source is ignored", profile.allows(untagged), True)
     check("missing file takes the exact target over a fallback",
           quality.choose_release([fallback, exact], profile)["resolution"], "1080p")
     no_upgrades = quality.Profile(
         resolution="1080p", resolution_weight=10,
-        quality_options=(quality.Option("web-dl", "WEB-DL", 10),),
-        target_score=20, upgrades=False,
+        target_score=10, upgrades=False,
     )
     check("upgrades disabled rejects a lower fallback",
           no_upgrades.allows(fallback), False)
@@ -809,13 +803,12 @@ def test_manager_foundations() -> None:
     # target without any preference being a hard filter.
     weighted = quality.Profile(
         resolution="1080p", resolution_weight=10,
-        quality_options=(quality.Option("web-dl", "WEB-DL", 10),),
         audio_codecs=(quality.Option("eac3", "E-AC-3", 6),),
-        target_score=26, upgrades=True,
+        target_score=16, upgrades=True,
     )
     eac3_exact = release("1080p", "web-dl", audio_codecs=["eac3"])
     check("probe codec weight raises the score",
-          weighted.score(eac3_exact), 26)
+          weighted.score(eac3_exact), 16)
     check("plain release misses a target that needs the probe weight",
           weighted.evaluate(exact)["target_met"], False)
     check("probed release meets that target",
@@ -834,17 +827,16 @@ def test_manager_foundations() -> None:
                        "media_info": probed("1080p")}), None)
     equal_score = quality.Profile(
         resolution="1080p", resolution_weight=10,
-        quality_options=(quality.Option("web-dl", "WEB-DL", 10),),
-        target_score=20, upgrades=True,
+        target_score=10, upgrades=True,
     )
-    check("an equal score is not an upgrade",
-          quality.choose_release([exact], equal_score, current=current_fallback),
-          None)
+    check("an exact-resolution equal score upgrades a lower fallback",
+          quality.choose_release([exact], equal_score,
+                                 current=current_fallback)["resolution"],
+          "1080p")
     target_over_score = quality.Profile(
         resolution="1080p", resolution_weight=10,
-        quality_options=(quality.Option("web-dl", "WEB-DL", 10),),
         audio_codecs=(quality.Option("eac3", "E-AC-3", 6),),
-        target_score=20, upgrades=True,
+        target_score=10, upgrades=True,
     )
     chosen = quality.choose_release(
         [release("720p", "web-dl", audio_codecs=["eac3"]), exact],
@@ -857,18 +849,17 @@ def test_manager_foundations() -> None:
     # release without them is still allowed, it just does not reach the target.
     preferred = quality.Profile(
         resolution="1080p", resolution_weight=10,
-        quality_options=(quality.Option("web-dl", "WEB-DL", 10),),
         audio_languages=(quality.Option("original", "Original language", 5),),
         subtitle_languages=(quality.Option("eng", "English", 5),),
-        target_score=30, upgrades=True,
+        target_score=20, upgrades=True,
     )
     without_tracks = release("1080p", "web-dl", audio_languages=["spa"])
     with_tracks = release("1080p", "web-dl", audio_languages=["spa"],
                           subtitle_languages=["eng"])
     check("original-language audio adds weight",
-          preferred.score(without_tracks, "es"), 25)
+          preferred.score(without_tracks, "es"), 15)
     check("required-language subtitle adds weight",
-          preferred.score(with_tracks, "es"), 30)
+          preferred.score(with_tracks, "es"), 20)
     check("missing preferred tracks is still eligible",
           preferred.allows(without_tracks, "es"), True)
     check("preferred tracks are needed to meet the target",
@@ -886,13 +877,13 @@ def test_manager_foundations() -> None:
         ],
         "audio_codecs": [{"value": "eac3", "weight": 5}],
         "audio_languages": ["original"],
-        "target_score": 27,
+        "target_score": 22,
         "upgrades": True,
     })
-    check("custom profile weight stored",
-          validated["quality_options"][0]["weight"], 10)
-    check("custom profile target stored", validated["target_score"], 27)
-    check("custom profile maximum computed", validated["max_score"], 32)
+    check("custom profile source choices are ignored",
+          validated["quality_options"], [])
+    check("custom profile target stored", validated["target_score"], 22)
+    check("custom profile maximum computed", validated["max_score"], 22)
     check("custom profile criteria is versioned",
           validated["criteria"]["version"], 1)
     check("custom profile audio codec stored",
@@ -902,23 +893,21 @@ def test_manager_foundations() -> None:
           raises(quality.validate_profile,
                  {"resolution": "nonsense", "quality_options": ["web-dl"]},
                  exc=ValueError), "raised")
-    check("profile requires a quality/source option",
+    check("profile accepts a resolution-only definition",
           raises(quality.validate_profile, {"resolution": "1080p"},
-                 exc=ValueError), "raised")
-    check("profile rejects duplicate options",
-          raises(quality.validate_profile,
-                 {"resolution": "1080p",
-                  "quality_options": ["web-dl", "web-dl"]}, exc=ValueError),
-          "raised")
+                 exc=ValueError), "returned")
+    check("profile ignores duplicate legacy source options",
+          quality.validate_profile({
+              "resolution": "1080p",
+              "quality_options": ["web-dl", "web-dl"],
+          })["quality_options"], [])
     check("profile rejects a maximum below the target floor",
           raises(quality.validate_profile,
-                 {"resolution": "1080p", "resolution_weight": 5,
-                  "quality_options": [{"value": "web-dl", "weight": 5}]},
+                 {"resolution": "1080p", "resolution_weight": 5},
                  exc=ValueError), "raised")
-    check("profile rejects a target below 20",
+    check("profile rejects a target below 10",
           raises(quality.validate_profile,
-                 {"resolution": "1080p",
-                  "quality_options": ["web-dl"], "target_score": 19},
+                 {"resolution": "1080p", "target_score": 9},
                  exc=ValueError), "raised")
 
     from_row = quality.Profile.from_row({
@@ -938,7 +927,7 @@ def test_manager_foundations() -> None:
           [("original", 5)])
     check("criteria round-trip keeps resolution and target",
           (from_row.resolution, from_row.target_score, from_row.max_score),
-          ("2160p", 27, 32))
+          ("2160p", 22, 22))
     legacy_row = quality.Profile.from_row({
         "qualities": '[{"name":"2160p","resolution":"2160p","sources":[]}]',
         "resolutions": '["2160p"]', "cutoff": "2160p", "upgrades": 1,

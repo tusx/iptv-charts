@@ -1,9 +1,9 @@
 /* Weighted quality profile builder.
  *
- * A profile has one mandatory resolution, an ordered list of weighted
- * quality/source options, and collapsible optional sections. The dialog
- * computes the same maximum score algebra as the Python engine so the
- * "Target N / Max M" line stays live while weights change. */
+ * A profile has one mandatory resolution and collapsible optional sections.
+ * Resolution sets the minimum score (10); source is not part of a profile.
+ * The dialog computes the same maximum score algebra as the Python engine so
+ * the "Target N / Max M" line stays live while weights change. */
 
 (() => {
   'use strict';
@@ -16,18 +16,12 @@
   const schema = window.PROFILE_SCHEMA || {};
   const profiles = window.PROFILES || [];
   const resolutions = schema.resolutions || [];
-  const qualityOptions = schema.quality_options || [];
-  const defaultQualities = schema.default_quality_options || [];
   const sections = schema.sections || [];
-  const qualityMeta = new Map(qualityOptions.map((entry) => [entry.value, entry]));
   const sectionMeta = new Map(sections.map((entry) => [entry.key, entry]));
 
   const nameInput = $('#profile-name');
   const resolutionSelect = $('#profile-resolution');
   const resolutionWeight = $('#profile-resolution-weight');
-  const qualityList = $('#profile-quality-list');
-  const qualitySelect = $('#profile-quality-select');
-  const qualityAdd = $('#profile-quality-add');
   const targetInput = $('#profile-target');
   const maxOutput = $('#profile-max-score');
   const scoreLine = $('#profile-score-line');
@@ -36,7 +30,7 @@
   const saveButton = $('#profile-save');
   const dialogTitle = $('#profile-dialog-title');
 
-  const state = { qualities: [], sections: {} };
+  const state = { sections: {} };
   let editing = null;
   let targetTouched = false;
   let dragIndex = null;
@@ -48,10 +42,8 @@
   };
 
   const sectionOptions = (key) => sectionMeta.get(key)?.options || [];
-  const metaFor = (key, value) => {
-    if (key === 'quality_options') return qualityMeta.get(value);
-    return sectionOptions(key).find((entry) => entry.value === value);
-  };
+  const metaFor = (key, value) =>
+    sectionOptions(key).find((entry) => entry.value === value);
   const labelFor = (key, value) =>
     metaFor(key, value)?.label || String(value || '');
 
@@ -172,66 +164,6 @@
     return row;
   }
 
-  function renderQualityList() {
-    qualityList.textContent = '';
-    state.qualities.forEach((item, index) => {
-      qualityList.append(optionRow(
-        'quality_options', state.qualities, item, index, {
-          weights: refreshScores,
-          remove: () => {
-            renderQualityList();
-            populateQualitySelect();
-            refreshScores();
-          },
-          reorder: () => {
-            renderQualityList();
-            populateQualitySelect();
-            refreshScores();
-          },
-        }
-      ));
-    });
-    if (!state.qualities.length) {
-      qualityList.append(element('p', 'hint', 'Add at least one quality/source option.'));
-    }
-  }
-
-  function populateQualitySelect() {
-    qualitySelect.textContent = '';
-    const remaining = qualityOptions.filter(
-      (entry) => !state.qualities.some((item) => item.value === entry.value)
-    );
-    if (!remaining.length) {
-      const option = element('option', '', 'All quality options added');
-      option.value = '';
-      qualitySelect.append(option);
-      qualitySelect.disabled = true;
-      qualityAdd.disabled = true;
-      return;
-    }
-    qualitySelect.disabled = false;
-    qualityAdd.disabled = false;
-    remaining.forEach((entry) => {
-      const option = element('option', '', entry.label);
-      option.value = entry.value;
-      qualitySelect.append(option);
-    });
-  }
-
-  function addQuality() {
-    const value = qualitySelect.value;
-    if (!value || state.qualities.some((item) => item.value === value)) return;
-    const meta = qualityMeta.get(value);
-    state.qualities.push({
-      value,
-      label: meta?.label || value,
-      weight: clampWeight(meta?.weight, 10),
-    });
-    renderQualityList();
-    populateQualitySelect();
-    refreshScores();
-  }
-
   function renderSection(key) {
     const list = $('[data-option-list="' + key + '"]', dialog);
     const count = $('[data-section-count="' + key + '"]', dialog);
@@ -315,12 +247,9 @@
     const resolutionWeightValue = clampWeight(
       resolutionWeight.value, 10
     );
-    const sourceMaximum = state.qualities.length
-      ? Math.max(...state.qualities.map((item) => clampWeight(item.weight, 1)))
-      : 0;
     return sections.reduce(
       (total, section) => total + sectionMaximum(section.key),
-      resolutionWeightValue + sourceMaximum
+      resolutionWeightValue
     );
   }
 
@@ -330,17 +259,17 @@
     targetInput.max = String(maximum);
     if (!targetTouched) targetInput.value = String(maximum);
     const target = Math.round(Number(targetInput.value));
-    const invalid = !Number.isFinite(target) || target < 20 || target > maximum || maximum < 20;
+    const invalid = !Number.isFinite(target) || target < 10 || target > maximum || maximum < 10;
     if (Number.isFinite(target)) {
       scoreLine.textContent = `Target ${target} / Max ${maximum}`;
     } else {
       scoreLine.textContent = `Target — / Max ${maximum}`;
     }
     scoreLine.classList.toggle('is-bad', invalid);
-    if (maximum < 20) {
-      scoreLine.textContent += ' — maximum must be at least 20';
+    if (maximum < 10) {
+      scoreLine.textContent += ' — maximum must be at least 10';
     }
-    targetInput.setCustomValidity(invalid ? 'Target must be between 20 and the maximum score.' : '');
+    targetInput.setCustomValidity(invalid ? 'Target must be between 10 and the maximum score.' : '');
   }
 
   function show(profile) {
@@ -353,18 +282,6 @@
       clampWeight(profile?.resolution_weight, 10)
     );
 
-    state.qualities = profile
-      ? (profile.quality_options || []).map((item) => ({
-          value: item.value,
-          label: item.label || labelFor('quality_options', item.value),
-          weight: clampWeight(item.weight, 10),
-        }))
-      : defaultQualities.map((item) => ({
-          value: item.value,
-          label: item.label || labelFor('quality_options', item.value),
-          weight: clampWeight(item.weight, 10),
-        }));
-
     sections.forEach((section) => {
       const source = profile?.[section.key] || [];
       state.sections[section.key] = source.map((item) => ({
@@ -376,11 +293,9 @@
 
     upgrades.checked = profile ? Boolean(profile.upgrades) : true;
     if (profile) {
-      targetInput.value = String(profile.target_score ?? profile.max_score ?? 20);
+      targetInput.value = String(profile.target_score ?? profile.max_score ?? 10);
     }
 
-    renderQualityList();
-    populateQualitySelect();
     sections.forEach((section) => {
       renderSection(section.key);
       populateSectionSelect(section.key);
@@ -396,11 +311,6 @@
       name: nameInput.value.trim(),
       resolution: resolutionSelect.value,
       resolution_weight: clampWeight(resolutionWeight.value, 10),
-      quality_options: state.qualities.map((item) => ({
-        value: item.value,
-        label: item.label,
-        weight: clampWeight(item.weight, 1),
-      })),
       video_codecs: sectionPayload('video_codecs'),
       audio_codecs: sectionPayload('audio_codecs'),
       audio_languages: sectionPayload('audio_languages'),
@@ -427,20 +337,16 @@
       nameInput.focus();
       return;
     }
-    if (!payload.quality_options.length) {
-      setStatus(dialogStatus, 'Select at least one quality/source option.', 'bad');
-      return;
-    }
     if (!payload.resolution) {
       setStatus(dialogStatus, 'Choose a resolution.', 'bad');
       return;
     }
     const maximum = maximumScore();
     if (!Number.isFinite(payload.target_score)
-        || payload.target_score < 20
+        || payload.target_score < 10
         || payload.target_score > maximum
-        || maximum < 20) {
-      setStatus(dialogStatus, `Target score must be between 20 and ${maximum}.`, 'bad');
+        || maximum < 10) {
+      setStatus(dialogStatus, `Target score must be between 10 and ${maximum}.`, 'bad');
       targetInput.focus();
       return;
     }
@@ -461,10 +367,6 @@
 
   $('#new-profile')?.addEventListener('click', () => show(null));
   saveButton?.addEventListener('click', save);
-  qualityAdd?.addEventListener('click', addQuality);
-  qualitySelect?.addEventListener('change', () => {
-    qualitySelect.dataset.selected = qualitySelect.value;
-  });
   resolutionWeight.addEventListener('input', refreshScores);
   resolutionSelect.addEventListener('change', refreshScores);
   targetInput.addEventListener('input', () => {

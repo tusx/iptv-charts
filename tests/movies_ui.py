@@ -255,7 +255,9 @@ def test_cards_and_controls(movie_id: int) -> None:
     controls = (
         'id="movie-search-now"', 'id="movie-manual-search"',
         'id="movie-refresh"', 'id="movie-delete"',
-        'id="movie-manual-search-section"', 'id="candidate-probe-all"',
+        'id="movie-manual-search-section"', 'id="movie-show-all"',
+        'id="movie-show-all-section"', 'id="movie-refind"',
+        'id="movie-reprobe-all"',
         'id="candidate-filters"', 'id="movie-edit-form"',
         'id="movie-monitored-edit"', 'id="movie-profile-edit"',
         'id="movie-availability-edit"', 'id="movie-priority-edit"',
@@ -289,6 +291,16 @@ def test_cards_and_controls(movie_id: int) -> None:
           'id="movie-all-candidates"' in template
           and "/api/movies/${movieId}/candidates" in js
           and "probe_if_needed" in js)
+    check("candidate actions are available on the page",
+          'id="movie-refind"' in template
+          and 'id="movie-reprobe-all"' in template
+          and 'id="movie-remove-refind"' in template
+          and "/api/movies/${movieId}/refind" in js
+          and "/remove-and-refind" in js)
+    check("manual search waits for a query",
+          "Type at least two characters" in template
+          and "query.length >= 2" in js
+          and "fa-spinner" in js)
     check("candidate cards render the full ffprobe facts",
           "Audio codecs" in template and "Subtitle codecs" in template
           and "mediaFacts(release)" in js)
@@ -538,6 +550,13 @@ def test_candidate_browser_api(movie_id: int) -> None:
     check("candidate browser echoes the query", payload.get("query"), "stage")
     check("candidate browser reports a total",
           isinstance(payload.get("total"), int), True)
+    response = CLIENT.post(f"/api/movies/{movie_id}/refind")
+    check("candidate refind endpoint returns JSON", response.status_code == 200,
+          str(response.status_code))
+    check("candidate refind reports ok", (response.get_json() or {}).get("ok"), True)
+    response = CLIENT.post(f"/api/movies/{movie_id}/remove-and-refind")
+    check("remove-and-refind endpoint returns JSON",
+          response.status_code == 200, str(response.status_code))
 
 
 def test_missing_movie() -> None:

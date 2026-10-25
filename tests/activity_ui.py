@@ -240,12 +240,16 @@ def test_assets() -> None:
     check_true("countdown label", "Refresh on (${remaining}s)" in js)
     check_true("one-second tick", "setInterval(tick, 1000)" in js)
     check_true("manual pause state", "state.userPaused" in js)
-    check_true("auto pause off top", "window.scrollY > 0" in js)
-    check_true("auto pause log scrolled", "nodes.log.scrollTop > 0" in js)
     check_true("tab hidden pause", "Boolean(document.hidden)" in js)
     check_true("visibility resume", "visibilitychange" in js)
-    check_true("effective refresh gate", "state.scrolledAway" in js
-               and "state.logScrolled" in js)
+    check_true("refresh keeps running while scrolling",
+               "function isRefreshActive() {\n    return !state.userPaused "
+               "&& !state.hidden;" in js)
+    check_false("no page-scroll refresh pause", "state.scrolledAway" in js)
+    check_false("no log-scroll refresh pause", "state.logScrolled" in js)
+    check_false("no window scroll listener", "window.addEventListener('scroll'" in js)
+    check_false("no log scroll listener",
+                "nodes.log.addEventListener('scroll'" in js)
     check_true("errors retried at interval",
                "Retrying every ${intervalText(state.interval)}" in js)
     check_true("non-blocking status line", "setStatus(nodes.statusLine" in js)

@@ -163,6 +163,7 @@ class WorkContext:
         self.current_download_id = work.get("current_download_id")
         self._last_write = float("-inf")
         self._event_stage = self.stage
+        self._candidate_activity: dict[int, tuple[int | None, int]] = {}
 
     # ----------------------------------------------------------- identity
     @property
@@ -295,6 +296,93 @@ class WorkContext:
     def set_download(self, download_id: int | None) -> None:
         self.current_download_id = int(download_id) if download_id else None
         self._write_activity(force=True)
+
+    def entity_label(self) -> str:
+        try:
+            if self.entity_type == "movie":
+                movie = library.get_movie(self.conn, int(self.entity_id or 0))
+                return str((movie or {}).get("title") or "movie")
+            if self.entity_type == "episode":
+                return _episode_label(self.conn, int(self.entity_id or 0)) or "episode"
+            if self.entity_type == "series":
+                series = library.get_series(self.conn, int(self.entity_id or 0))
+                return str((series or {}).get("title") or "series")
+        except Exception:
+            pass
+        return str(self.work.get("work_key") or self.work_type or "work")
+
+    def candidate_event(self, payload: Mapping[str, Any]) -> None:
+        """Report one candidate probe in the live activity feed.
+
+        A probe-start entry is updated in place when the probe finishes, so the
+        feed shows a running probe first and then its result (including skip or
+        probe-failure reason) at the same position.
+        """
+        kind = str(payload.get("event") or "")
+        candidate_id = payload.get("candidate_id")
+        now = self.now()
+        target = {"label": self.entity_label()}
+        if kind == "probe_started":
+            activity_id = self.runner._push(
+                event=activity_log.EVENT_STARTED,
+                status=activity_log.STATUS_RUNNING,
+                level="info",
+                work_id=self.work_id,
+                work_type="probe",
+                target=target,
+                stage="probing",
+                message=str(payload.get("message") or "Checking candidate"),
+                started_at=now,
+                at=now,
+            )
+            if candidate_id is not None:
+                self._candidate_activity[int(candidate_id)] = (
+                    activity_id, now,
+                )
+            return
+
+        status = str(payload.get("status") or "skipped")
+        if status == "success":
+            activity_status = activity_log.STATUS_SUCCESS
+            level = "info"
+        elif status == "failure":
+            activity_status = activity_log.STATUS_FAILURE
+            level = "error"
+        else:
+            activity_status = activity_log.STATUS_SKIPPED
+            level = "warning"
+        message = str(payload.get("message") or payload.get("reason") or "Candidate checked")
+        tracked = (self._candidate_activity.pop(int(candidate_id), None)
+                   if candidate_id is not None else None)
+        if tracked and tracked[0]:
+            try:
+                updated = self.activity.update(tracked[0], {
+                    "event": activity_log.EVENT_FINISHED,
+                    "status": activity_status,
+                    "level": level,
+                    "message": message,
+                    "stage": "probing",
+                    "finished_at": now,
+                    "duration": max(0, now - int(tracked[1])),
+                })
+                if updated:
+                    return
+            except Exception:
+                pass
+        self.runner._push(
+            event=activity_log.EVENT_FINISHED,
+            status=activity_status,
+            level=level,
+            work_id=self.work_id,
+            work_type="probe",
+            target=target,
+            stage="probing",
+            message=message,
+            started_at=now,
+            finished_at=now,
+            duration=0,
+            at=now,
+        )
 
 
 # ------------------------------------------------------------- progress watch
@@ -455,6 +543,25 @@ def _probe_episode_candidate(job: Mapping[str, Any], _stop: threading.Event) -> 
         conn.close()
 
 
+def _probe_episode_candidates(job: Mapping[str, Any], _stop: threading.Event) -> dict:
+    payload = job.get("payload") or {}
+    conn = _conn_scope()
+    try:
+        result = library.probe_episode_candidates(
+            conn, int(payload["series_id"]), int(payload["episode_id"]),
+            refresh=bool(payload.get("refresh")),
+            all_candidates=bool(payload.get("all")),
+        )
+        return {
+            "status": "done",
+            "message": (f"Probed {result['probed']} candidate(s); "
+                        f"{result['failed']} failed."),
+            "result": result,
+        }
+    finally:
+        conn.close()
+
+
 def _grab_movie(job: Mapping[str, Any], _stop: threading.Event) -> dict:
     payload = job.get("payload") or {}
     conn = _conn_scope()
@@ -529,6 +636,7 @@ def _probe_movie_candidates(job: Mapping[str, Any], _stop: threading.Event) -> d
     try:
         result = library.probe_movie_candidates(
             conn, int(payload["movie_id"]), refresh=bool(payload.get("refresh")),
+            all_candidates=bool(payload.get("all")),
         )
         return {"status": "done",
                 "message": f"Probed {result['probed']} candidate(s); "
@@ -670,7 +778,7 @@ def _work_movie_search(ctx: WorkContext) -> dict:
                       maximum=100)})
     outcome = acquisition.run_movie_iteration(
         ctx.conn, movie, work=ctx.work, reason="auto",
-        stop=lambda: ctx.cancelled,
+        stop=lambda: ctx.cancelled, on_event=ctx.candidate_event,
     )
     stage = str(outcome.get("stage") or "searching_candidates")
     message = str(outcome.get("message") or "Search finished.")
@@ -738,7 +846,7 @@ def _work_episode_search(ctx: WorkContext) -> dict:
     ctx.set_stage("searching_candidates", f"Searching \"{label}\"")
     outcome = acquisition.run_episode_iteration(
         ctx.conn, series, episode, work=ctx.work, reason="auto",
-        stop=lambda: ctx.cancelled,
+        stop=lambda: ctx.cancelled, on_event=ctx.candidate_event,
     )
     stage = str(outcome.get("stage") or "searching_candidates")
     message = str(outcome.get("message") or "Search finished.")
@@ -854,6 +962,7 @@ _JOB_LABELS = {
     "probe_movie_candidate": "Probing stream",
     "probe_movie_candidates": "Probing streams",
     "probe_episode_candidate": "Probing stream",
+    "probe_episode_candidates": "Probing streams",
     "scan_import": "Importing file",
     "scan_import_all": "Importing files",
 }
@@ -933,7 +1042,8 @@ def _job_target(conn, job: Mapping[str, Any]) -> dict:
                 label = f"{_JOB_LABELS.get(kind, 'Working')} \"{series['title']}\""
                 entity_type, entity_id = "series", int(series["id"])
         elif kind in ("grab_episode", "probe_episode_candidate",
-                      "scan_import", "scan_import_all"):
+                      "probe_episode_candidates", "scan_import",
+                      "scan_import_all"):
             episode_id = payload.get("episode_id")
             if episode_id is not None:
                 text = _episode_label(conn, int(episode_id))
@@ -1945,6 +2055,7 @@ def _register_defaults() -> None:
         "probe_movie_candidate": _probe_movie_candidate,
         "probe_movie_candidates": _probe_movie_candidates,
         "probe_episode_candidate": _probe_episode_candidate,
+        "probe_episode_candidates": _probe_episode_candidates,
         "scan_import": _scan_import,
         "scan_import_all": _scan_import_all,
     }.items():

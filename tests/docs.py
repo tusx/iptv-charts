@@ -204,10 +204,10 @@ matches(WORKER, r"web process[^\n]{0,80}(?:only reads|never appends)",
         "docs/WORKER.md says only the bworker writes activity")
 
 contains_ci(QUALITY,
-            ["weighted", "base score", "target_met", "max_score",
+            ["weighted", "base score", "resolution", "target_met", "max_score",
              "target_score", "upgrades", "awaiting_upgrade",
              "current file is re-scored", "probe_batch_per_loop",
-             "candidate_batch_size", "remux", "web-dl"],
+             "candidate_batch_size", "source/quality"],
             "docs/QUALITY_AND_CONNECTIONS.md covers weighted scoring")
 contains_ci(QUALITY,
             ["metadata", "movie", "series", "settings"],

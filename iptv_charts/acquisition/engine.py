@@ -127,6 +127,29 @@ def _work_for(conn, entity_type: str, entity_id: int,
     return store.get_work_by_key(conn, key)
 
 
+def _emit(on_event, **fields) -> None:
+    """Best-effort per-candidate activity callback; never break acquisition."""
+    if on_event is None:
+        return
+    try:
+        on_event(fields)
+    except Exception:
+        pass
+
+
+def _candidate_facts(payload: Mapping[str, Any]) -> str:
+    bits = []
+    if payload.get("resolution"):
+        bits.append(str(payload["resolution"]))
+    if payload.get("video_codec"):
+        bits.append(str(payload["video_codec"]))
+    if payload.get("audio_codecs"):
+        bits.append("audio " + "/".join(payload["audio_codecs"]))
+    if payload.get("subtitle_codecs"):
+        bits.append("subs " + "/".join(payload["subtitle_codecs"]))
+    return " · ".join(bits)
+
+
 def _empty_outcome(stage: str, message: str, *, need_more: bool = False,
                    exhausted: bool = False, stopped: bool = False,
                    next_run_at: int | None = None,
@@ -507,7 +530,8 @@ def _episode_release(conn, candidate: Mapping[str, Any], item: Mapping[str, Any]
 
 def _probe_pending(conn, ctx: dict, scan: Mapping[str, Any], profile,
                    *, limit: int, stop, check_pause: bool,
-                   acquire_timeout: float, now: int | None = None) -> dict:
+                   acquire_timeout: float, now: int | None = None,
+                   on_event=None) -> dict:
     now = _now(now)
     result = {"attempted": 0, "completed": 0, "busy": False,
               "stopped": False, "best": None, "reasons": []}
@@ -536,16 +560,29 @@ def _probe_pending(conn, ctx: dict, scan: Mapping[str, Any], profile,
         item = dict(item) if item is not None else None
         source = dict(source) if source is not None else None
         expected_kind = "vod" if ctx["entity_type"] == "movie" else "series"
+        candidate_name = str(candidate.get("release_name") or
+                             candidate.get("provider_remote_id") or "candidate")
         if (item is None or source is None
                 or int(item["source_id"]) != int(candidate["source_id"])
                 or str(item["kind"]) != expected_kind
                 or str(item["remote_id"]) != str(candidate["provider_remote_id"])):
+            reason = "The catalog item is no longer available or has changed."
             conn.execute(
-                "UPDATE bworker_candidates SET status = 'rejected', updated_at = ? "
-                "WHERE id = ?", (now, int(candidate["id"])),
+                "UPDATE bworker_candidates SET status = 'rejected', "
+                "score_details = ?, updated_at = ? WHERE id = ?",
+                (json.dumps({"reason": reason}, ensure_ascii=False),
+                 now, int(candidate["id"])),
             )
             conn.commit()
+            _emit(on_event, event="probe_skipped", status="skipped",
+                  name=candidate_name, reason=reason,
+                  message=f"Skipped “{candidate_name}”: {reason}",
+                  candidate_id=int(candidate["id"]))
             continue
+        _emit(on_event, event="probe_started", status="running",
+              name=candidate_name,
+              message=f"Checking candidate “{candidate_name}”",
+              candidate_id=int(candidate["id"]))
         if ctx["entity_type"] == "movie":
             release = _movie_release(conn, candidate, item, source)
             probed = probe.probe_movie_release(
@@ -559,15 +596,24 @@ def _probe_pending(conn, ctx: dict, scan: Mapping[str, Any], profile,
         payload = probed.get("probe") or {}
         if payload.get("busy"):
             # Connection-limit contention is not a candidate failure.
+            reason = "The playlist connection is busy; it stays queued."
             conn.execute(
                 "UPDATE bworker_candidates SET status = 'pending', updated_at = ? "
                 "WHERE id = ?", (now, int(candidate["id"])),
             )
             conn.commit()
+            _emit(on_event, event="probe_skipped", status="skipped",
+                  name=candidate_name, reason=reason,
+                  message=f"Deferred “{candidate_name}”: {reason}",
+                  candidate_id=int(candidate["id"]))
             result["busy"] = True
             break
         evaluation = profile.evaluate(probed, ctx["original_language"])
         details = dict(evaluation)
+        if not payload.get("ok") and payload.get("error"):
+            details["probe_error"] = str(payload["error"])
+        if not evaluation.get("eligible") and evaluation.get("reason"):
+            details["skip_reason"] = str(evaluation["reason"])
         if ctx["entity_type"] == "episode":
             prior = candidate.get("score_details")
             if isinstance(prior, str):
@@ -600,8 +646,30 @@ def _probe_pending(conn, ctx: dict, scan: Mapping[str, Any], profile,
         )
         conn.commit()
         result["completed"] += 1
+        facts = _candidate_facts(payload)
         if evaluation.get("reason"):
             result["reasons"].append(str(evaluation["reason"]))
+        if evaluation["eligible"] and payload.get("ok"):
+            _emit(
+                on_event, event="probe_finished", status="success",
+                name=candidate_name, reason="", facts=facts,
+                message=(f"Probed “{candidate_name}”: {facts or 'facts unavailable'}"
+                         f" · score {evaluation.get('score') or 0}"
+                         + (" · needs upgrade" if evaluation.get("needs_upgrade") else "")),
+                candidate_id=int(candidate["id"]),
+            )
+        elif payload.get("ok"):
+            reason = str(evaluation.get("reason") or "Outside the quality profile.")
+            _emit(on_event, event="probe_skipped", status="skipped",
+                  name=candidate_name, reason=reason, facts=facts,
+                  message=f"Skipped “{candidate_name}”: {reason}",
+                  candidate_id=int(candidate["id"]))
+        else:
+            reason = str(payload.get("error") or "ffprobe could not read the stream.")
+            _emit(on_event, event="probe_failed", status="failure",
+                  name=candidate_name, reason=reason,
+                  message=f"Probe failed for “{candidate_name}”: {reason}",
+                  candidate_id=int(candidate["id"]))
         if evaluation["eligible"]:
             best = result["best"]
             if best is None or int(evaluation["score"]) > int(best["score"]):
@@ -613,6 +681,20 @@ def _probe_pending(conn, ctx: dict, scan: Mapping[str, Any], profile,
                     "score": int(evaluation["score"]),
                     "target_met": bool(evaluation["target_met"]),
                 }
+    if len(rows) >= int(limit):
+        remaining = conn.execute(
+            "SELECT id, release_name FROM bworker_candidates "
+            "WHERE scan_id = ? AND status = 'pending' ORDER BY id LIMIT 50",
+            (int(scan["id"]),),
+        ).fetchall()
+        reason = (f"Not probed in this cycle: the probe batch limit ({int(limit)}) "
+                  "was reached; it will be retried on the next cycle.")
+        for row in remaining:
+            name = str(row["release_name"] or "candidate")
+            _emit(on_event, event="probe_skipped", status="skipped",
+                  name=name, reason=reason,
+                  message=f"Deferred “{name}”: {reason}",
+                  candidate_id=int(row["id"]))
     if result["completed"]:
         state.update_scan(conn, int(scan["id"]),
                           probed_increment=result["completed"], now=now)
@@ -1062,7 +1144,7 @@ def _fingerprint(ctx: dict) -> str:
 def _run(conn, ctx: dict, *, work: Mapping[str, Any] | None,
          reason: str, stop, batch_size: int | None,
          probe_limit: int | None, acquire_timeout: float,
-         now: int | None) -> dict:
+         now: int | None, on_event=None) -> dict:
     now = _now(now)
     profile = ctx["profile"]
     entity_type = ctx["entity_type"]
@@ -1127,7 +1209,7 @@ def _run(conn, ctx: dict, *, work: Mapping[str, Any] | None,
         probing = _probe_pending(
             conn, ctx, scan, profile, limit=probe_limit, stop=stop,
             check_pause=(reason == "auto"),
-            acquire_timeout=acquire_timeout, now=now,
+            acquire_timeout=acquire_timeout, now=now, on_event=on_event,
         )
     scan = state.get_scan(conn, int(scan["id"])) or scan
     state.invalidate_stale_candidates(conn, int(scan["id"]), now=now)
@@ -1296,11 +1378,12 @@ def run_movie_iteration(conn, movie: Mapping[str, Any], *, reason: str = "auto",
                         batch_size: int | None = None,
                         probe_limit: int | None = None,
                         acquire_timeout: float = 5.0,
-                        now: int | None = None) -> dict:
+                        now: int | None = None,
+                        on_event=None) -> dict:
     ctx = _movie_context(conn, movie)
     return _run(conn, ctx, work=work, reason=reason, stop=stop,
                 batch_size=batch_size, probe_limit=probe_limit,
-                acquire_timeout=acquire_timeout, now=now)
+                acquire_timeout=acquire_timeout, now=now, on_event=on_event)
 
 
 def run_episode_iteration(conn, series: Mapping[str, Any],
@@ -1311,11 +1394,12 @@ def run_episode_iteration(conn, series: Mapping[str, Any],
                           batch_size: int | None = None,
                           probe_limit: int | None = None,
                           acquire_timeout: float = 5.0,
-                          now: int | None = None) -> dict:
+                          now: int | None = None,
+                          on_event=None) -> dict:
     ctx = _episode_context(conn, series, episode)
     return _run(conn, ctx, work=work, reason=reason, stop=stop,
                 batch_size=batch_size, probe_limit=probe_limit,
-                acquire_timeout=acquire_timeout, now=now)
+                acquire_timeout=acquire_timeout, now=now, on_event=on_event)
 
 
 # ----------------------------------------------------------------------- manual
@@ -1403,6 +1487,9 @@ def bounded_movie_search(conn, movie: Mapping[str, Any], *,
         )
         release["allowed"] = bool(evaluation["eligible"])
         release["reason"] = str(evaluation.get("reason") or "")
+        release["target_met"] = bool(evaluation.get("target_met"))
+        release["needs_upgrade"] = bool(evaluation.get("needs_upgrade"))
+        release["profile_score"] = int(evaluation.get("score") or 0)
         # Per-stream headers can carry tokens and are never part of the
         # manual/API release shape (library.manual_movie_releases strips the
         # same field).

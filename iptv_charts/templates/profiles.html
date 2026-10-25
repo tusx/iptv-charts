@@ -8,7 +8,7 @@
     <p class="crumb"><a href="{{ url_for('settings') }}">Settings</a> / Quality profiles</p>
     <h1>Quality profiles</h1>
     <p class="subtitle">
-      Each profile requires one resolution and at least one quality/source.
+      Resolution is the only required match and sets the minimum score of 10.
       Optional weights refine the score; they never reject a release on their own.
     </p>
   </div>
@@ -66,15 +66,6 @@
       </dl>
 
       <div class="profile-section-block">
-        <h3>Quality / source <span class="muted small">required</span></h3>
-        <div class="quality-chips">
-          {% for option in profile.quality_options %}
-            <span class="quality-chip">{{ option.label }} <span class="weight">+{{ option.weight }}</span></span>
-          {% endfor %}
-        </div>
-      </div>
-
-      <div class="profile-section-block">
         <h3>Optional weights</h3>
         {% set has_optional = [] %}
         {% for section in schema.sections %}
@@ -90,7 +81,7 @@
           {% endif %}
         {% endfor %}
         {% if not has_optional %}
-          <p class="muted small">None. The score is the mandatory base only.</p>
+          <p class="muted small">None. The score is the resolution weight only.</p>
         {% endif %}
       </div>
 
@@ -125,16 +116,6 @@
       </label>
     </div>
 
-    <div class="field">
-      <span>Quality / source options <small class="muted">— at least one; best first</small></span>
-      <div class="option-list" id="profile-quality-list"></div>
-      <div class="option-add-row">
-        <select id="profile-quality-select" aria-label="Add quality/source option"></select>
-        <button class="btn btn-sm" type="button" id="profile-quality-add">Add quality</button>
-      </div>
-      <p class="hint">Move options with the arrow buttons or drag a row. The best matching source adds its weight.</p>
-    </div>
-
     <div class="optional-sections">
       {% for section in schema.sections %}
         <details class="profile-optional" data-section="{{ section.key }}">
@@ -163,14 +144,14 @@
     <div class="field-row profile-score-row">
       <label class="field">
         <span>Target score <small class="muted">— minimum for complete</small></span>
-        <input type="number" id="profile-target" min="20" step="1" value="20">
+        <input type="number" id="profile-target" min="10" step="1" value="10">
       </label>
       <div class="field field-narrow">
         <span>Maximum score</span>
-        <strong class="profile-max" id="profile-max-score">20</strong>
+        <strong class="profile-max" id="profile-max-score">10</strong>
       </div>
     </div>
-    <p class="score-line" id="profile-score-line">Target 20 / Max 20</p>
+    <p class="score-line" id="profile-score-line">Target 10 / Max 10</p>
     <p class="hint">
       A lower-resolution fallback can be eligible but never counts as complete.
       When the target is met at the exact resolution, no upgrade is queued.
