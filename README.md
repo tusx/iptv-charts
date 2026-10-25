@@ -139,46 +139,60 @@ by hand starts HTTP only, so start `python worker.py` in another terminal if
 you do that. In dev mode the media library defaults to
 `~/Media/IPTV Charts`; override it with `IPTV_CHARTS_MEDIA_DIR=/some/path`.
 
-### Running it for real — `setup.deploy.sh`
+### Running it for real — `build.deploy.sh`
 
-Builds a container image and runs it under Podman with a persistent volume and
-a bind-mounted media folder. Supervisor starts the web process (`run.py`) and
-the background worker (`worker.py`); both write to the same volume and either
-can restart independently.
+Builds a container image and runs it under Podman or Docker with persistent
+volumes and a bind-mounted media folder. When both runtimes are installed you
+are asked which to use; `--runtime podman|docker` (or `IPTV_RUNTIME`) skips the
+prompt. Supervisor keeps nginx (the loopback-published public listener),
+gunicorn (the web process), bworker (background work) and Valkey (the activity
+log) running in the one container.
 
 ```bash
-./setup.deploy.sh              # build, deploy, open the browser
-./setup.deploy.sh --build      # build the image only
-./setup.deploy.sh --logs       # follow container logs
-./setup.deploy.sh --status     # container, volume, media and bridge state
-./setup.deploy.sh --stop       # stop and remove the container, keep data
-./setup.deploy.sh --shell      # shell inside the running container
-./setup.deploy.sh --destroy    # remove container AND delete app data
+./build.deploy.sh              # build, deploy, open the browser
+./build.deploy.sh --build      # build the image only
+./build.deploy.sh --logs       # follow container logs
+./build.deploy.sh --status     # container, volume, media and bridge state
+./build.deploy.sh --stop       # stop and remove the container, keep data
+./build.deploy.sh --shell      # shell inside the running container
+./build.deploy.sh --destroy    # remove container AND delete app data
 ```
 
-Overridable via environment: `IPTV_PORT`, `IPTV_IMAGE`, `IPTV_VOLUME`,
-`IPTV_CONTAINER`, and `IPTV_MEDIA_DIR`.
+For a container built from the working tree without touching the production
+container or its data, use `./deploy.dev.build.sh` (image
+`iptv-charts-dev`, port 8771, its own volumes; `--build`, `--logs` and
+`--stop` are supported).
 
-`IPTV_MEDIA_DIR` defaults to `~/Media/IPTV Charts`. The deploy script creates
-`Movies/` and `Series/` inside it and mounts the whole folder at `/media` in
-the container. `--destroy` deletes the container and the app volume, never the
-media folder.
+Overridable via environment: `IPTV_RUNTIME`, `IPTV_PORT`, `IPTV_IMAGE`,
+`IPTV_VOLUME`, `IPTV_CONFIG_VOLUME`, `IPTV_CACHE_VOLUME`, `IPTV_CONTAINER`,
+and `IPTV_MEDIA_DIR`.
+
+`IPTV_MEDIA_DIR` defaults to `~/Media/IPTV Charts`. If the folder already
+contains a movie library (`Movies`/`movies`/`movie`) or a series library
+(`Series`/`series`/`tv`/`tv shows`/`tv-shows`), that folder is used as-is
+(case-insensitively); `Movies/` and `Series/` are created only when neither
+exists. The whole folder is mounted at `/media` in the container, and the app
+is told which subfolder to write to. `--destroy` deletes the container and the
+app volumes, never the media folder.
 
 ## Where your data lives
 
 **The two modes use different databases.** This is deliberate — the container
-uses a Podman named volume so it survives rebuilds, while the dev mode uses
-the ordinary XDG location on the host. A playlist added in one will not appear
-in the other.
+uses a named volume so it survives rebuilds, while the dev mode uses the
+ordinary XDG location on the host. A playlist added in one will not appear in
+the other.
 
-| | Dev mode (`setup.test.sh`) | Container (`setup.deploy.sh`) |
+| | Dev mode (`setup.test.sh`) | Container (`build.deploy.sh`) |
 |---|---|---|
 | Database | `~/.local/share/iptv-charts/` | volume `iptv-charts-data`, mounted at `/data` |
-| Runtime prefs | `~/.config/iptv-charts/` | `/config` inside the container |
+| Runtime prefs | `~/.config/iptv-charts/` | volume `iptv-charts-config`, mounted at `/config` |
+| Cache | `~/.cache/iptv-charts/` | volume `iptv-charts-cache`, mounted at `/cache` |
 | Media library | `~/Media/IPTV Charts/` (override with `IPTV_CHARTS_MEDIA_DIR`) | host `IPTV_MEDIA_DIR`, mounted at `/media` |
 | Play queue | n/a — the player is launched directly | `$XDG_RUNTIME_DIR/iptv-charts/` |
 
-To inspect or back up the container's database:
+Config and cache live in named volumes too, so replacing the container does
+not silently discard runtime preferences or cached metadata. To inspect or
+back up the container's database:
 
 ```bash
 podman volume inspect iptv-charts-data --format '{{.Mountpoint}}'
@@ -207,7 +221,7 @@ the settings page. In the container, a small host-side watcher runs the player:
 ./scripts/player-bridge.sh --stop     # stop it
 ```
 
-`setup.deploy.sh` restarts the bridge on every deploy. It is supervised: if the
+`build.deploy.sh` restarts the bridge on every deploy. It is supervised: if the
 bridge exits, it is started again, and `--status` finds it even if its pid file
 was lost. It publishes a heartbeat and a list of the players installed on the
 host, which is how the settings page can offer them. Browser playback is
@@ -487,7 +501,8 @@ same page outside the settings form.
 
 ### Logs
 
-`podman logs -f iptv-charts` (or `./setup.deploy.sh --logs`) shows startup, the
+`podman logs -f iptv-charts` (or `./build.deploy.sh --logs`; with Docker, use
+`docker logs -f iptv-charts`) shows startup, the
 mode it is in, every write, every failure, playback requests, queue events,
 download starts and imports, task runs, and metadata failures. Reads are left
 out on purpose — the sync poll runs every second and would bury everything
@@ -617,7 +632,8 @@ run.py               web entry point (waitress; --dev for the Flask reloader)
 worker.py            background worker entry point (one job at a time)
 supervisord.conf     container process supervision (web + worker)
 setup.test.sh        live dev build (starts both processes)
-setup.deploy.sh      container build and deploy
+build.deploy.sh      container build and deploy (Podman or Docker)
+deploy.dev.build.sh  working-tree container on a separate port/volume
 Containerfile        image definition (includes ffmpeg for downloads)
 iptv_charts/
   app.py             Flask factory, page routes, request guards
