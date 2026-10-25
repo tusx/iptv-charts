@@ -243,32 +243,6 @@
     button.addEventListener('click', () => syncOne(button.dataset.sourceId, button));
   });
 
-  $$('[data-search-missing]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const original = button.textContent;
-      button.disabled = true;
-      button.textContent = 'Starting…';
-      try {
-        await postJSON('/api/tasks/search_missing/run', {
-          scope: button.dataset.searchScope || 'all',
-        });
-        button.textContent = '✓ Search started';
-        window.setTimeout(() => {
-          button.disabled = false;
-          button.textContent = original;
-        }, 1600);
-      } catch (error) {
-        button.textContent = '✕ Failed';
-        button.title = error.message;
-        window.setTimeout(() => {
-          button.disabled = false;
-          button.textContent = original;
-          button.title = '';
-        }, 2200);
-      }
-    });
-  });
-
   $('#sync-all-btn')?.addEventListener('click', async (event) => {
     event.currentTarget.disabled = true;
     try {

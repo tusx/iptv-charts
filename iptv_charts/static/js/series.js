@@ -4,7 +4,7 @@
   'use strict';
 
   const {
-    $, get, post, setStatus, debounce, element, imageUrl, open, feedback,
+    $, get, post, setStatus, debounce, element, imageUrl, open,
   } = Manager;
 
   const dialog = $('#add-series-dialog');
@@ -110,14 +110,4 @@
     row.append(poster, body, add);
     return row;
   }
-
-  $('#search-missing-btn')?.addEventListener('click', async (event) => {
-    const button = event.currentTarget;
-    try {
-      await post('/api/tasks/search_missing/run', { scope: 'series' });
-      feedback(button, 'Search started');
-    } catch (error) {
-      feedback(button, error.message, false);
-    }
-  });
 })();

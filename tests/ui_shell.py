@@ -252,12 +252,18 @@ def test_topbar_and_home(client) -> None:
     for icon in ("fa-tv", "fa-plus", "fa-calendar-days", "fa-bullseye", "fa-gear"):
         check_true(f"series card uses {icon}", icon in series)
 
-    check_true("movies Settings button points at the settings page",
-               'href="/settings"' in movies)
-    check_true("series Settings button points at the settings page",
-               'href="/settings"' in series)
-    check_true("IPTV Settings button points at the settings page",
-               'href="/settings"' in iptv)
+    check_true("movies Settings button points at the movie settings page",
+               'href="/movies/settings"' in movies)
+    check_true("series Settings button points at the series settings page",
+               'href="/series/settings"' in series)
+    check_true("IPTV Settings button points at the IPTV settings card",
+               'href="/playlists#iptv-settings"' in iptv)
+    check_true("movies Explore button", 'href="/explore/movies"' in movies)
+    check_true("series Explore button", 'href="/explore/series"' in series)
+    check_true("movies Import existing button",
+               'href="/import?tab=movie"' in movies)
+    check_true("series Import existing button",
+               'href="/import?tab=series"' in series)
 
     check_true("movies open button keeps its href", 'href="/movies"' in movies)
     check_true("movies add button keeps its href", 'href="/movies?add=1"' in movies)
@@ -273,9 +279,10 @@ def test_topbar_and_home(client) -> None:
     check_true("add playlist button keeps its id", 'id="add-open-btn"' in iptv)
     check_true("update-all button keeps its id", 'id="sync-all-btn"' in iptv)
     check_true("batch progress block kept", 'id="batch-progress"' in iptv)
-    check("search-missing buttons kept", page.count("data-search-missing"), 2)
-    check_true("movies search scope kept", 'data-search-scope="movies"' in movies)
-    check_true("series search scope kept", 'data-search-scope="series"' in series)
+    check("retired manual Search-missing buttons removed",
+          page.count("data-search-missing"), 0)
+    check_true("no retired search-missing task endpoint in home",
+               "/api/tasks/search_missing/run" not in page)
     check_true("playlist edit link kept",
                re.search(r'href="/playlists/\d+/edit"', iptv) is not None)
     check_true("playlist browse link kept",

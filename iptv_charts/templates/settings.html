@@ -129,6 +129,16 @@
   <a class="btn" href="{{ url_for('manager.scan_page') }}">Open library scan</a>
 </section>
 
+<section class="settings-card" id="storage-settings">
+  <h2>{{ icon('folder-open') }} Download folder</h2>
+  <p class="hint">
+    Browse the media root, inspect active transfers, delete a file or empty a
+    library folder. Deleting an active staging file asks for a second
+    confirmation and cancels its download first.
+  </p>
+  <a class="btn" href="{{ url_for('storage.storage_page') }}">Open download folder</a>
+</section>
+
 <section class="settings-card" id="backup-settings">
   <h2>{{ icon('box-archive') }} Backup and restore</h2>
   <p class="hint">

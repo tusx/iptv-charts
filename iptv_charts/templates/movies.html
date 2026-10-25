@@ -19,7 +19,9 @@
     {% else %}
       <a class="btn" href="{{ url_for('settings') }}#metadata-settings">Set up TMDB</a>
     {% endif %}
-    <button type="button" class="btn btn-ghost" id="search-missing-btn">Search missing</button>
+    <a class="btn btn-ghost" href="{{ url_for('explore.movies_page') }}">Explore</a>
+    <a class="btn btn-ghost" href="{{ url_for('import_media.import_page', tab='movie') }}">Import existing</a>
+    <a class="btn btn-ghost" href="{{ url_for('settings_sections.movies_settings') }}">Settings</a>
   </div>
 </section>
 

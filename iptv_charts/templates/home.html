@@ -15,6 +15,7 @@
   </div>
   <div class="page-actions">
     <a class="btn btn-ghost" href="{{ url_for('manager.activity') }}">{{ icon('chart-line') }} Activity</a>
+    <a class="btn btn-ghost" href="{{ url_for('storage.storage_page') }}">{{ icon('folder-open') }} Download folder</a>
     <a class="btn btn-ghost" href="{{ url_for('settings') }}">{{ icon('gear') }} Settings</a>
   </div>
 </section>
@@ -39,9 +40,8 @@
         <button class="btn btn-sm" type="button" id="sync-all-btn">{{ icon('arrows-rotate') }} Update all</button>
         <a class="btn btn-sm btn-ghost" href="{{ url_for('sources_list') }}">{{ icon('sliders') }} Manage</a>
       {% endif %}
-      {# TODO(A07/integration): IPTV settings will live at the bottom of the
-         playlists manage page; point there once that section exists. #}
-      <a class="btn btn-sm btn-ghost" href="{{ url_for('settings') }}">{{ icon('gear') }} Settings</a>
+      {# IPTV player/playlist settings live at the bottom of the manage page. #}
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('sources_list') }}#iptv-settings">{{ icon('gear') }} Settings</a>
     </div>
 
     <div class="batch-progress" id="batch-progress" hidden>
@@ -141,12 +141,9 @@
       {% endif %}
       <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.movies_calendar') }}">{{ icon('calendar-days') }} Calendar</a>
       <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.movies_wanted') }}">{{ icon('bullseye') }} Wanted</a>
-      {# Search-missing gets its icon from shell.css: app.js swaps this
-         button's textContent, which would remove a child icon element. #}
-      <button class="btn btn-sm btn-ghost" type="button" data-search-missing data-search-scope="movies">Search missing</button>
-      {# TODO(A07/integration): point at the movies section settings page once
-         that route exists; /settings is the current settings page. #}
-      <a class="btn btn-sm btn-ghost" href="{{ url_for('settings') }}">{{ icon('gear') }} Settings</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('explore.movies_page') }}">{{ icon('compass') }} Explore</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('import_media.import_page', tab='movie') }}">{{ icon('file-import') }} Import existing</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('settings_sections.movies_settings') }}">{{ icon('gear') }} Settings</a>
     </div>
     {% if not tmdb_configured %}
       <p class="hint">Add a TMDB key in Settings to search for movies.</p>
@@ -178,12 +175,9 @@
       {% endif %}
       <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.series_calendar') }}">{{ icon('calendar-days') }} Calendar</a>
       <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.series_wanted') }}">{{ icon('bullseye') }} Wanted</a>
-      {# Search-missing gets its icon from shell.css: app.js swaps this
-         button's textContent, which would remove a child icon element. #}
-      <button class="btn btn-sm btn-ghost" type="button" data-search-missing data-search-scope="series">Search missing</button>
-      {# TODO(A07/integration): point at the series section settings page once
-         that route exists; /settings is the current settings page. #}
-      <a class="btn btn-sm btn-ghost" href="{{ url_for('settings') }}">{{ icon('gear') }} Settings</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('explore.series_page') }}">{{ icon('compass') }} Explore</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('import_media.import_page', tab='series') }}">{{ icon('file-import') }} Import existing</a>
+      <a class="btn btn-sm btn-ghost" href="{{ url_for('settings_sections.series_settings') }}">{{ icon('gear') }} Settings</a>
     </div>
     {% if not tmdb_configured %}
       <p class="hint">Add a TMDB key in Settings to search for series.</p>
@@ -197,8 +191,26 @@
 {% block footer_extra %}
   <span class="dot" aria-hidden="true">·</span>
   <span id="global-sync-status" class="muted"></span>
+  <span class="dot" aria-hidden="true">·</span>
+  <span id="update-status" class="muted" role="status" hidden></span>
 {% endblock %}
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script>
+  // Advisory only: the updater is always manual and never downloads from here.
+  (() => {
+    const target = document.getElementById('update-status');
+    if (!target) return;
+    fetch('/api/update/status', { cache: 'no-store' })
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => {
+        if (!data || !data.update_available || !data.latest) return;
+        target.hidden = false;
+        target.textContent =
+          `Version ${data.latest} is available — run ./download.and.deploy.sh to update.`;
+      })
+      .catch(() => {});
+  })();
+</script>
 {% endblock %}

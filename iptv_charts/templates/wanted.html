@@ -23,8 +23,6 @@
       {% endif %}
     </p>
   </div>
-  <div class="page-actions">
-    <button type="button" class="btn btn-primary" id="search-missing-btn">Search missing</button>
   </div>
 </section>
 
@@ -108,16 +106,4 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
-<script>
-  document.getElementById('search-missing-btn')?.addEventListener('click', async (event) => {
-    const button = event.currentTarget;
-    try {
-      await Manager.post('/api/tasks/search_missing/run', { scope: '{{ section }}' });
-      Manager.feedback(button, 'Search started');
-    } catch (error) {
-      Manager.feedback(button, error.message, false);
-    }
-  });
-</script>
 {% endblock %}
