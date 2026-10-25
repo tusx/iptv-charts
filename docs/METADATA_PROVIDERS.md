@@ -34,6 +34,22 @@ Implementation:
 - `GET /search/movie`, `GET /search/tv`, `GET /movie/{id}`,
   `GET /tv/{id}`, and `GET /tv/{id}/season/{n}` are used.
 - Movie/TV details request `append_to_response=external_ids,alternative_titles`.
+  The returned TMDB and IMDb ids are stored on movie rows; the IMDb id is used
+  for ID-first catalog matching when a provider supplies it.
+- **Explore discovery feeds** use these read-only list endpoints:
+  - movies: `/trending/movie/{day|week}`, `/movie/popular`,
+    `/movie/top_rated`, `/movie/upcoming`, `/movie/now_playing`;
+  - series: `/trending/tv/{day|week}`, `/tv/popular`, `/tv/top_rated`,
+    `/tv/on_the_air`, `/tv/airing_today`.
+
+  The Explore tabs show trending, popular, top rated and upcoming for movies,
+  and those plus on the air and airing today for series. Weekly trending is the
+  default. Feeds are cached in `metadata_cache` for 15 minutes and normalised
+  into the same summary shape as search results, with an extra `media_type`
+  field. The Explore API never returns a provider URL or credential.
+- Posters are served through the local image proxy (`/api/image/<size>/<path>`),
+  which whitelists TMDB sizes and validates the path. No page loads images from
+  a CDN.
 - `429 Retry-After` is honoured once; `401/403` is reported as a token error;
   `404` is reported without leaking the request URL.
 

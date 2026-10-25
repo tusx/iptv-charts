@@ -1,10 +1,10 @@
 # Runtime dependencies for IPTV Charts.
 #
-# Deliberately small. Anything added here also has to be vendored into the
-# Flatpak build (see flatpak/), so keep the list tight.
+# Deliberately small. The app runs from a virtualenv in development and from
+# the container image in production (see Containerfile); keep the list tight.
 #
-# Pinned as ranges for the venv; the Flatpak build pins exact versions with
-# SHA256s via flatpak-pip-generator.
+# Pinned as ranges for both paths. The container installs these versions
+# directly into its own virtualenv.
 
 Flask>=3.1,<4
 requests>=2.32,<3

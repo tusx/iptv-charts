@@ -4,6 +4,163 @@ All notable changes to IPTV Charts are recorded here. The project follows
 semantic-ish versioning while the app is pre-1.0: the minor version changes
 when the library schema or user-visible workflow changes.
 
+## 0.8.0 — 2026-10-25
+
+### Added
+
+- **The bworker.** The background process is now `bworker.py` and owns every
+  slow or provider-facing operation, one bounded unit at a time. It claims
+  imperative `worker_jobs` first and declarative `bworker_work` second, so
+  playlist syncs, downloads, manual searches and scans cannot overlap automatic
+  per-item work.
+- **Durable stages, retries and pause/resume.** Work rows carry a stage,
+  cursor, failure count, next run time, policy and reset flag. Stages include
+  `waiting_availability`, `waiting_air`, `searching_candidates`, `probing`,
+  `downloading`, `verifying`, `awaiting_upgrade`, `no_candidates` and
+  `failed`. Policies set attempts, delay, backoff and a cap per work type.
+  Pause is observed between units; reset re-queues failed work.
+- **Valkey activity log.** The Activity page has a live, newest-first stream
+  written only by the bworker. Entries update in place, the list is capped at
+  500 and trimmed to 100, and a missing Valkey degrades the log without failing
+  any work. The page shows current work, progress, queue counts, pause/resume
+  and reset-failed controls.
+- **Weighted quality profiles.** A profile is one mandatory resolution plus
+  weighted quality/source options and optional video codec, audio codec, audio
+  language, audio channel, subtitle format and subtitle language sections.
+  Mandatory resolution and selected source form the base score; optional
+  matches add weight without rejecting a candidate. Target and maximum scores
+  are visible, and a lower-resolution fallback is downloaded only with
+  upgrades enabled and marked `awaiting_upgrade`.
+- **Three immutable built-in profiles.** **4K** (2160p), **1080p** (the
+  default) and **720p** each accept REMUX, BluRay, BDRip, WEB-DL, WEBRip, HDTV,
+  SD-TV and DVD at 10 points per option, with target and maximum 20. Built-ins
+  cannot be edited or deleted and their names are reserved. A custom profile
+  builder supports every resolution and source, weights from 1 to 1000 and a
+  target from 20 to the computed maximum.
+- **ID-first candidate acquisition.** Automatic search resolves a TMDB ID,
+  then an IMDb ID, then title/year; catalog paging is keyset-based (`id >
+  cursor`), not offset-based. Each bworker iteration discovers at most the
+  candidate batch (default 25), expands at most three series containers, and
+  probes at most three candidates one ffprobe at a time before choosing a
+  release or asking for another iteration. State is durable, candidates are
+  deduplicated, and the current file's provider identity is never downloaded
+  again.
+- **Explore Movies and Explore Series.** Cached TMDB discovery feeds
+  (trending, popular, top rated, upcoming, on the air, airing today), details,
+  add-to-library and a read-only local playlist lookup. Explore never writes to
+  the library.
+- **Import existing and manual metadata.** `/import` scans the media folders,
+  proposes matches and imports only confirmed files. It also provides manual
+  TMDB/TVDB metadata search, preview and apply for existing movies and series.
+- **Storage view.** `/storage` browses `Movies/`, `Series/` and `.incomplete/`
+  through a confined tree, deletes files or empty folders after confirmation,
+  cancels an active staging download when its file is deleted, and refuses
+  while a scan/import is in progress.
+- **Durable item stage cards and history.** Movie and series detail pages show
+  the current stage, next run, failure reason and recent events from
+  `bworker_events`.
+- **Split settings pages.** `/settings` owns global metadata, refresh schedule,
+  section links, quality profiles, library scan and backup. IPTV player and
+  staleness settings moved to `/playlists#iptv-settings`; naming, defaults,
+  search intervals, candidate batches and probes moved to `/movies/settings`
+  and `/series/settings`. Each section saves independently; global fields save
+  atomically.
+- **Four-process container.** nginx 1.29.8 on the published port serves
+  vendored static files and proxies to gunicorn on loopback; the bworker has no
+  socket; a RAM-only Valkey sidecar backs the activity log; supervisor keeps
+  all four alive. Health requires the app and a live bworker heartbeat and
+  reports Valkey separately.
+- **Verified manual updates.** `download.and.deploy.sh` resolves a GitHub
+  release for `tusx/iptv-charts`, verifies the SHA-256 before extraction,
+  rejects unsafe archive paths, compares versions, installs to a stable
+  directory and runs the verified `build.deploy.sh`. The in-app
+  `/api/update/status` check is advisory, cached for six hours and can be
+  disabled.
+- **Backup format v2.** Bworker work, policies and events are archived
+  alongside sources, profiles, library, downloads, alternates and settings.
+  Format-v1 archives remain readable.
+- **A docs consistency suite.** `tests/docs.py` checks the version, changelog,
+  README coverage, stale repository/build references and internal links.
+
+### Changed
+
+- The home dashboard reports **Missing** movies and **missing episodes**, keeps
+  the IPTV/Movies/Series actions close to their cards, and no longer carries a
+  navigation menu in the top bar. Movies and Series keep their own Library /
+  Wanted / Calendar tabs.
+- External playback is **off by default**. Player choice, custom command,
+  syntax check and playlist stale-after now live in the IPTV settings card at
+  the bottom of the playlist management page; player buttons are hidden while
+  the switch is off.
+- Automatic search is declarative bworker work. The old scheduler search task
+  is retired; global metadata refresh remains weekly and catalog refresh daily.
+  Scheduled tasks no longer have run-now buttons — pause/resume and reset are
+  the controls.
+- Download retries for automatic work are owned by bworker policies. Manual
+  downloads keep their durable retry schedule.
+- Candidate selection re-scores the current file from stored media facts under
+  the current profile rather than trusting a score written by an older profile.
+- The dev test script still launches `worker.py`, now a compatibility shim for
+  the bworker; the documented entry point is `bworker.py`.
+- Documentation is rewritten for the bworker, weighted profiles, split
+  settings, Explore/Import/Storage, container topology, verified updates and
+  the destructive profile reset.
+
+### Removed
+
+- **Old quality-profile rules and data.** The ordered quality list, stopping
+  point, audio mode, subtitle mode and probe-required toggle are no longer
+  profile features. The v4 → v5 migration deletes every existing profile and
+  assigns every movie and series to the built-in 1080p profile. There is no
+  migration of custom profile rules.
+- The global unified settings form and its single save for unrelated sections.
+- Scheduler-driven missing-item search and manual run-now buttons for periodic
+  tasks.
+- The old two-process container description and `setup.deploy.sh` workflow.
+- Stale Flatpak packaging notes from the dependency comments. Flatpak remains
+  supported only as a way to install VLC for external playback.
+
+### Fixed
+
+- A paused bworker now reports as alive and healthy while refusing new units,
+  instead of looking like a crashed worker.
+- Restore refuses active bworker work and imperative jobs, but permits a paused
+  bworker; derived candidate and scan pages are cleared and work is re-seeded.
+- A missing or damaged Valkey cannot stall downloads, probes or playlist
+  syncs; the activity page shows a degraded state.
+- Built-in profiles are repaired at startup without deleting a custom profile
+  that happens to use a reserved name.
+- Candidate lookup uses indexed TMDB/IMDb identities and cannot be shifted by a
+  concurrent catalog sync.
+- Deleting an active staging file cancels its download; deleting an empty
+  folder cannot escape the media root or follow a symlink.
+- Failed work is stopped with a visible reason instead of retrying silently
+  forever, and can be reset from Activity.
+- Internal documentation links, repository references and dependency comments
+  point at the current code and `tusx/iptv-charts` repository.
+
+### Upgrade notes
+
+- **The profile reset is destructive.** On first start after upgrading, every
+  old profile is deleted and every movie and series is reassigned to the
+  built-in **1080p** profile. Custom rules, weights, audio/subtitle constraints
+  and per-item profile choices are not migrated. Take a backup first, then
+  re-create custom profiles and reassign items.
+- **Back up before upgrading.** A v0.7 backup can be restored into 0.8.0, but
+  its old profile rows are ignored and its movies/series receive the 1080p
+  default. Backups made by 0.8.0 (format v2) preserve weighted profiles and
+  bworker work/policies/events.
+- **Pause bworker before restoring.** A paused bworker is safe; a running one,
+  an active download, a queued job or a sync refuses the restore.
+- **External player is now off by default.** Re-enable it in the IPTV settings
+  card if you rely on it.
+- Named volumes are preserved by `build.deploy.sh`, the dev container and the
+  updater. Do not delete the data volume to "clean up" an upgrade; export a
+  backup instead.
+- Scheduled search has no run-now button. Missing items are searched by the
+  bworker on their intervals; use **Search missing** for an explicit section
+  scan.
+
 ## 0.7.0 — 2026-10-20
 
 ### Added

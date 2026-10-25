@@ -734,11 +734,11 @@ def movie_detail(movie_id: int):
         main_key=f"{main_identity[0]}:{main_identity[1]}" if main_identity else "",
         search_pending=_movie_search_pending(conn, movie_id),
         downloads=_active_for_movie(conn, movie_id),
+        tmdb_configured=metadata.has_tmdb(conn),
         **_media_context(),
     )
 
 
-# -------------------------------------------------------------------- series
 # --------------------------------------------------------- series stage view
 # The series page shows the aggregate bworker stage for the whole show, the
 # current episode stages and the durable last-15 event history. The read-only
@@ -1414,6 +1414,7 @@ def _series_bworker_now(state: dict, paused: bool) -> str:
     return "Idle — waiting for the next scheduled search."
 
 
+# -------------------------------------------------------------------- series
 @bp.get("/series")
 def series():
     conn = _conn()
@@ -1444,15 +1445,14 @@ def series_detail(series_id: int):
     episodes = library.series_episodes(conn, series_id)
     _, active = _active_maps(conn)
     _decorate_series([item])
-    return render_template(
     profiles = _profiles(conn)
     view = _series_stage_view(conn, item, episodes, active, profiles)
+    return render_template(
         "series_detail.html",
         series=item,
         seasons=view["seasons"],
         profiles=profiles,
         history=_history_for(conn, series_id=series_id),
-        **_media_context(),
         stage=view["state"],
         stage_events=view["events"],
         counts=view["counts"],
@@ -1463,6 +1463,7 @@ def series_detail(series_id: int):
         upgrades=view["upgrades"],
         bworker_paused=view["paused"],
         tmdb_configured=metadata.has_tmdb(conn),
+        **_media_context(),
     )
 
 

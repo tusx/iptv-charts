@@ -178,30 +178,21 @@ after a failed refresh it keeps the last confirmed release in the result and
 reports the error. `IPTV_CHARTS_UPDATE_API` and `IPTV_CHARTS_UPDATE_TIMEOUT`
 exist for tests/mirrors only.
 
-### Integration (templates/app are integration-owned)
+### Where the check is exposed
 
-Register the blueprint in `iptv_charts/app.py` after the bworker blueprint:
+The update blueprint is registered in `iptv_charts/app.py` after the other
+feature blueprints, so `GET /api/update/status` is available in 0.8.0. The
+response is the only integration surface: it is read-only and returns the
+`latest`, `url` and `update_command` fields described above.
 
-```python
-from .update_web import bp as update_web_bp
-...
-app.register_blueprint(update_web_bp)
-```
-
-Suggested UI placement:
-
-- Global `/settings` page (`templates/settings.html`): an **Updates** card
-  rendering the status fields with a **Check now** button that fetches
-  `/api/update/status?refresh=1`. When `update_available` is true, show the
-  `latest` version, the `url`, and `update_command` in a copyable `<code>`
-  block, with a note that the update is manual.
-- Optional site-wide banner in `templates/base.html` (inside the page shell,
-  before the main content or in the footer): fetch `/api/update/status` once
-  on load, render only when `update_available` is true, and make it
-  dismissible. Use plain `fetch`; no CDN, Vue or build step is involved.
-
-`error` may be shown as muted helper text on a manual check; on automatic page
-loads it should stay hidden.
+0.8.0 does **not** add an update card or banner to the rendered UI. Users can
+call the endpoint directly (or read `update_command` from it) and run
+`download.and.deploy.sh`; the README documents that manual path. A future UI
+card would only need to fetch the same endpoint with `refresh=1` and display
+`update_available`, `latest`, `url` and `update_command`; it must not apply an
+update from the browser. No CDN, Vue or build step is involved. `error` may be
+shown as muted helper text on a manual check; on automatic page loads it should
+stay hidden.
 
 ## Tests
 
