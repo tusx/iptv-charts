@@ -103,14 +103,77 @@ def media_host_dir() -> str:
     return os.environ.get("IPTV_CHARTS_MEDIA_HOST_DIR") or str(media_dir())
 
 
+#: Optional names or paths for the two library folders. An absolute value is
+#: used as-is; a relative value is resolved under ``media_dir()``. The defaults
+#: stay ``Movies``/``Series``, but an existing folder with one of the aliases
+#: below is adopted instead, so a pre-existing ``movies`` or ``TV Shows``
+#: library does not end up next to an empty default folder.
+MOVIE_DIR_ENV = "IPTV_CHARTS_MOVIE_DIR"
+SERIES_DIR_ENV = "IPTV_CHARTS_SERIES_DIR"
+MOVIE_FOLDER_ALIASES = ("movies", "movie")
+SERIES_FOLDER_ALIASES = ("series", "tv", "tv shows", "tv-shows")
+
+
+def _library_override(var: str) -> Path | None:
+    raw = os.environ.get(var)
+    if not raw:
+        return None
+    path = Path(raw)
+    return path if path.is_absolute() else media_dir() / path
+
+
+def _detect_library_dir(root: Path, aliases: tuple[str, ...],
+                        canonical: str) -> Path | None:
+    """Find an existing library folder under *root*, case-insensitively.
+
+    The canonical name wins when it exists, then the aliases in their declared
+    order. Only real directories count: a file called ``movies`` is not a
+    library. Missing/unreadable roots simply mean "not detected".
+    """
+    candidate = root / canonical
+    try:
+        if candidate.is_dir():
+            return candidate
+    except OSError:
+        return None
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return None
+    directories = {
+        entry.name.casefold(): entry
+        for entry in entries
+        if not entry.is_symlink() and entry.is_dir()
+    }
+    for alias in aliases:
+        found = directories.get(alias.casefold())
+        if found is not None:
+            return found
+    return None
+
+
+def detect_movie_library_dir(root: Path | None = None) -> Path | None:
+    """The existing movie folder under the media root, if there is one."""
+    return _detect_library_dir(root or media_dir(), MOVIE_FOLDER_ALIASES, "Movies")
+
+
+def detect_series_library_dir(root: Path | None = None) -> Path | None:
+    """The existing series folder under the media root, if there is one."""
+    return _detect_library_dir(root or media_dir(), SERIES_FOLDER_ALIASES, "Series")
+
+
 def movie_library_dir() -> Path:
-    path = media_dir() / "Movies"
+    path = (_library_override(MOVIE_DIR_ENV)
+            or detect_movie_library_dir()
+            or media_dir() / "Movies")
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def series_library_dir() -> Path:
-    path = media_dir() / "Series"
+    path = (_library_override(SERIES_DIR_ENV)
+            or detect_series_library_dir()
+            or media_dir() / "Series")
     path.mkdir(parents=True, exist_ok=True)
     return path
 

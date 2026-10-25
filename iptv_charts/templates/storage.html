@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Storage · {{ app_name }}{% endblock %}
+
+{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/storage.css') }}">
+
+<section class="page-head">
+  <div>
+    <p class="crumb"><a href="{{ url_for('home') }}">Home</a> / Storage</p>
+    <h1>Storage</h1>
+    <p class="subtitle">
+      Files under <code>{{ media_host_dir }}</code>. Viewing is read-only;
+      deleting a file or emptying a folder always asks first.
+    </p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-sm btn-ghost" href="{{ url_for('manager.activity') }}">Activity</a>
+    <button class="btn btn-sm" id="storage-refresh" type="button">Refresh</button>
+    <button class="btn btn-sm btn-danger" id="storage-empty-btn" type="button" disabled>
+      Empty folder
+    </button>
+  </div>
+</section>
+
+<div id="storage-page"
+     data-tree-url="{{ url_for('storage.storage_tree') }}"
+     data-delete-url="{{ url_for('storage.storage_delete_file') }}"
+     data-empty-url="{{ url_for('storage.storage_empty_folder') }}">
+
+  <div class="storage-toolbar">
+    <label class="storage-root-label" for="storage-root">View</label>
+    <select id="storage-root" class="storage-root-select" aria-label="Choose a storage folder">
+      <option value="all">All media folders</option>
+      {% for folder in folders %}
+        <option value="{{ folder.key }}"
+                data-label="{{ folder.label }}"
+                {% if not folder.exists %}data-unavailable="1"{% endif %}>
+          {{ folder.label }}{% if not folder.exists %} (unavailable){% endif %}
+        </option>
+      {% endfor %}
+    </select>
+    <span class="storage-root-path muted small" id="storage-root-path">{{ media_dir }}</span>
+  </div>
+
+  <p class="hint" id="storage-status" role="status"></p>
+  <div class="storage-stats" id="storage-stats"></div>
+
+  <div id="storage-tree" class="storage-tree" aria-live="polite">
+    <p class="muted">Loading the media folders…</p>
+  </div>
+
+  <p class="hint storage-footnote">
+    Symbolic links are shown but never followed. Files in <code>.incomplete</code>
+    belong to downloads in progress and are marked with their transfer state.
+  </p>
+</div>
+
+<dialog class="dialog" id="storage-delete-dialog">
+  <div class="dialog-head">
+    <h2>Delete file</h2>
+    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <div class="dialog-body">
+    <p class="storage-dialog-lead">
+      Delete <strong id="storage-delete-name"></strong>?
+    </p>
+    <p class="hint storage-dialog-path" id="storage-delete-path"></p>
+
+    <div class="note note-warn" id="storage-delete-active" hidden>
+      <p>
+        This file belongs to an active download
+        (<span id="storage-delete-active-label"></span>). Deleting it cancels
+        that download first.
+      </p>
+      <label class="check">
+        <input type="checkbox" id="storage-delete-active-confirm">
+        Cancel the download and delete its file
+      </label>
+    </div>
+
+    <label class="check">
+      <input type="checkbox" id="storage-delete-confirm">
+      I understand this permanently deletes the file
+    </label>
+    <p class="hint" id="storage-delete-status" role="status"></p>
+  </div>
+  <div class="dialog-foot">
+    <span class="spacer"></span>
+    <button class="btn btn-ghost" type="button" data-close>Cancel</button>
+    <button class="btn btn-danger" id="storage-delete-submit" type="button" disabled>
+      Delete file
+    </button>
+  </div>
+</dialog>
+
+<dialog class="dialog" id="storage-empty-dialog">
+  <div class="dialog-head">
+    <h2>Empty folder</h2>
+    <button class="icon-btn" type="button" data-close aria-label="Close">×</button>
+  </div>
+  <div class="dialog-body">
+    <p class="storage-dialog-lead">
+      Empty <strong id="storage-empty-name"></strong>?
+    </p>
+    <p class="hint">
+      Every file and subfolder inside it is deleted. The folder itself is kept.
+    </p>
+
+    <div class="note note-warn" id="storage-empty-active" hidden>
+      <p>
+        This folder contains active downloads
+        (<span id="storage-empty-active-label"></span>). Emptying it cancels
+        them first.
+      </p>
+      <label class="check">
+        <input type="checkbox" id="storage-empty-active-confirm">
+        Cancel the active downloads in this folder
+      </label>
+    </div>
+
+    <label class="check">
+      <input type="checkbox" id="storage-empty-confirm">
+      I understand this permanently deletes every file in the folder
+    </label>
+    <p class="hint" id="storage-empty-status" role="status"></p>
+  </div>
+  <div class="dialog-foot">
+    <span class="spacer"></span>
+    <button class="btn btn-ghost" type="button" data-close>Cancel</button>
+    <button class="btn btn-danger" id="storage-empty-submit" type="button" disabled>
+      Empty folder
+    </button>
+  </div>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/manager.js') }}"></script>
+<script src="{{ url_for('static', filename='js/storage.js') }}"></script>
+{% endblock %}
